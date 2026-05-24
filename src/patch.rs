@@ -32,6 +32,43 @@ impl FileBuilder {
         }
     }
 
+    fn push_patch_line(&mut self, line: &str) {
+        if apply_file_metadata(self, line) {
+            return;
+        }
+
+        if line.starts_with("@@ ") {
+            self.start_hunk(line);
+            return;
+        }
+
+        self.push_hunk_line(line);
+    }
+
+    fn start_hunk(&mut self, header: &str) {
+        self.finish_hunk();
+        self.current_hunk = Some(HunkBuilder::new(header));
+    }
+
+    fn push_hunk_line(&mut self, line: &str) {
+        let Some(hunk) = self.current_hunk.as_mut() else {
+            return;
+        };
+
+        match parse_hunk_line(line) {
+            HunkLine::Added(content) => {
+                hunk.push_added(content);
+                self.additions += 1;
+            }
+            HunkLine::Removed(content) => {
+                hunk.push_removed(content);
+                self.deletions += 1;
+            }
+            HunkLine::Context(content) => hunk.push_context(content),
+            HunkLine::Meta(content) => hunk.push_meta(content),
+        }
+    }
+
     fn finish(mut self, id: usize) -> DiffFile {
         self.finish_hunk();
 
@@ -141,53 +178,34 @@ struct HunkRange {
     new_lines: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineRange {
+    start: u32,
+    lines: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HunkLine<'a> {
+    Added(&'a str),
+    Removed(&'a str),
+    Context(&'a str),
+    Meta(&'a str),
+}
+
 pub fn parse_unified_diff(input: &str) -> Changeset {
     let mut files = Vec::new();
     let mut current_file: Option<FileBuilder> = None;
 
     for line in input.lines() {
-        if let Some((old_path, new_path)) = parse_diff_git_line(line) {
+        if let Some((old_path, path)) = parse_diff_git_line(line) {
             finish_current_file(&mut files, &mut current_file);
-            current_file = Some(FileBuilder::new(old_path, new_path));
+            current_file = Some(FileBuilder::new(old_path, path));
             continue;
         }
 
-        let Some(file) = current_file.as_mut() else {
-            continue;
-        };
-
-        if apply_file_metadata(file, line) {
-            continue;
+        if let Some(file) = current_file.as_mut() {
+            file.push_patch_line(line);
         }
-
-        if line.starts_with("@@ ") {
-            file.finish_hunk();
-            file.current_hunk = Some(HunkBuilder::new(line));
-            continue;
-        }
-
-        let Some(hunk) = file.current_hunk.as_mut() else {
-            continue;
-        };
-
-        if let Some(content) = line.strip_prefix('+') {
-            hunk.push_added(content);
-            file.additions += 1;
-            continue;
-        }
-
-        if let Some(content) = line.strip_prefix('-') {
-            hunk.push_removed(content);
-            file.deletions += 1;
-            continue;
-        }
-
-        if let Some(content) = line.strip_prefix(' ') {
-            hunk.push_context(content);
-            continue;
-        }
-
-        hunk.push_meta(line);
     }
 
     finish_current_file(&mut files, &mut current_file);
@@ -206,12 +224,12 @@ fn finish_current_file(files: &mut Vec<DiffFile>, current_file: &mut Option<File
 }
 
 fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
-    if line.strip_prefix("new file mode ").is_some() {
+    if line.starts_with("new file mode ") {
         file.status = FileStatus::Added;
         return true;
     }
 
-    if line.strip_prefix("deleted file mode ").is_some() {
+    if line.starts_with("deleted file mode ") {
         file.status = FileStatus::Deleted;
         return true;
     }
@@ -240,7 +258,7 @@ fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
         return true;
     }
 
-    if line.strip_prefix("Binary files ").is_some() {
+    if line.starts_with("Binary files ") {
         file.binary = true;
         return true;
     }
@@ -279,6 +297,8 @@ fn clean_git_path(path: &str) -> String {
     unquoted
         .strip_prefix("a/")
         .or_else(|| unquoted.strip_prefix("b/"))
+        .or_else(|| unquoted.strip_prefix("1/"))
+        .or_else(|| unquoted.strip_prefix("2/"))
         .unwrap_or(unquoted)
         .to_string()
 }
@@ -290,23 +310,43 @@ fn parse_hunk_range(header: &str) -> Option<HunkRange> {
         return None;
     }
 
-    let old_range = parse_one_range(parts.next()?, '-')?;
-    let new_range = parse_one_range(parts.next()?, '+')?;
+    let old_range = parse_line_range(parts.next()?, '-')?;
+    let new_range = parse_line_range(parts.next()?, '+')?;
 
     Some(HunkRange {
-        old_start: old_range.0,
-        old_lines: old_range.1,
-        new_start: new_range.0,
-        new_lines: new_range.1,
+        old_start: old_range.start,
+        old_lines: old_range.lines,
+        new_start: new_range.start,
+        new_lines: new_range.lines,
     })
 }
 
-fn parse_one_range(input: &str, sign: char) -> Option<(u32, u32)> {
+fn parse_line_range(input: &str, sign: char) -> Option<LineRange> {
     let without_sign = input.strip_prefix(sign)?;
     let mut parts = without_sign.split(',');
     let start = parts.next()?.parse().ok()?;
-    let lines = parts.next().map_or(Some(1), |value| value.parse().ok())?;
-    Some((start, lines))
+    let lines = match parts.next() {
+        Some(value) => value.parse().ok()?,
+        None => 1,
+    };
+
+    Some(LineRange { start, lines })
+}
+
+fn parse_hunk_line(line: &str) -> HunkLine<'_> {
+    if let Some(content) = line.strip_prefix('+') {
+        return HunkLine::Added(content);
+    }
+
+    if let Some(content) = line.strip_prefix('-') {
+        return HunkLine::Removed(content);
+    }
+
+    if let Some(content) = line.strip_prefix(' ') {
+        return HunkLine::Context(content);
+    }
+
+    HunkLine::Meta(line)
 }
 
 #[cfg(test)]

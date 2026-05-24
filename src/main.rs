@@ -2,6 +2,7 @@ mod app;
 mod git;
 mod model;
 mod patch;
+mod syntax;
 mod theme;
 mod ui;
 

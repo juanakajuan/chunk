@@ -13,14 +13,25 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 
 use crate::model::{Changeset, DiffFile};
+use crate::theme::SyntaxPalette;
 use crate::ui;
+
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MOUSE_WHEEL_STEP: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusPane {
     Sidebar,
     Diff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WheelDirection {
+    Down,
+    Up,
 }
 
 #[derive(Debug)]
@@ -34,6 +45,15 @@ pub struct App {
     pub sidebar_view_height: usize,
     pub sidebar_area: Option<Rect>,
     pub diff_area: Option<Rect>,
+    pub diff_lines_cache: Option<RenderedDiffLines>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderedDiffLines {
+    pub file_id: String,
+    pub content_width: usize,
+    pub syntax_palette: SyntaxPalette,
+    pub lines: Vec<Line<'static>>,
 }
 
 impl App {
@@ -48,6 +68,7 @@ impl App {
             sidebar_view_height: 1,
             sidebar_area: None,
             diff_area: None,
+            diff_lines_cache: None,
         }
     }
 
@@ -55,24 +76,24 @@ impl App {
         self.changeset.files.get(self.selected_file_index)
     }
 
-    pub fn selected_file_count(&self) -> usize {
+    fn selected_file_line_count(&self) -> usize {
         self.selected_file().map_or(0, DiffFile::line_count)
     }
 
-    pub fn visible_file_count(&self) -> usize {
+    fn file_count(&self) -> usize {
         self.changeset.files.len()
     }
 
     pub fn ensure_scroll_bounds(&mut self) {
         self.diff_scroll = self.diff_scroll.min(self.max_diff_scroll());
+        self.sidebar_scroll = self.sidebar_scroll.min(self.max_sidebar_scroll());
+        self.keep_selected_file_visible();
+    }
 
-        let max_sidebar_scroll = self
-            .visible_file_count()
-            .saturating_sub(self.sidebar_view_height.max(1));
-        self.sidebar_scroll = self.sidebar_scroll.min(max_sidebar_scroll);
-
+    fn keep_selected_file_visible(&mut self) {
         if self.selected_file_index < self.sidebar_scroll {
             self.sidebar_scroll = self.selected_file_index;
+            return;
         }
 
         let last_visible_sidebar_index =
@@ -82,6 +103,11 @@ impl App {
                 .selected_file_index
                 .saturating_sub(self.sidebar_view_height.saturating_sub(1));
         }
+    }
+
+    fn max_sidebar_scroll(&self) -> usize {
+        self.file_count()
+            .saturating_sub(self.sidebar_view_height.max(1))
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -104,13 +130,14 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let column = mouse.column;
+        let row = mouse.row;
+
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_left_click(mouse.column, mouse.row)
-            }
-            MouseEventKind::ScrollDown => self.handle_wheel_down(mouse.column, mouse.row),
-            MouseEventKind::ScrollUp => self.handle_wheel_up(mouse.column, mouse.row),
-            MouseEventKind::Moved => self.handle_hover(mouse.column, mouse.row),
+            MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(column, row),
+            MouseEventKind::ScrollDown => self.handle_wheel(column, row, WheelDirection::Down),
+            MouseEventKind::ScrollUp => self.handle_wheel(column, row, WheelDirection::Up),
+            MouseEventKind::Moved => self.handle_hover(column, row),
             _ => {}
         }
 
@@ -137,23 +164,22 @@ impl App {
         }
     }
 
-    fn handle_wheel_down(&mut self, column: u16, row: u16) {
-        if self.is_sidebar_at(column, row) {
-            self.focus = FocusPane::Sidebar;
-            self.select_next_file_by(3);
+    fn handle_wheel(&mut self, column: u16, row: u16, direction: WheelDirection) {
+        self.focus = if self.is_sidebar_at(column, row) {
+            FocusPane::Sidebar
         } else {
-            self.focus = FocusPane::Diff;
-            self.scroll_diff_by(3);
-        }
-    }
+            FocusPane::Diff
+        };
 
-    fn handle_wheel_up(&mut self, column: u16, row: u16) {
-        if self.is_sidebar_at(column, row) {
-            self.focus = FocusPane::Sidebar;
-            self.select_previous_file_by(3);
-        } else {
-            self.focus = FocusPane::Diff;
-            self.scroll_diff_up_by(3);
+        match (self.focus, direction) {
+            (FocusPane::Sidebar, WheelDirection::Down) => {
+                self.select_next_file_by(MOUSE_WHEEL_STEP)
+            }
+            (FocusPane::Sidebar, WheelDirection::Up) => {
+                self.select_previous_file_by(MOUSE_WHEEL_STEP)
+            }
+            (FocusPane::Diff, WheelDirection::Down) => self.scroll_diff_by(MOUSE_WHEEL_STEP),
+            (FocusPane::Diff, WheelDirection::Up) => self.scroll_diff_up_by(MOUSE_WHEEL_STEP),
         }
     }
 
@@ -242,7 +268,7 @@ impl App {
     }
 
     fn max_diff_scroll(&self) -> usize {
-        self.selected_file_count()
+        self.selected_file_line_count()
             .saturating_sub(self.diff_view_height.max(1))
     }
 }
@@ -287,13 +313,15 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key) if !app.handle_key(key) => break,
-                Event::Key(_) => {}
-                Event::Mouse(mouse) => app.handle_mouse(mouse),
-                _ => {}
-            }
+        if !event::poll(EVENT_POLL_INTERVAL)? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) if !app.handle_key(key) => break,
+            Event::Key(_) => {}
+            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            _ => {}
         }
     }
 
