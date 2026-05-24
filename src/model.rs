@@ -27,11 +27,18 @@ impl DiffFile {
     }
 
     pub fn line_count(&self) -> usize {
+        let file_header_rows = 1;
+
         if self.binary || self.hunks.is_empty() {
-            return 1;
+            return file_header_rows + 1;
         }
 
-        self.hunks.iter().map(|hunk| hunk.lines.len() + 1).sum()
+        file_header_rows
+            + self
+                .hunks
+                .iter()
+                .map(|hunk| hunk.lines.len() + 1)
+                .sum::<usize>()
     }
 }
 

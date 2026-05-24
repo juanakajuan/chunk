@@ -62,12 +62,7 @@ struct HunkBuilder {
 
 impl HunkBuilder {
     fn new(header: &str) -> Self {
-        let range = parse_hunk_range(header).unwrap_or(HunkRange {
-            old_start: 0,
-            old_lines: 0,
-            new_start: 0,
-            new_lines: 0,
-        });
+        let range = parse_hunk_range(header).unwrap_or_default();
 
         Self {
             header: header.to_string(),
@@ -82,41 +77,46 @@ impl HunkBuilder {
     }
 
     fn push_added(&mut self, content: &str) {
-        self.lines.push(DiffLine {
-            kind: DiffLineKind::Added,
-            old_line: None,
-            new_line: Some(self.next_new_line),
-            content: content.to_string(),
-        });
+        self.push_line(DiffLineKind::Added, None, Some(self.next_new_line), content);
         self.next_new_line += 1;
     }
 
     fn push_removed(&mut self, content: &str) {
-        self.lines.push(DiffLine {
-            kind: DiffLineKind::Removed,
-            old_line: Some(self.next_old_line),
-            new_line: None,
-            content: content.to_string(),
-        });
+        self.push_line(
+            DiffLineKind::Removed,
+            Some(self.next_old_line),
+            None,
+            content,
+        );
         self.next_old_line += 1;
     }
 
     fn push_context(&mut self, content: &str) {
-        self.lines.push(DiffLine {
-            kind: DiffLineKind::Context,
-            old_line: Some(self.next_old_line),
-            new_line: Some(self.next_new_line),
-            content: content.to_string(),
-        });
+        self.push_line(
+            DiffLineKind::Context,
+            Some(self.next_old_line),
+            Some(self.next_new_line),
+            content,
+        );
         self.next_old_line += 1;
         self.next_new_line += 1;
     }
 
     fn push_meta(&mut self, content: &str) {
+        self.push_line(DiffLineKind::Meta, None, None, content);
+    }
+
+    fn push_line(
+        &mut self,
+        kind: DiffLineKind,
+        old_line: Option<u32>,
+        new_line: Option<u32>,
+        content: &str,
+    ) {
         self.lines.push(DiffLine {
-            kind: DiffLineKind::Meta,
-            old_line: None,
-            new_line: None,
+            kind,
+            old_line,
+            new_line,
             content: content.to_string(),
         });
     }
@@ -133,7 +133,7 @@ impl HunkBuilder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct HunkRange {
     old_start: u32,
     old_lines: u32,
@@ -147,10 +147,7 @@ pub fn parse_unified_diff(input: &str) -> Changeset {
 
     for line in input.lines() {
         if let Some((old_path, new_path)) = parse_diff_git_line(line) {
-            if let Some(file) = current_file.take() {
-                files.push(file.finish(files.len()));
-            }
-
+            finish_current_file(&mut files, &mut current_file);
             current_file = Some(FileBuilder::new(old_path, new_path));
             continue;
         }
@@ -159,58 +156,7 @@ pub fn parse_unified_diff(input: &str) -> Changeset {
             continue;
         };
 
-        if line.starts_with("new file mode ") {
-            file.status = FileStatus::Added;
-            continue;
-        }
-
-        if line.starts_with("deleted file mode ") {
-            file.status = FileStatus::Deleted;
-            continue;
-        }
-
-        if line.starts_with("copy from ") {
-            file.status = FileStatus::Copied;
-            file.old_path = strip_prefix_value(line, "copy from ");
-            continue;
-        }
-
-        if line.starts_with("copy to ") {
-            file.status = FileStatus::Copied;
-            file.path = strip_prefix_value(line, "copy to ");
-            continue;
-        }
-
-        if line.starts_with("rename from ") {
-            file.status = FileStatus::Renamed;
-            file.old_path = strip_prefix_value(line, "rename from ");
-            continue;
-        }
-
-        if line.starts_with("rename to ") {
-            file.status = FileStatus::Renamed;
-            file.path = strip_prefix_value(line, "rename to ");
-            continue;
-        }
-
-        if line.starts_with("Binary files ") {
-            file.binary = true;
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("--- ") {
-            let path = clean_git_path(path);
-            if path != "/dev/null" {
-                file.old_path = path;
-            }
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("+++ ") {
-            let path = clean_git_path(path);
-            if path != "/dev/null" {
-                file.path = path;
-            }
+        if apply_file_metadata(file, line) {
             continue;
         }
 
@@ -244,14 +190,78 @@ pub fn parse_unified_diff(input: &str) -> Changeset {
         hunk.push_meta(line);
     }
 
-    if let Some(file) = current_file.take() {
-        files.push(file.finish(files.len()));
-    }
+    finish_current_file(&mut files, &mut current_file);
 
     Changeset {
         title: String::new(),
         source_label: String::new(),
         files,
+    }
+}
+
+fn finish_current_file(files: &mut Vec<DiffFile>, current_file: &mut Option<FileBuilder>) {
+    if let Some(file) = current_file.take() {
+        files.push(file.finish(files.len()));
+    }
+}
+
+fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
+    if line.strip_prefix("new file mode ").is_some() {
+        file.status = FileStatus::Added;
+        return true;
+    }
+
+    if line.strip_prefix("deleted file mode ").is_some() {
+        file.status = FileStatus::Deleted;
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix("copy from ") {
+        file.status = FileStatus::Copied;
+        file.old_path = path.to_string();
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix("copy to ") {
+        file.status = FileStatus::Copied;
+        file.path = path.to_string();
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix("rename from ") {
+        file.status = FileStatus::Renamed;
+        file.old_path = path.to_string();
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix("rename to ") {
+        file.status = FileStatus::Renamed;
+        file.path = path.to_string();
+        return true;
+    }
+
+    if line.strip_prefix("Binary files ").is_some() {
+        file.binary = true;
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix("--- ") {
+        update_path_unless_dev_null(&mut file.old_path, path);
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix("+++ ") {
+        update_path_unless_dev_null(&mut file.path, path);
+        return true;
+    }
+
+    false
+}
+
+fn update_path_unless_dev_null(target: &mut String, path: &str) {
+    let path = clean_git_path(path);
+    if path != "/dev/null" {
+        *target = path;
     }
 }
 
@@ -271,10 +281,6 @@ fn clean_git_path(path: &str) -> String {
         .or_else(|| unquoted.strip_prefix("b/"))
         .unwrap_or(unquoted)
         .to_string()
-}
-
-fn strip_prefix_value(line: &str, prefix: &str) -> String {
-    line.strip_prefix(prefix).unwrap_or(line).to_string()
 }
 
 fn parse_hunk_range(header: &str) -> Option<HunkRange> {
