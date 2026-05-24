@@ -12,6 +12,7 @@ use crate::theme::Theme;
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
 const PANE_BORDER_WIDTH: u16 = 2;
+const DIFF_GUTTER_WIDTH: usize = 11;
 const RAIL_MARKER: &str = "▌";
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
 const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
@@ -26,8 +27,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
 fn active_theme() -> Theme {
     match option_env!("CHUNK_THEME") {
-        Some("matte-box") => Theme::matte_box(),
-        _ => Theme::github_dark(),
+        Some("github-dark") => Theme::github_dark(),
+        _ => Theme::matte_box(),
     }
 }
 
@@ -153,15 +154,24 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
 }
 
 fn render_diff_lines(file: &DiffFile, content_width: usize, theme: Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![render_file_header(file, content_width, theme)];
+    let mut lines = wrap_line(
+        render_file_header(file, content_width, theme),
+        content_width,
+    );
 
     if file.binary {
-        lines.push(muted_line("Binary file changed", theme));
+        lines.extend(wrap_line(
+            muted_line("Binary file changed", theme),
+            content_width,
+        ));
         return lines;
     }
 
     if file.hunks.is_empty() {
-        lines.push(muted_line("File changed without textual hunks", theme));
+        lines.extend(wrap_line(
+            muted_line("File changed without textual hunks", theme),
+            content_width,
+        ));
         return lines;
     }
 
@@ -174,6 +184,7 @@ fn render_diff_lines(file: &DiffFile, content_width: usize, theme: Theme) -> Vec
             hunk,
             &mut old_highlighter,
             &mut new_highlighter,
+            content_width,
             theme,
         );
     }
@@ -186,18 +197,20 @@ fn push_hunk_lines(
     hunk: &DiffHunk,
     old_highlighter: &mut SyntaxHighlighter,
     new_highlighter: &mut SyntaxHighlighter,
+    content_width: usize,
     theme: Theme,
 ) {
-    lines.push(hunk_header_line(&hunk.header, theme));
+    lines.extend(wrap_line(
+        hunk_header_line(&hunk.header, theme),
+        content_width,
+    ));
 
     for line in &hunk.lines {
-        lines.push(diff_line(
-            line.kind,
-            line.old_line,
-            line.new_line,
-            &line.content,
+        lines.extend(diff_line(
+            line,
             old_highlighter,
             new_highlighter,
+            content_width,
             theme,
         ));
     }
@@ -221,6 +234,8 @@ fn render_selected_diff_lines(
             lines: render_diff_lines(&file, content_width, theme),
         });
     }
+
+    app.ensure_scroll_bounds();
 
     match app.diff_lines_cache.as_ref() {
         Some(cache) => visible_diff_lines(&cache.lines, app.diff_scroll, visible_height),
@@ -306,17 +321,63 @@ fn hunk_header_line(header: &str, theme: Theme) -> Line<'static> {
 }
 
 fn diff_line(
-    kind: DiffLineKind,
-    old_line: Option<u32>,
-    new_line: Option<u32>,
-    content: &str,
+    line: &crate::model::DiffLine,
     old_highlighter: &mut SyntaxHighlighter,
     new_highlighter: &mut SyntaxHighlighter,
+    content_width: usize,
     theme: Theme,
-) -> Line<'static> {
-    let style = diff_line_style(kind, theme);
+) -> Vec<Line<'static>> {
+    let style = diff_line_style(line.kind, theme);
     let number_style = color_style(theme.line_number_fg, theme.line_number_bg);
-    let mut spans = vec![
+    let content_spans = highlight_diff_content(
+        line.kind,
+        &line.content,
+        style.content,
+        old_highlighter,
+        new_highlighter,
+    );
+
+    wrap_diff_line(
+        line.old_line,
+        line.new_line,
+        content_spans,
+        content_width,
+        style,
+        number_style,
+    )
+}
+
+fn wrap_diff_line(
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    content_spans: Vec<Span<'static>>,
+    content_width: usize,
+    style: DiffLineStyle,
+    number_style: Style,
+) -> Vec<Line<'static>> {
+    let content_rows = wrap_styled_spans(content_spans, diff_content_width(content_width));
+    content_rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut spans = if index == 0 {
+                diff_gutter_spans(old_line, new_line, style, number_style)
+            } else {
+                continuation_gutter_spans(style, number_style)
+            };
+            spans.extend(row);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn diff_gutter_spans(
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    style: DiffLineStyle,
+    number_style: Style,
+) -> Vec<Span<'static>> {
+    vec![
         Span::styled(RAIL_MARKER, style.rail),
         Span::styled(format_line_number(old_line), number_style),
         Span::styled(" ", number_style),
@@ -324,17 +385,19 @@ fn diff_line(
         Span::styled(" ", number_style),
         Span::styled(style.marker, style.content),
         Span::styled(" ", style.content),
-    ];
+    ]
+}
 
-    spans.extend(highlight_diff_content(
-        kind,
-        content,
-        style.content,
-        old_highlighter,
-        new_highlighter,
-    ));
-
-    Line::from(spans)
+fn continuation_gutter_spans(style: DiffLineStyle, number_style: Style) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(RAIL_MARKER, style.rail),
+        Span::styled("   ", number_style),
+        Span::styled(" ", number_style),
+        Span::styled("   ", number_style),
+        Span::styled(" ", number_style),
+        Span::styled(" ", style.content),
+        Span::styled(" ", style.content),
+    ]
 }
 
 fn highlight_diff_content(
@@ -363,6 +426,7 @@ fn highlight_diff_content(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 struct DiffLineStyle {
     marker: &'static str,
     content: Style,
@@ -382,6 +446,118 @@ fn diff_line_style(kind: DiffLineKind, theme: Theme) -> DiffLineStyle {
         content: color_style(text_color, background),
         rail: color_style(rail_color, background),
     }
+}
+
+fn wrap_line(line: Line<'static>, content_width: usize) -> Vec<Line<'static>> {
+    let style = line.style;
+    let alignment = line.alignment;
+    wrap_styled_spans(line.spans, content_width.max(1))
+        .into_iter()
+        .map(|spans| Line {
+            style,
+            alignment,
+            spans,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StyledChar {
+    value: char,
+    style: Style,
+    width: usize,
+}
+
+fn wrap_styled_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    let max_width = max_width.max(1);
+    let chars = styled_chars(spans);
+    if chars.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = wrapped_row_end(&chars, start, max_width);
+        rows.push(chars_to_spans(&chars[start..end]));
+        start = end;
+    }
+
+    rows
+}
+
+fn styled_chars(spans: Vec<Span<'static>>) -> Vec<StyledChar> {
+    spans
+        .into_iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |value| StyledChar {
+                    value,
+                    style: span.style,
+                    width: char_display_width(value),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn wrapped_row_end(chars: &[StyledChar], start: usize, max_width: usize) -> usize {
+    let mut width = 0;
+    let mut index = start;
+    let mut last_break = None;
+
+    while index < chars.len() {
+        let char_width = chars[index].width;
+        if width > 0 && width + char_width > max_width {
+            break;
+        }
+        if width == 0 && char_width > max_width {
+            return index + 1;
+        }
+
+        width += char_width;
+        index += 1;
+
+        if chars[index - 1].value.is_whitespace() {
+            last_break = Some(index);
+        }
+
+        if width >= max_width {
+            break;
+        }
+    }
+
+    if index >= chars.len() {
+        return chars.len();
+    }
+
+    last_break
+        .filter(|break_index| *break_index > start)
+        .unwrap_or(index.max(start + 1))
+}
+
+fn chars_to_spans(chars: &[StyledChar]) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    for character in chars {
+        match spans.last_mut() {
+            Some(span) if span.style == character.style => {
+                span.content.to_mut().push(character.value);
+            }
+            _ => spans.push(Span::styled(character.value.to_string(), character.style)),
+        }
+    }
+
+    spans
+}
+
+fn diff_content_width(content_width: usize) -> usize {
+    content_width.saturating_sub(DIFF_GUTTER_WIDTH).max(1)
+}
+
+fn char_display_width(value: char) -> usize {
+    Span::raw(value.to_string()).width()
 }
 
 fn format_line_number(line: Option<u32>) -> String {
@@ -505,7 +681,7 @@ fn expand_tabs(text: &str) -> String {
 }
 
 fn display_width(text: &str) -> usize {
-    text.chars().count()
+    Span::raw(text.to_string()).width()
 }
 
 fn padding_before_stats(content_width: usize, used_width: usize, stats_width: usize) -> String {
@@ -518,4 +694,122 @@ fn padding_before_stats(content_width: usize, used_width: usize, stats_width: us
 
 fn color_style(foreground: Color, background: Color) -> Style {
     Style::default().fg(foreground).bg(background)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::DiffLine;
+
+    #[test]
+    fn wraps_added_removed_context_and_meta_content() {
+        for kind in [
+            DiffLineKind::Added,
+            DiffLineKind::Removed,
+            DiffLineKind::Context,
+            DiffLineKind::Meta,
+        ] {
+            let file =
+                diff_file_with_line(kind, "alpha beta gamma delta epsilon zeta eta theta iota");
+            let content_width = DIFF_GUTTER_WIDTH + 12;
+            let lines = render_diff_lines(&file, content_width, Theme::github_dark());
+            let diff_rows: Vec<&Line<'_>> = lines
+                .iter()
+                .filter(|line| line_text(line).starts_with(RAIL_MARKER))
+                .collect();
+
+            assert!(diff_rows.len() > 1, "{kind:?} did not wrap");
+            assert!(
+                diff_rows.iter().all(|line| line.width() <= content_width),
+                "{kind:?} rendered wider than the diff pane"
+            );
+        }
+    }
+
+    #[test]
+    fn continuation_rows_align_under_diff_content() {
+        let file = diff_file_with_line(
+            DiffLineKind::Added,
+            "alpha beta gamma delta epsilon zeta eta theta iota",
+        );
+        let content_width = DIFF_GUTTER_WIDTH + 12;
+        let lines = render_diff_lines(&file, content_width, Theme::github_dark());
+        let diff_rows: Vec<&Line<'_>> = lines
+            .iter()
+            .filter(|line| line_text(line).starts_with(RAIL_MARKER))
+            .collect();
+
+        let first_prefix = line_prefix(diff_rows[0], DIFF_GUTTER_WIDTH);
+        assert!(first_prefix.contains('+'));
+
+        let continuation_prefix = line_prefix(diff_rows[1], DIFF_GUTTER_WIDTH);
+        assert_eq!(
+            continuation_prefix,
+            format!("{RAIL_MARKER}{}", " ".repeat(DIFF_GUTTER_WIDTH - 1))
+        );
+
+        let continuation_content = line_suffix(diff_rows[1], DIFF_GUTTER_WIDTH);
+        assert!(!continuation_content.is_empty());
+        assert!(!continuation_content.starts_with('+'));
+    }
+
+    #[test]
+    fn wrapped_spans_preserve_styles_across_rows() {
+        let red = Style::default().fg(Color::Red);
+        let blue = Style::default().fg(Color::Blue);
+        let rows = wrap_styled_spans(
+            vec![Span::styled("abcdef", red), Span::styled("gh", blue)],
+            4,
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(spans_text(&rows[0]), "abcd");
+        assert_eq!(spans_text(&rows[1]), "efgh");
+        assert_eq!(rows[1][0].style, red);
+        assert_eq!(rows[1][1].style, blue);
+    }
+
+    fn diff_file_with_line(kind: DiffLineKind, content: &str) -> DiffFile {
+        DiffFile {
+            id: "0".to_string(),
+            old_path: "sample.unknown".to_string(),
+            path: "sample.unknown".to_string(),
+            status: FileStatus::Modified,
+            additions: usize::from(matches!(kind, DiffLineKind::Added)),
+            deletions: usize::from(matches!(kind, DiffLineKind::Removed)),
+            hunks: vec![DiffHunk {
+                header: "@@ -1 +1 @@".to_string(),
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![DiffLine {
+                    kind,
+                    old_line: (!matches!(kind, DiffLineKind::Added)).then_some(1),
+                    new_line: (!matches!(kind, DiffLineKind::Removed)).then_some(1),
+                    content: content.to_string(),
+                }],
+            }],
+            binary: false,
+        }
+    }
+
+    fn line_prefix(line: &Line<'_>, width: usize) -> String {
+        line_text(line).chars().take(width).collect()
+    }
+
+    fn line_suffix(line: &Line<'_>, width: usize) -> String {
+        line_text(line).chars().skip(width).collect()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        spans_text(&line.spans)
+    }
+
+    fn spans_text(spans: &[Span<'_>]) -> String {
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
 }

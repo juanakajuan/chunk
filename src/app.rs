@@ -77,7 +77,14 @@ impl App {
     }
 
     fn selected_file_line_count(&self) -> usize {
-        self.selected_file().map_or(0, DiffFile::line_count)
+        let Some(file) = self.selected_file() else {
+            return 0;
+        };
+
+        match self.diff_lines_cache.as_ref() {
+            Some(cache) if cache.file_id.as_str() == file.id.as_str() => cache.lines.len(),
+            _ => file.line_count(),
+        }
     }
 
     fn file_count(&self) -> usize {
@@ -326,4 +333,57 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus};
+    use crate::theme::Theme;
+
+    #[test]
+    fn diff_scroll_bounds_use_rendered_rows_when_available() {
+        let mut app = App::new(changeset_with_one_file());
+        app.diff_view_height = 3;
+        app.diff_scroll = 99;
+        app.diff_lines_cache = Some(RenderedDiffLines {
+            file_id: "0".to_string(),
+            content_width: 24,
+            syntax_palette: Theme::github_dark().syntax,
+            lines: vec![Line::raw("row"); 8],
+        });
+
+        app.ensure_scroll_bounds();
+
+        assert_eq!(app.diff_scroll, 5);
+    }
+
+    fn changeset_with_one_file() -> Changeset {
+        Changeset {
+            title: String::new(),
+            source_label: String::new(),
+            files: vec![DiffFile {
+                id: "0".to_string(),
+                old_path: "sample.txt".to_string(),
+                path: "sample.txt".to_string(),
+                status: FileStatus::Modified,
+                additions: 0,
+                deletions: 0,
+                hunks: vec![DiffHunk {
+                    header: "@@ -1 +1 @@".to_string(),
+                    old_start: 1,
+                    old_lines: 1,
+                    new_start: 1,
+                    new_lines: 1,
+                    lines: vec![DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_line: Some(1),
+                        new_line: Some(1),
+                        content: "short".to_string(),
+                    }],
+                }],
+                binary: false,
+            }],
+        }
+    }
 }
