@@ -45,6 +45,7 @@ pub struct App {
     pub sidebar_view_height: usize,
     pub sidebar_area: Option<Rect>,
     pub diff_area: Option<Rect>,
+    pub sidebar_row_indices: Vec<usize>,
     pub diff_lines_cache: Option<RenderedDiffLines>,
 }
 
@@ -68,6 +69,7 @@ impl App {
             sidebar_view_height: 1,
             sidebar_area: None,
             diff_area: None,
+            sidebar_row_indices: Vec::new(),
             diff_lines_cache: None,
         }
     }
@@ -113,8 +115,7 @@ impl App {
     }
 
     fn max_sidebar_scroll(&self) -> usize {
-        self.file_count()
-            .saturating_sub(self.sidebar_view_height.max(1))
+        self.file_count().saturating_sub(1)
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -197,8 +198,10 @@ impl App {
         }
 
         let row_offset = row.saturating_sub(area.y + 1) as usize;
-        let index = self.sidebar_scroll + row_offset;
-        (index < self.changeset.files.len()).then_some(index)
+        self.sidebar_row_indices
+            .get(row_offset)
+            .copied()
+            .filter(|index| *index < self.changeset.files.len())
     }
 
     fn is_sidebar_at(&self, column: u16, row: u16) -> bool {

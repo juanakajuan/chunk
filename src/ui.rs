@@ -12,6 +12,7 @@ use crate::theme::Theme;
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
 const PANE_BORDER_WIDTH: u16 = 2;
+const SIDEBAR_GUTTER_WIDTH: usize = 4;
 const DIFF_GUTTER_WIDTH: usize = 11;
 const RAIL_MARKER: &str = "▌";
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
@@ -71,25 +72,38 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme
 }
 
 fn sidebar_lines(
-    app: &App,
+    app: &mut App,
     content_width: usize,
     visible_height: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
+    app.sidebar_row_indices.clear();
+
     if app.changeset.files.is_empty() {
         return vec![muted_line(NO_TRACKED_CHANGES, theme)];
     }
 
-    app.changeset
+    ensure_wrapped_sidebar_selection_visible(app, content_width, visible_height, theme);
+
+    let mut lines = Vec::new();
+    for (index, file) in app
+        .changeset
         .files
         .iter()
         .enumerate()
         .skip(app.sidebar_scroll)
-        .take(visible_height)
-        .map(|(index, file)| {
-            render_file_entry(index, file, app.selected_file_index, content_width, theme)
-        })
-        .collect()
+    {
+        for line in render_file_entry(index, file, app.selected_file_index, content_width, theme) {
+            if lines.len() >= visible_height {
+                return lines;
+            }
+
+            app.sidebar_row_indices.push(index);
+            lines.push(line);
+        }
+    }
+
+    lines
 }
 
 fn render_file_entry(
@@ -98,7 +112,7 @@ fn render_file_entry(
     selected_index: usize,
     content_width: usize,
     theme: Theme,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let selected = index == selected_index;
     let background = if selected {
         theme.selected
@@ -115,20 +129,141 @@ fn render_file_entry(
     let label = sidebar_file_label(file);
     let stats = format_file_stats(file);
     let stats_width = display_width(&stats);
-    let used_width = 4 + display_width(&label) + stats_width;
+    let used_width = SIDEBAR_GUTTER_WIDTH + display_width(&label) + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let rail = if selected { RAIL_MARKER } else { " " };
 
-    let mut spans = vec![
+    let prefix = vec![
         Span::styled(rail, marker_style),
         Span::styled(" ", base),
         Span::styled(file.status.marker().to_string(), status_style),
         Span::styled(" ", base),
-        Span::styled(label, base),
-        Span::styled(padding, base),
     ];
-    push_stat_spans(&mut spans, file, background, theme);
-    Line::from(spans)
+    let mut content = vec![Span::styled(label, base), Span::styled(padding, base)];
+    push_stat_spans(&mut content, file, background, theme);
+
+    if content_width <= SIDEBAR_GUTTER_WIDTH {
+        let mut spans = prefix;
+        spans.extend(content);
+        return wrap_line(Line::from(spans), content_width);
+    }
+
+    wrap_sidebar_content(
+        prefix,
+        continuation_prefix(rail, marker_style, base),
+        content,
+        content_width,
+    )
+}
+
+fn ensure_wrapped_sidebar_selection_visible(
+    app: &mut App,
+    content_width: usize,
+    visible_height: usize,
+    theme: Theme,
+) {
+    let file_count = app.changeset.files.len();
+    if file_count == 0 {
+        app.sidebar_scroll = 0;
+        return;
+    }
+
+    let selected_index = app.selected_file_index.min(file_count - 1);
+    app.sidebar_scroll = app.sidebar_scroll.min(file_count - 1);
+
+    if selected_index < app.sidebar_scroll {
+        app.sidebar_scroll = selected_index;
+        return;
+    }
+
+    let row_counts = sidebar_row_counts(&app.changeset.files, content_width, theme);
+    if !sidebar_selection_visible(
+        &row_counts,
+        app.sidebar_scroll,
+        selected_index,
+        visible_height,
+    ) {
+        app.sidebar_scroll =
+            sidebar_scroll_for_selected(&row_counts, selected_index, visible_height);
+    }
+}
+
+fn sidebar_row_counts(files: &[DiffFile], content_width: usize, theme: Theme) -> Vec<usize> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| render_file_entry(index, file, usize::MAX, content_width, theme).len())
+        .collect()
+}
+
+fn sidebar_selection_visible(
+    row_counts: &[usize],
+    scroll: usize,
+    selected_index: usize,
+    visible_height: usize,
+) -> bool {
+    if selected_index < scroll {
+        return false;
+    }
+
+    let visible_height = visible_height.max(1);
+    let rows_before_selected: usize = row_counts[scroll..selected_index].iter().sum();
+    if rows_before_selected >= visible_height {
+        return false;
+    }
+
+    let selected_rows = row_counts[selected_index];
+    rows_before_selected == 0 || rows_before_selected + selected_rows <= visible_height
+}
+
+fn sidebar_scroll_for_selected(
+    row_counts: &[usize],
+    selected_index: usize,
+    visible_height: usize,
+) -> usize {
+    let visible_height = visible_height.max(1);
+    let mut scroll = selected_index;
+    let mut rows = row_counts[selected_index];
+
+    while scroll > 0 {
+        let previous_rows = row_counts[scroll - 1];
+        if rows + previous_rows > visible_height {
+            break;
+        }
+
+        scroll -= 1;
+        rows += previous_rows;
+    }
+
+    scroll
+}
+
+fn wrap_sidebar_content(
+    first_prefix: Vec<Span<'static>>,
+    continuation_prefix: Vec<Span<'static>>,
+    content: Vec<Span<'static>>,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    wrap_styled_spans(content, content_width.saturating_sub(SIDEBAR_GUTTER_WIDTH))
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut spans = if index == 0 {
+                first_prefix.clone()
+            } else {
+                continuation_prefix.clone()
+            };
+            spans.extend(row);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn continuation_prefix(rail: &str, marker_style: Style, base: Style) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(rail.to_string(), marker_style),
+        Span::styled(" ".repeat(SIDEBAR_GUTTER_WIDTH - 1), base),
+    ]
 }
 
 fn render_divider(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
@@ -487,19 +622,15 @@ fn wrap_styled_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Spa
 }
 
 fn styled_chars(spans: Vec<Span<'static>>) -> Vec<StyledChar> {
-    spans
-        .into_iter()
-        .flat_map(|span| {
-            span.content
-                .chars()
-                .map(move |value| StyledChar {
-                    value,
-                    style: span.style,
-                    width: char_display_width(value),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut chars = Vec::new();
+    for span in spans {
+        chars.extend(span.content.chars().map(|value| StyledChar {
+            value,
+            style: span.style,
+            width: char_display_width(value),
+        }));
+    }
+    chars
 }
 
 fn wrapped_row_end(chars: &[StyledChar], start: usize, max_width: usize) -> usize {
@@ -666,14 +797,12 @@ fn basename(path: &str) -> &str {
 }
 
 fn format_file_stats(file: &DiffFile) -> String {
-    let mut stats = Vec::new();
-    if file.additions > 0 {
-        stats.push(format!("+{}", file.additions));
+    match (file.additions, file.deletions) {
+        (0, 0) => String::new(),
+        (additions, 0) => format!("+{additions}"),
+        (0, deletions) => format!("-{deletions}"),
+        (additions, deletions) => format!("+{additions} -{deletions}"),
     }
-    if file.deletions > 0 {
-        stats.push(format!("-{}", file.deletions));
-    }
-    stats.join(" ")
 }
 
 fn expand_tabs(text: &str) -> String {
@@ -699,7 +828,7 @@ fn color_style(foreground: Color, background: Color) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::DiffLine;
+    use crate::model::{Changeset, DiffLine};
 
     #[test]
     fn wraps_added_removed_context_and_meta_content() {
@@ -769,6 +898,38 @@ mod tests {
         assert_eq!(rows[1][1].style, blue);
     }
 
+    #[test]
+    fn sidebar_entries_wrap_to_content_width() {
+        let mut app = app_with_files(
+            vec![diff_file_with_path(
+                "src/components/extremely_long_file_name_component.rs",
+            )],
+            0,
+        );
+        let content_width = 16;
+        let lines = sidebar_lines(&mut app, content_width, 8, Theme::github_dark());
+
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.width() <= content_width));
+        assert_eq!(app.sidebar_row_indices, vec![0; lines.len()]);
+    }
+
+    #[test]
+    fn sidebar_scroll_accounts_for_wrapped_rows() {
+        let mut app = app_with_files(
+            vec![
+                diff_file_with_path("first_extremely_long_file_name.rs"),
+                diff_file_with_path("second_extremely_long_file_name.rs"),
+            ],
+            1,
+        );
+        let lines = sidebar_lines(&mut app, 14, 2, Theme::github_dark());
+
+        assert_eq!(app.sidebar_scroll, 1);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(app.sidebar_row_indices, vec![1, 1]);
+    }
+
     fn diff_file_with_line(kind: DiffLineKind, content: &str) -> DiffFile {
         DiffFile {
             id: "0".to_string(),
@@ -791,6 +952,36 @@ mod tests {
                 }],
             }],
             binary: false,
+        }
+    }
+
+    fn diff_file_with_path(path: &str) -> DiffFile {
+        let mut file = diff_file_with_line(DiffLineKind::Context, "short");
+        file.id = path.to_string();
+        file.old_path = path.to_string();
+        file.path = path.to_string();
+        file.additions = 12;
+        file.deletions = 3;
+        file
+    }
+
+    fn app_with_files(files: Vec<DiffFile>, selected_file_index: usize) -> App {
+        App {
+            changeset: Changeset {
+                title: String::new(),
+                source_label: String::new(),
+                files,
+            },
+            selected_file_index,
+            focus: FocusPane::Sidebar,
+            diff_scroll: 0,
+            sidebar_scroll: 0,
+            diff_view_height: 1,
+            sidebar_view_height: 1,
+            sidebar_area: None,
+            diff_area: None,
+            sidebar_row_indices: Vec::new(),
+            diff_lines_cache: None,
         }
     }
 
