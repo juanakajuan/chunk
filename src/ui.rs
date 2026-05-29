@@ -130,7 +130,7 @@ fn render_file_entry(
     } else {
         base
     };
-    let stage_style = stage_style(file.stage, background, theme);
+    let stage = stage_display(file.stage, background, theme);
     let status_style = color_style(status_color(file.status, theme), background);
     let label = sidebar_file_label(file);
     let stats = format_file_stats(file);
@@ -142,7 +142,7 @@ fn render_file_entry(
     let prefix = vec![
         Span::styled(rail, marker_style),
         Span::styled(" ", base),
-        Span::styled(stage_checkbox(file.stage), stage_style),
+        Span::styled(stage.checkbox, stage.style),
         Span::styled(" ", base),
         Span::styled(file.status.marker().to_string(), status_style),
         Span::styled(" ", base),
@@ -727,20 +727,19 @@ fn changeset_title(app: &App) -> String {
 fn render_file_header(file: &DiffFile, content_width: usize, theme: Theme) -> Line<'static> {
     let label = file_header_label(file);
     let suffix = file_status_suffix(file.status);
-    let stage_suffix = file_stage_suffix(file.stage);
+    let stage = stage_display(file.stage, theme.background, theme);
     let stats = format_file_stats(file);
     let stats_width = display_width(&stats);
     let used_width =
-        display_width(&label) + display_width(suffix) + display_width(stage_suffix) + stats_width;
+        display_width(&label) + display_width(suffix) + display_width(stage.suffix) + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let style = color_style(theme.text, theme.background);
     let muted_style = color_style(theme.muted, theme.background);
-    let stage_style = stage_style(file.stage, theme.background, theme);
 
     let mut spans = vec![
         Span::styled(label, style),
         Span::styled(suffix.to_string(), muted_style),
-        Span::styled(stage_suffix.to_string(), stage_style),
+        Span::styled(stage.suffix.to_string(), stage.style),
         Span::styled(padding, style),
     ];
     push_stat_spans(&mut spans, file, theme.background, theme);
@@ -804,27 +803,29 @@ fn file_status_suffix(status: FileStatus) -> &'static str {
     }
 }
 
-fn file_stage_suffix(stage: FileStage) -> &'static str {
-    match stage {
-        FileStage::Unstaged => " [unstaged]",
-        FileStage::Staged => " [staged]",
-        FileStage::Mixed => " [mixed]",
-    }
+struct StageDisplay {
+    checkbox: &'static str,
+    suffix: &'static str,
+    style: Style,
 }
 
-fn stage_checkbox(stage: FileStage) -> &'static str {
+fn stage_display(stage: FileStage, background: Color, theme: Theme) -> StageDisplay {
     match stage {
-        FileStage::Unstaged => "[ ]",
-        FileStage::Staged => "[x]",
-        FileStage::Mixed => "[-]",
-    }
-}
-
-fn stage_style(stage: FileStage, background: Color, theme: Theme) -> Style {
-    match stage {
-        FileStage::Unstaged => color_style(theme.muted, background),
-        FileStage::Staged => color_style(theme.added, background).add_modifier(Modifier::BOLD),
-        FileStage::Mixed => color_style(theme.accent, background).add_modifier(Modifier::BOLD),
+        FileStage::Unstaged => StageDisplay {
+            checkbox: "[ ]",
+            suffix: " [unstaged]",
+            style: color_style(theme.muted, background),
+        },
+        FileStage::Staged => StageDisplay {
+            checkbox: "[x]",
+            suffix: " [staged]",
+            style: color_style(theme.added, background).add_modifier(Modifier::BOLD),
+        },
+        FileStage::Mixed => StageDisplay {
+            checkbox: "[-]",
+            suffix: " [mixed]",
+            style: color_style(theme.accent, background).add_modifier(Modifier::BOLD),
+        },
     }
 }
 

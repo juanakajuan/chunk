@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Output};
 
 use color_eyre::eyre::{Result, eyre};
 
@@ -17,10 +17,7 @@ pub fn load_worktree_diff() -> Result<Changeset> {
         ])
         .output()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre!("git diff failed: {}", stderr.trim()));
-    }
+    ensure_success(&output, "git diff failed")?;
 
     let untracked_paths = untracked_paths()?;
     let mut patch = String::from_utf8_lossy(&output.stdout).to_string();
@@ -99,10 +96,7 @@ fn untracked_paths() -> Result<Vec<String>> {
         .args(["ls-files", "--others", "--exclude-standard", "-z"])
         .output()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre!("git ls-files failed: {}", stderr.trim()));
-    }
+    ensure_success(&output, "git ls-files failed")?;
 
     Ok(String::from_utf8_lossy(&output.stdout)
         .split('\0')
@@ -136,32 +130,25 @@ fn git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn stage_file(path: &str) -> Result<()> {
-    let output = Command::new("git").args(["add", "--", path]).output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre!("git add failed for {}: {}", path, stderr.trim()));
+fn ensure_success(output: &Output, context: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
     }
 
-    Ok(())
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(eyre!("{}: {}", context, stderr.trim()))
+}
+
+fn stage_file(path: &str) -> Result<()> {
+    let output = Command::new("git").args(["add", "--", path]).output()?;
+    ensure_success(&output, &format!("git add failed for {path}"))
 }
 
 fn unstage_file(path: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["restore", "--staged", "--", path])
         .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre!(
-            "git restore --staged failed for {}: {}",
-            path,
-            stderr.trim()
-        ));
-    }
-
-    Ok(())
+    ensure_success(&output, &format!("git restore --staged failed for {path}"))
 }
 
 fn is_file_staged(path: &str) -> Result<bool> {

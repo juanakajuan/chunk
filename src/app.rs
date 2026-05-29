@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
-use crate::git::toggle_staging_for_file;
+use crate::git::{load_worktree_diff, toggle_staging_for_file};
 use crate::model::{Changeset, DiffFile};
 use crate::theme::SyntaxPalette;
 use crate::ui;
@@ -307,12 +307,11 @@ impl App {
         let path = file.display_path().to_string();
         toggle_staging_for_file(&path)?;
 
-        // Reload the diff after staging changes, preserving a valid file selection
-        // and resetting diff-specific view state for the newly loaded changeset.
-        self.changeset = crate::git::load_worktree_diff()?;
+        let reloaded_changeset = load_worktree_diff()?;
         self.selected_file_index = self
             .selected_file_index
-            .min(self.changeset.files.len().saturating_sub(1));
+            .min(reloaded_changeset.files.len().saturating_sub(1));
+        self.changeset = reloaded_changeset;
         self.diff_scroll = 0;
         self.diff_lines_cache = None;
 
