@@ -15,6 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+use crate::git::toggle_staging_for_file;
 use crate::model::{Changeset, DiffFile};
 use crate::theme::SyntaxPalette;
 use crate::ui;
@@ -118,18 +119,24 @@ impl App {
         self.file_count().saturating_sub(1)
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return false,
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(false),
+
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Left => self.focus = FocusPane::Sidebar,
             KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
-            KeyCode::Down | KeyCode::Char('j') => self.move_down(),
-            KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-            KeyCode::PageDown => self.scroll_diff_by(self.diff_view_height),
-            KeyCode::PageUp => self.scroll_diff_up_by(self.diff_view_height),
+
+            KeyCode::Char('j') => self.move_down(),
+            KeyCode::Char('k') => self.move_up(),
+
             KeyCode::Home | KeyCode::Char('g') => self.diff_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
+
+            KeyCode::Char(' ') => self.toggle_selected_file_staging()?,
+
+            KeyCode::PageDown => self.scroll_diff_by(self.diff_view_height),
+            KeyCode::PageUp => self.scroll_diff_up_by(self.diff_view_height),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll_diff_by(self.diff_view_height)
             }
@@ -140,7 +147,7 @@ impl App {
         }
 
         self.ensure_scroll_bounds();
-        true
+        Ok(true)
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -287,20 +294,30 @@ impl App {
         self.selected_file_line_count()
             .saturating_sub(self.diff_view_height.max(1))
     }
-}
 
-fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
-    column >= area.x
-        && column < area.x.saturating_add(area.width)
-        && row >= area.y
-        && row < area.y.saturating_add(area.height)
-}
+    fn toggle_selected_file_staging(&mut self) -> Result<()> {
+        if self.focus != FocusPane::Sidebar {
+            return Ok(());
+        }
 
-fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
-    column > area.x
-        && column < area.x.saturating_add(area.width).saturating_sub(1)
-        && row > area.y
-        && row < area.y.saturating_add(area.height).saturating_sub(1)
+        let Some(file) = self.selected_file() else {
+            return Ok(());
+        };
+
+        let path = file.display_path().to_string();
+        toggle_staging_for_file(&path)?;
+
+        // Reload the diff after staging changes, preserving a valid file selection
+        // and resetting diff-specific view state for the newly loaded changeset.
+        self.changeset = crate::git::load_worktree_diff()?;
+        self.selected_file_index = self
+            .selected_file_index
+            .min(self.changeset.files.len().saturating_sub(1));
+        self.diff_scroll = 0;
+        self.diff_lines_cache = None;
+
+        Ok(())
+    }
 }
 
 pub fn run(changeset: Changeset) -> Result<()> {
@@ -325,6 +342,20 @@ pub fn run(changeset: Changeset) -> Result<()> {
     result
 }
 
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
+    column > area.x
+        && column < area.x.saturating_add(area.width).saturating_sub(1)
+        && row > area.y
+        && row < area.y.saturating_add(area.height).saturating_sub(1)
+}
+
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -334,7 +365,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
         }
 
         match event::read()? {
-            Event::Key(key) if !app.handle_key(key) => break,
+            Event::Key(key) if !app.handle_key(key)? => break,
             Event::Key(_) => {}
             Event::Mouse(mouse) => app.handle_mouse(mouse),
             _ => {}

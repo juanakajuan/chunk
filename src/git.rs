@@ -7,7 +7,14 @@ use crate::patch::parse_unified_diff;
 
 pub fn load_worktree_diff() -> Result<Changeset> {
     let output = Command::new("git")
-        .args(["diff", "--no-color", "--patch", "--find-renames", "HEAD"])
+        .args([
+            "diff",
+            "--no-color",
+            "--patch",
+            "--find-renames",
+            "--default-prefix",
+            "HEAD",
+        ])
         .output()?;
 
     if !output.status.success() {
@@ -23,12 +30,29 @@ pub fn load_worktree_diff() -> Result<Changeset> {
     Ok(changeset)
 }
 
+pub fn toggle_staging_for_file(path: &str) -> Result<()> {
+    if is_file_staged(path)? {
+        unstage_file(path)?;
+    } else {
+        stage_file(path)?;
+    }
+
+    Ok(())
+}
+
 fn load_untracked_patches() -> Result<String> {
     let mut patches = String::new();
 
     for path in untracked_paths()? {
         let output = Command::new("git")
-            .args(["diff", "--no-color", "--patch", "--no-index", "--"])
+            .args([
+                "diff",
+                "--no-color",
+                "--patch",
+                "--no-index",
+                "--default-prefix",
+                "--",
+            ])
             .arg("/dev/null")
             .arg(&path)
             .output()?;
@@ -91,4 +115,45 @@ fn git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+fn stage_file(path: &str) -> Result<()> {
+    let output = Command::new("git").args(["add", "--", path]).output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("git add failed for {}: {}", path, stderr.trim()));
+    }
+
+    Ok(())
+}
+
+fn unstage_file(path: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["restore", "--staged", "--", path])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!(
+            "git restore --staged failed for {}: {}",
+            path,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_file_staged(path: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["diff", "--cached", "--quiet", "--"])
+        .arg(path)
+        .status()?;
+
+    match status.code() {
+        Some(0) => Ok(false), // no staged diff for path
+        Some(1) => Ok(true),  // staged diff exists
+        _ => Err(eyre!("git diff --cached failed for {path}")),
+    }
 }
