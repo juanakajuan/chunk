@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, MouseButton,
-    MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -130,6 +130,12 @@ impl App {
             KeyCode::PageUp => self.scroll_diff_up_by(self.diff_view_height),
             KeyCode::Home | KeyCode::Char('g') => self.diff_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_diff_by(self.diff_view_height)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_diff_up_by(self.diff_view_height)
+            }
             _ => {}
         }
 
