@@ -407,6 +407,7 @@ mod tests {
                 old_path: "sample.txt".to_string(),
                 path: "sample.txt".to_string(),
                 status: FileStatus::Modified,
+                stage: crate::model::FileStage::Unstaged,
                 additions: 0,
                 deletions: 0,
                 hunks: vec![DiffHunk {

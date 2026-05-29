@@ -1,4 +1,4 @@
-use crate::model::{Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStatus};
+use crate::model::{Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStage, FileStatus};
 
 #[derive(Debug)]
 struct FileBuilder {
@@ -77,6 +77,7 @@ impl FileBuilder {
             old_path: self.old_path,
             path: self.path,
             status: self.status,
+            stage: FileStage::Unstaged,
             additions: self.additions,
             deletions: self.deletions,
             hunks: self.hunks,

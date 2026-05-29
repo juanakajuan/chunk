@@ -2,7 +2,7 @@ use std::process::Command;
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::model::Changeset;
+use crate::model::{Changeset, FileStage};
 use crate::patch::parse_unified_diff;
 
 pub fn load_worktree_diff() -> Result<Changeset> {
@@ -22,9 +22,11 @@ pub fn load_worktree_diff() -> Result<Changeset> {
         return Err(eyre!("git diff failed: {}", stderr.trim()));
     }
 
+    let untracked_paths = untracked_paths()?;
     let mut patch = String::from_utf8_lossy(&output.stdout).to_string();
-    patch.push_str(&load_untracked_patches()?);
+    patch.push_str(&load_untracked_patches(&untracked_paths)?);
     let mut changeset = parse_unified_diff(&patch);
+    annotate_stage_states(&mut changeset, &untracked_paths)?;
     changeset.title = worktree_title();
     changeset.source_label = "git diff HEAD + untracked".to_string();
     Ok(changeset)
@@ -40,10 +42,10 @@ pub fn toggle_staging_for_file(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn load_untracked_patches() -> Result<String> {
+fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
     let mut patches = String::new();
 
-    for path in untracked_paths()? {
+    for path in untracked_paths {
         let output = Command::new("git")
             .args([
                 "diff",
@@ -54,7 +56,7 @@ fn load_untracked_patches() -> Result<String> {
                 "--",
             ])
             .arg("/dev/null")
-            .arg(&path)
+            .arg(path)
             .output()?;
 
         if !output.status.success() && output.status.code() != Some(1) {
@@ -73,6 +75,23 @@ fn load_untracked_patches() -> Result<String> {
     }
 
     Ok(patches)
+}
+
+fn annotate_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) -> Result<()> {
+    for file in &mut changeset.files {
+        let path = file.display_path();
+        let staged = is_file_staged(path)?;
+        let unstaged =
+            is_file_unstaged(path)? || untracked_paths.iter().any(|candidate| candidate == path);
+
+        file.stage = match (staged, unstaged) {
+            (true, true) => FileStage::Mixed,
+            (true, false) => FileStage::Staged,
+            (false, _) => FileStage::Unstaged,
+        };
+    }
+
+    Ok(())
 }
 
 fn untracked_paths() -> Result<Vec<String>> {
@@ -155,5 +174,18 @@ fn is_file_staged(path: &str) -> Result<bool> {
         Some(0) => Ok(false), // no staged diff for path
         Some(1) => Ok(true),  // staged diff exists
         _ => Err(eyre!("git diff --cached failed for {path}")),
+    }
+}
+
+fn is_file_unstaged(path: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["diff", "--quiet", "--"])
+        .arg(path)
+        .status()?;
+
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(eyre!("git diff failed for {path}")),
     }
 }

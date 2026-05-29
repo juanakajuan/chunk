@@ -11,6 +11,7 @@ pub struct DiffFile {
     pub old_path: String,
     pub path: String,
     pub status: FileStatus,
+    pub stage: FileStage,
     pub additions: usize,
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
@@ -61,6 +62,13 @@ impl FileStatus {
             Self::Copied => "C",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStage {
+    Unstaged,
+    Staged,
+    Mixed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
