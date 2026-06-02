@@ -13,7 +13,7 @@ use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::theme::SyntaxPalette;
 
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_no_newlines);
 
 pub struct SyntaxHighlighter {
     engine: Option<SyntaxEngine>,
@@ -106,12 +106,21 @@ fn syntax_name_for_path(path: &str) -> Option<&'static str> {
 
 fn syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
     let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    syntax_for_path_parts(path).or_else(|| syntax_for_known_path(path))
+}
+
+fn syntax_for_path_parts(path: &str) -> Option<&'static SyntaxReference> {
+    let path_value = Path::new(path);
+    let file_name = path_value.file_name().and_then(|value| value.to_str())?;
+    let extension = path_value.extension().and_then(|value| value.to_str());
 
     SYNTAX_SET
-        .find_syntax_for_file(path)
-        .ok()
-        .flatten()
-        .or_else(|| syntax_for_known_path(path))
+        .find_syntax_by_extension(file_name)
+        .or_else(|| extension.and_then(|extension| SYNTAX_SET.find_syntax_by_extension(extension)))
 }
 
 fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
@@ -126,18 +135,71 @@ fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase);
 
+    if file_name == "dockerfile"
+        || file_name.starts_with("dockerfile.")
+        || file_name == "containerfile"
+        || file_name.starts_with("containerfile.")
+    {
+        return find_by_extension_or_name("dockerfile", "Dockerfile");
+    }
+
+    if file_name == "makefile" || file_name.starts_with("makefile.") {
+        return find_by_extension_or_name("makefile", "Makefile");
+    }
+
+    if file_name == ".env" || file_name.starts_with(".env.") {
+        return find_first_syntax(&[("env", "DotENV"), ("sh", "Bash")]);
+    }
+
     match extension.as_deref() {
         Some("rs") => find_by_extension_or_name("rs", "Rust"),
+        Some("vue") => find_first_syntax(&[("vue", "Vue Component"), ("vue", "Vue")]),
+        Some("svelte") => find_by_extension_or_name("svelte", "Svelte"),
         Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
             find_by_extension_or_name("js", "JavaScript")
         }
-        Some("ts") | Some("tsx") | Some("mts") | Some("cts") => {
+        Some("ts") | Some("mts") | Some("cts") => {
             find_first_syntax(&[("ts", "TypeScript"), ("js", "JavaScript")])
         }
-        Some("json") | Some("jsonc") => find_by_extension_or_name("json", "JSON"),
+        Some("tsx") => find_first_syntax(&[
+            ("tsx", "TypescriptReact"),
+            ("ts", "TypeScript"),
+            ("js", "JavaScript"),
+        ]),
+        Some("json") | Some("jsonc") | Some("json5") => find_by_extension_or_name("json", "JSON"),
         Some("md") | Some("markdown") => find_by_extension_or_name("md", "Markdown"),
+        Some("mdx") => find_by_extension_or_name("md", "Markdown"),
+        Some("html") | Some("htm") => find_by_extension_or_name("html", "HTML"),
+        Some("xml") | Some("xhtml") | Some("svg") => find_by_extension_or_name("xml", "XML"),
+        Some("css") => find_by_extension_or_name("css", "CSS"),
+        Some("scss") => find_by_extension_or_name("scss", "SCSS"),
+        Some("sass") => find_first_syntax(&[("sass", "Sass"), ("scss", "SCSS"), ("css", "CSS")]),
+        Some("less") => find_by_extension_or_name("less", "LESS"),
+        Some("styl") | Some("stylus") => find_by_extension_or_name("styl", "Stylus"),
+        Some("yaml") | Some("yml") => find_by_extension_or_name("yaml", "YAML"),
+        Some("graphql") | Some("gql") => find_by_extension_or_name("graphql", "GraphQL"),
+        Some("sql") | Some("psql") | Some("mysql") => find_by_extension_or_name("sql", "SQL"),
         Some("sh") | Some("bash") | Some("zsh") => find_by_extension_or_name("sh", "ShellScript"),
+        Some("fish") => find_by_extension_or_name("fish", "Fish"),
+        Some("ps1") => find_by_extension_or_name("ps1", "PowerShell"),
         Some("toml") => find_toml_syntax(),
+        Some("ini") => find_by_extension_or_name("ini", "INI"),
+        Some("py") | Some("pyw") => find_by_extension_or_name("py", "Python"),
+        Some("go") => find_by_extension_or_name("go", "Go"),
+        Some("java") => find_by_extension_or_name("java", "Java"),
+        Some("kt") | Some("kts") => find_by_extension_or_name("kt", "Kotlin"),
+        Some("swift") => find_by_extension_or_name("swift", "Swift"),
+        Some("php") => find_by_extension_or_name("php", "PHP"),
+        Some("rb") => find_by_extension_or_name("rb", "Ruby"),
+        Some("lua") => find_by_extension_or_name("lua", "Lua"),
+        Some("vim") => find_by_extension_or_name("vim", "VimL"),
+        Some("nix") => find_by_extension_or_name("nix", "Nix"),
+        Some("tf") | Some("tfvars") => find_by_extension_or_name("tf", "Terraform"),
+        Some("c") | Some("h") => find_by_extension_or_name("c", "C"),
+        Some("cc") | Some("cpp") | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") => {
+            find_by_extension_or_name("cpp", "C++")
+        }
+        Some("cs") => find_by_extension_or_name("cs", "C#"),
         _ if file_name == "cargo.lock" => find_toml_syntax(),
         _ => None,
     }
@@ -366,13 +428,48 @@ mod tests {
             "src/main.rs",
             "src/app.js",
             "src/app.ts",
+            "src/app.tsx",
+            "src/App.vue",
+            "src/App.svelte",
+            "src/styles.scss",
+            "src/styles.sass",
+            "src/styles.less",
+            "src/schema.graphql",
             "package.json",
             "README.md",
+            "docker/Dockerfile.dev",
+            "docker/Containerfile",
+            ".env.local",
+            "config/app.yaml",
+            "queries/report.sql",
+            "scripts/task.py",
+            "cmd/server.go",
+            "src/Main.kt",
+            "src/App.swift",
+            "src/plugin.lua",
             "script.sh",
             "Cargo.toml",
         ] {
             assert!(syntax_name_for_path(path).is_some(), "{path}");
         }
+    }
+
+    #[test]
+    fn detects_vue_single_file_components() {
+        assert_eq!(syntax_name_for_path("src/App.vue"), Some("Vue Component"));
+    }
+
+    #[test]
+    fn vue_components_use_theme_token_colors() {
+        let palette = SyntaxPalette::github_dark_on_matte();
+        let base_style = Style::default().fg(Color::White).bg(Color::Black);
+        let mut highlighter = SyntaxHighlighter::for_path("src/App.vue", palette);
+
+        let spans = highlighter.highlight_line("<template>", base_style);
+
+        assert!(highlighter.is_enabled());
+        assert!(spans.iter().any(|span| span.style.fg == Some(palette.tag)));
+        assert!(spans.iter().all(|span| span.style.bg == Some(Color::Black)));
     }
 
     #[test]
