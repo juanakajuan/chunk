@@ -7,18 +7,21 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, FocusPane, RenderedDiffLines};
-use crate::model::{DiffFile, DiffHunk, DiffLineKind, FileStage, FileStatus};
+use crate::model::{DiffFile, DiffHunk, DiffLineKind, DiffSource, FileStage, FileStatus};
 use crate::syntax::SyntaxHighlighter;
 use crate::theme::Theme;
 
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
 const PANE_BORDER_WIDTH: u16 = 2;
-const SIDEBAR_GUTTER_WIDTH: usize = 8;
+const SIDEBAR_STAGE_GUTTER_WIDTH: usize = 8;
+const SIDEBAR_REVIEW_GUTTER_WIDTH: usize = 4;
 const DIFF_GUTTER_WIDTH: usize = 11;
 const RAIL_MARKER: &str = "▌";
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
 const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
+const NO_BRANCH_CHANGES: &str = "No branch changes";
+const NO_PR_DIFF_MESSAGE: &str = "No diff to review. Current branch has no changes against base.";
 
 struct DiffSyntaxHighlighter<'a> {
     highlighter: SyntaxHighlighter,
@@ -73,12 +76,12 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme
     app.sidebar_view_height = inner_height;
     app.ensure_scroll_bounds();
 
-    let block = pane_block(
-        " Files  [space] stage/unstage ",
-        app.focus,
-        FocusPane::Sidebar,
-        theme,
-    );
+    let title = if app.changeset.source.can_stage() {
+        " Files  [space] stage/unstage "
+    } else {
+        " Files "
+    };
+    let block = pane_block(title, app.focus, FocusPane::Sidebar, theme);
     let lines = sidebar_lines(app, content_width, inner_height, theme);
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -93,10 +96,14 @@ fn sidebar_lines(
     app.sidebar_row_indices.clear();
 
     if app.changeset.files.is_empty() {
-        return vec![muted_line(NO_TRACKED_CHANGES, theme)];
+        return vec![muted_line(
+            empty_sidebar_message(&app.changeset.source),
+            theme,
+        )];
     }
 
     ensure_wrapped_sidebar_selection_visible(app, content_width, visible_height, theme);
+    let can_stage = app.changeset.source.can_stage();
 
     let mut lines = Vec::new();
     for (index, file) in app
@@ -106,7 +113,14 @@ fn sidebar_lines(
         .enumerate()
         .skip(app.sidebar_scroll)
     {
-        for line in render_file_entry(index, file, app.selected_file_index, content_width, theme) {
+        for line in render_file_entry(
+            index,
+            file,
+            app.selected_file_index,
+            content_width,
+            can_stage,
+            theme,
+        ) {
             if lines.len() >= visible_height {
                 return lines;
             }
@@ -124,6 +138,7 @@ fn render_file_entry(
     file: &DiffFile,
     selected_index: usize,
     content_width: usize,
+    can_stage: bool,
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let selected = index == selected_index;
@@ -138,27 +153,27 @@ fn render_file_entry(
     } else {
         base
     };
-    let stage = stage_display(file.stage, background, theme);
     let status_style = color_style(status_color(file.status, theme), background);
     let label = sidebar_file_label(file);
     let stats = format_file_stats(file);
     let stats_width = display_width(&stats);
-    let used_width = SIDEBAR_GUTTER_WIDTH + display_width(&label) + stats_width;
+    let gutter_width = sidebar_gutter_width(can_stage);
+    let used_width = gutter_width + display_width(&label) + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let rail = if selected { RAIL_MARKER } else { " " };
 
-    let prefix = vec![
-        Span::styled(rail, marker_style),
-        Span::styled(" ", base),
-        Span::styled(stage.checkbox, stage.style),
-        Span::styled(" ", base),
-        Span::styled(file.status.marker().to_string(), status_style),
-        Span::styled(" ", base),
-    ];
+    let mut prefix = vec![Span::styled(rail, marker_style), Span::styled(" ", base)];
+    if can_stage {
+        let stage = stage_display(file.stage, background, theme);
+        prefix.push(Span::styled(stage.checkbox, stage.style));
+        prefix.push(Span::styled(" ", base));
+    }
+    prefix.push(Span::styled(file.status.marker().to_string(), status_style));
+    prefix.push(Span::styled(" ", base));
     let mut content = vec![Span::styled(label, base), Span::styled(padding, base)];
     push_stat_spans(&mut content, file, background, theme);
 
-    if content_width <= SIDEBAR_GUTTER_WIDTH {
+    if content_width <= gutter_width {
         let mut spans = prefix;
         spans.extend(content);
         return wrap_line(Line::from(spans), content_width);
@@ -166,9 +181,10 @@ fn render_file_entry(
 
     wrap_sidebar_content(
         prefix,
-        continuation_prefix(rail, marker_style, base),
+        continuation_prefix(rail, marker_style, base, gutter_width),
         content,
         content_width,
+        gutter_width,
     )
 }
 
@@ -192,7 +208,12 @@ fn ensure_wrapped_sidebar_selection_visible(
         return;
     }
 
-    let row_counts = sidebar_row_counts(&app.changeset.files, content_width, theme);
+    let row_counts = sidebar_row_counts(
+        &app.changeset.files,
+        content_width,
+        app.changeset.source.can_stage(),
+        theme,
+    );
     if !sidebar_selection_visible(
         &row_counts,
         app.sidebar_scroll,
@@ -204,11 +225,18 @@ fn ensure_wrapped_sidebar_selection_visible(
     }
 }
 
-fn sidebar_row_counts(files: &[DiffFile], content_width: usize, theme: Theme) -> Vec<usize> {
+fn sidebar_row_counts(
+    files: &[DiffFile],
+    content_width: usize,
+    can_stage: bool,
+    theme: Theme,
+) -> Vec<usize> {
     files
         .iter()
         .enumerate()
-        .map(|(index, file)| render_file_entry(index, file, usize::MAX, content_width, theme).len())
+        .map(|(index, file)| {
+            render_file_entry(index, file, usize::MAX, content_width, can_stage, theme).len()
+        })
         .collect()
 }
 
@@ -259,8 +287,9 @@ fn wrap_sidebar_content(
     continuation_prefix: Vec<Span<'static>>,
     content: Vec<Span<'static>>,
     content_width: usize,
+    gutter_width: usize,
 ) -> Vec<Line<'static>> {
-    wrap_styled_spans(content, content_width.saturating_sub(SIDEBAR_GUTTER_WIDTH))
+    wrap_styled_spans(content, content_width.saturating_sub(gutter_width))
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
@@ -275,10 +304,15 @@ fn wrap_sidebar_content(
         .collect()
 }
 
-fn continuation_prefix(rail: &str, marker_style: Style, base: Style) -> Vec<Span<'static>> {
+fn continuation_prefix(
+    rail: &str,
+    marker_style: Style,
+    base: Style,
+    gutter_width: usize,
+) -> Vec<Span<'static>> {
     vec![
         Span::styled(rail.to_string(), marker_style),
-        Span::styled(" ".repeat(SIDEBAR_GUTTER_WIDTH - 1), base),
+        Span::styled(" ".repeat(gutter_width.saturating_sub(1)), base),
     ]
 }
 
@@ -304,9 +338,14 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn render_diff_lines(file: &DiffFile, content_width: usize, theme: Theme) -> Vec<Line<'static>> {
+fn render_diff_lines(
+    file: &DiffFile,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+) -> Vec<Line<'static>> {
     let mut lines = wrap_line(
-        render_file_header(file, content_width, theme),
+        render_file_header(file, content_width, can_stage, theme),
         content_width,
     );
 
@@ -379,7 +418,7 @@ fn render_selected_diff_lines(
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let Some(file) = app.changeset.files.get(app.selected_file_index) else {
-        return vec![muted_line(NO_DIFF_MESSAGE, theme)];
+        return vec![muted_line(no_diff_message(&app.changeset.source), theme)];
     };
 
     if diff_cache_needs_render(app.diff_lines_cache.as_ref(), file, content_width, theme) {
@@ -389,7 +428,12 @@ fn render_selected_diff_lines(
             file_id: file.id.clone(),
             content_width,
             syntax_palette: theme.syntax,
-            lines: render_diff_lines(&file, content_width, theme),
+            lines: render_diff_lines(
+                &file,
+                content_width,
+                theme,
+                app.changeset.source.can_stage(),
+            ),
         });
     }
 
@@ -806,14 +850,21 @@ fn changeset_title(app: &App) -> String {
     format!("{}  +{}  -{}", title, additions, deletions)
 }
 
-fn render_file_header(file: &DiffFile, content_width: usize, theme: Theme) -> Line<'static> {
+fn render_file_header(
+    file: &DiffFile,
+    content_width: usize,
+    can_stage: bool,
+    theme: Theme,
+) -> Line<'static> {
     let label = file_header_label(file);
     let suffix = file_status_suffix(file.status);
-    let stage = stage_display(file.stage, theme.background, theme);
+    let stage = can_stage.then(|| stage_display(file.stage, theme.background, theme));
     let stats = format_file_stats(file);
     let stats_width = display_width(&stats);
-    let used_width =
-        display_width(&label) + display_width(suffix) + display_width(stage.suffix) + stats_width;
+    let stage_width = stage
+        .as_ref()
+        .map_or(0, |stage| display_width(stage.suffix));
+    let used_width = display_width(&label) + display_width(suffix) + stage_width + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let style = color_style(theme.text, theme.background);
     let muted_style = color_style(theme.muted, theme.background);
@@ -821,11 +872,37 @@ fn render_file_header(file: &DiffFile, content_width: usize, theme: Theme) -> Li
     let mut spans = vec![
         Span::styled(label, style),
         Span::styled(suffix.to_string(), muted_style),
-        Span::styled(stage.suffix.to_string(), stage.style),
-        Span::styled(padding, style),
     ];
+    if let Some(stage) = stage {
+        spans.push(Span::styled(stage.suffix.to_string(), stage.style));
+    }
+    spans.push(Span::styled(padding, style));
     push_stat_spans(&mut spans, file, theme.background, theme);
     Line::from(spans)
+}
+
+fn sidebar_gutter_width(can_stage: bool) -> usize {
+    if can_stage {
+        SIDEBAR_STAGE_GUTTER_WIDTH
+    } else {
+        SIDEBAR_REVIEW_GUTTER_WIDTH
+    }
+}
+
+fn empty_sidebar_message(source: &DiffSource) -> &'static str {
+    if source.can_stage() {
+        NO_TRACKED_CHANGES
+    } else {
+        NO_BRANCH_CHANGES
+    }
+}
+
+fn no_diff_message(source: &DiffSource) -> &'static str {
+    if source.can_stage() {
+        NO_DIFF_MESSAGE
+    } else {
+        NO_PR_DIFF_MESSAGE
+    }
 }
 
 fn push_stat_spans(
@@ -947,7 +1024,7 @@ fn color_style(foreground: Color, background: Color) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Changeset, DiffLine, SourceSnapshot};
+    use crate::model::{Changeset, DiffLine, DiffSource, SourceSnapshot};
 
     #[test]
     fn wraps_added_removed_context_and_meta_content() {
@@ -960,7 +1037,7 @@ mod tests {
             let file =
                 diff_file_with_line(kind, "alpha beta gamma delta epsilon zeta eta theta iota");
             let content_width = DIFF_GUTTER_WIDTH + 12;
-            let lines = render_diff_lines(&file, content_width, Theme::github_dark());
+            let lines = render_diff_lines(&file, content_width, Theme::github_dark(), true);
             let diff_rows: Vec<&Line<'_>> = lines
                 .iter()
                 .filter(|line| line_text(line).starts_with(RAIL_MARKER))
@@ -981,7 +1058,7 @@ mod tests {
             "alpha beta gamma delta epsilon zeta eta theta iota",
         );
         let content_width = DIFF_GUTTER_WIDTH + 12;
-        let lines = render_diff_lines(&file, content_width, Theme::github_dark());
+        let lines = render_diff_lines(&file, content_width, Theme::github_dark(), true);
         let diff_rows: Vec<&Line<'_>> = lines
             .iter()
             .filter(|line| line_text(line).starts_with(RAIL_MARKER))
@@ -1033,7 +1110,7 @@ mod tests {
             binary: false,
         };
 
-        let lines = render_diff_lines(&file, DIFF_GUTTER_WIDTH + 80, theme);
+        let lines = render_diff_lines(&file, DIFF_GUTTER_WIDTH + 80, theme, true);
         let added_line = lines
             .iter()
             .find(|line| line_text(line).contains(changed_line))
@@ -1098,6 +1175,18 @@ mod tests {
         assert_eq!(app.sidebar_row_indices, vec![1, 1]);
     }
 
+    #[test]
+    fn review_mode_omits_staging_affordances() {
+        let file = diff_file_with_path("src/main.rs");
+        let theme = Theme::github_dark();
+
+        let sidebar = render_file_entry(0, &file, 0, 80, false, theme);
+        let header = render_file_header(&file, 80, false, theme);
+
+        assert!(!line_text(&sidebar[0]).contains("[ ]"));
+        assert!(!line_text(&header).contains("[unstaged]"));
+    }
+
     fn diff_file_with_line(kind: DiffLineKind, content: &str) -> DiffFile {
         DiffFile {
             id: "0".to_string(),
@@ -1141,6 +1230,7 @@ mod tests {
             changeset: Changeset {
                 title: String::new(),
                 source_label: String::new(),
+                source: DiffSource::Worktree,
                 files,
             },
             selected_file_index,

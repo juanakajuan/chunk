@@ -1,5 +1,6 @@
 use crate::model::{
-    Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStage, FileStatus, SourceSnapshot,
+    Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStage, FileStatus,
+    SourceSnapshot,
 };
 
 #[derive(Debug)]
@@ -218,6 +219,7 @@ pub fn parse_unified_diff(input: &str) -> Changeset {
     Changeset {
         title: String::new(),
         source_label: String::new(),
+        source: DiffSource::Worktree,
         files,
     }
 }

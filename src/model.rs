@@ -4,7 +4,20 @@ use std::sync::Arc;
 pub struct Changeset {
     pub title: String,
     pub source_label: String,
+    pub source: DiffSource,
     pub files: Vec<DiffFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffSource {
+    Worktree,
+    GitRefs { old_ref: String, new_ref: String },
+}
+
+impl DiffSource {
+    pub fn can_stage(&self) -> bool {
+        matches!(self, Self::Worktree)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

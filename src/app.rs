@@ -80,8 +80,9 @@ impl App {
     }
 
     pub fn ensure_selected_file_sources_loaded(&mut self) {
+        let source = &self.changeset.source;
         if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
-            load_source_snapshots(file);
+            load_source_snapshots(file, source);
         }
     }
 
@@ -302,7 +303,7 @@ impl App {
     }
 
     fn toggle_selected_file_staging(&mut self) -> Result<()> {
-        if self.focus != FocusPane::Sidebar {
+        if self.focus != FocusPane::Sidebar || !self.changeset.source.can_stage() {
             return Ok(());
         }
 
@@ -383,7 +384,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
+    use crate::model::{DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStatus, SourceSnapshot};
     use crate::theme::Theme;
 
     #[test]
@@ -407,6 +408,7 @@ mod tests {
         Changeset {
             title: String::new(),
             source_label: String::new(),
+            source: DiffSource::Worktree,
             files: vec![DiffFile {
                 id: "0".to_string(),
                 old_path: "sample.txt".to_string(),

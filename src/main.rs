@@ -21,6 +21,11 @@ struct Cli {
 enum Command {
     /// Review the current Git working tree diff.
     Diff,
+    /// Review the current branch against a base branch, like a pull request.
+    Pr {
+        /// Base branch/ref. Defaults to origin/HEAD, then main, then master.
+        base: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -29,5 +34,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Diff) {
         Command::Diff => app::run(git::load_worktree_diff()?),
+        Command::Pr { base } => app::run(git::load_pr_diff(base.as_deref())?),
     }
 }
