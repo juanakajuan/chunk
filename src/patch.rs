@@ -1,4 +1,6 @@
-use crate::model::{Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStage, FileStatus};
+use crate::model::{
+    Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStage, FileStatus, SourceSnapshot,
+};
 
 #[derive(Debug)]
 struct FileBuilder {
@@ -76,6 +78,8 @@ impl FileBuilder {
             id: id.to_string(),
             old_path: self.old_path,
             path: self.path,
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
             status: self.status,
             stage: FileStage::Unstaged,
             additions: self.additions,
@@ -372,6 +376,8 @@ mod tests {
         let file = &changeset.files[0];
         assert_eq!(file.path, "src/main.rs");
         assert_eq!(file.status, FileStatus::Modified);
+        assert_eq!(file.old_source, SourceSnapshot::Unloaded);
+        assert_eq!(file.new_source, SourceSnapshot::Unloaded);
         assert_eq!(file.additions, 1);
         assert_eq!(file.deletions, 1);
         assert_eq!(file.hunks[0].lines.len(), 4);

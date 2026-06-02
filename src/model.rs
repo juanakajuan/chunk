@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Changeset {
     pub title: String,
@@ -10,6 +12,8 @@ pub struct DiffFile {
     pub id: String,
     pub old_path: String,
     pub path: String,
+    pub old_source: SourceSnapshot,
+    pub new_source: SourceSnapshot,
     pub status: FileStatus,
     pub stage: FileStage,
     pub additions: usize,
@@ -40,6 +44,31 @@ impl DiffFile {
                 .iter()
                 .map(|hunk| hunk.lines.len() + 1)
                 .sum::<usize>()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SourceSnapshot {
+    #[default]
+    Unloaded,
+    Unavailable,
+    Loaded(Arc<str>),
+}
+
+impl SourceSnapshot {
+    pub fn loaded(source: String) -> Self {
+        Self::Loaded(Arc::from(source))
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Loaded(source) => Some(source.as_ref()),
+            Self::Unloaded | Self::Unavailable => None,
+        }
+    }
+
+    pub fn is_unloaded(&self) -> bool {
+        matches!(self, Self::Unloaded)
     }
 }
 

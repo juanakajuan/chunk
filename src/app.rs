@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
-use crate::git::{load_worktree_diff, toggle_staging_for_file};
+use crate::git::{load_source_snapshots, load_worktree_diff, toggle_staging_for_file};
 use crate::model::{Changeset, DiffFile};
 use crate::theme::SyntaxPalette;
 use crate::ui;
@@ -77,6 +77,12 @@ impl App {
 
     pub fn selected_file(&self) -> Option<&DiffFile> {
         self.changeset.files.get(self.selected_file_index)
+    }
+
+    pub fn ensure_selected_file_sources_loaded(&mut self) {
+        if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
+            load_source_snapshots(file);
+        }
     }
 
     fn selected_file_line_count(&self) -> usize {
@@ -377,7 +383,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus};
+    use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
     use crate::theme::Theme;
 
     #[test]
@@ -405,6 +411,8 @@ mod tests {
                 id: "0".to_string(),
                 old_path: "sample.txt".to_string(),
                 path: "sample.txt".to_string(),
+                old_source: SourceSnapshot::Unloaded,
+                new_source: SourceSnapshot::Unloaded,
                 status: FileStatus::Modified,
                 stage: crate::model::FileStage::Unstaged,
                 additions: 0,

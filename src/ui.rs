@@ -1,3 +1,5 @@
+use std::str::Lines;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -17,6 +19,12 @@ const DIFF_GUTTER_WIDTH: usize = 11;
 const RAIL_MARKER: &str = "▌";
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
 const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
+
+struct DiffSyntaxHighlighter<'a> {
+    highlighter: SyntaxHighlighter,
+    source_lines: Option<Lines<'a>>,
+    next_line: u32,
+}
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = active_theme();
@@ -318,8 +326,10 @@ fn render_diff_lines(file: &DiffFile, content_width: usize, theme: Theme) -> Vec
         return lines;
     }
 
-    let mut old_highlighter = SyntaxHighlighter::for_path(diff_old_path(file), theme.syntax);
-    let mut new_highlighter = SyntaxHighlighter::for_path(diff_new_path(file), theme.syntax);
+    let mut old_highlighter =
+        DiffSyntaxHighlighter::new(diff_old_path(file), file.old_source.as_str(), theme);
+    let mut new_highlighter =
+        DiffSyntaxHighlighter::new(diff_new_path(file), file.new_source.as_str(), theme);
 
     for hunk in &file.hunks {
         push_hunk_lines(
@@ -338,11 +348,14 @@ fn render_diff_lines(file: &DiffFile, content_width: usize, theme: Theme) -> Vec
 fn push_hunk_lines(
     lines: &mut Vec<Line<'static>>,
     hunk: &DiffHunk,
-    old_highlighter: &mut SyntaxHighlighter,
-    new_highlighter: &mut SyntaxHighlighter,
+    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
+    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
     content_width: usize,
     theme: Theme,
 ) {
+    old_highlighter.advance_to(hunk.old_start);
+    new_highlighter.advance_to(hunk.new_start);
+
     lines.extend(wrap_line(
         hunk_header_line(&hunk.header, theme),
         content_width,
@@ -365,11 +378,13 @@ fn render_selected_diff_lines(
     visible_height: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let Some(file) = app.changeset.files.get(app.selected_file_index).cloned() else {
+    let Some(file) = app.changeset.files.get(app.selected_file_index) else {
         return vec![muted_line(NO_DIFF_MESSAGE, theme)];
     };
 
-    if diff_cache_needs_render(app.diff_lines_cache.as_ref(), &file, content_width, theme) {
+    if diff_cache_needs_render(app.diff_lines_cache.as_ref(), file, content_width, theme) {
+        app.ensure_selected_file_sources_loaded();
+        let file = app.changeset.files[app.selected_file_index].clone();
         app.diff_lines_cache = Some(RenderedDiffLines {
             file_id: file.id.clone(),
             content_width,
@@ -465,8 +480,8 @@ fn hunk_header_line(header: &str, theme: Theme) -> Line<'static> {
 
 fn diff_line(
     line: &crate::model::DiffLine,
-    old_highlighter: &mut SyntaxHighlighter,
-    new_highlighter: &mut SyntaxHighlighter,
+    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
+    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
@@ -547,25 +562,92 @@ fn highlight_diff_content(
     kind: DiffLineKind,
     content: &str,
     content_style: Style,
-    old_highlighter: &mut SyntaxHighlighter,
-    new_highlighter: &mut SyntaxHighlighter,
+    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
+    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
 ) -> Vec<Span<'static>> {
-    let expanded_content = expand_tabs(content);
-
     match kind {
-        DiffLineKind::Added => new_highlighter.highlight_line(&expanded_content, content_style),
-        DiffLineKind::Removed => old_highlighter.highlight_line(&expanded_content, content_style),
-        DiffLineKind::Context if new_highlighter.is_enabled() => {
-            let spans = new_highlighter.highlight_line(&expanded_content, content_style);
-            old_highlighter.advance_line(&expanded_content);
-            spans
-        }
+        DiffLineKind::Added => new_highlighter.highlight_line(content, content_style),
+        DiffLineKind::Removed => old_highlighter.highlight_line(content, content_style),
         DiffLineKind::Context => {
-            let spans = old_highlighter.highlight_line(&expanded_content, content_style);
-            new_highlighter.advance_line(&expanded_content);
-            spans
+            highlight_context_content(content, content_style, old_highlighter, new_highlighter)
         }
-        DiffLineKind::Meta => vec![Span::styled(expanded_content, content_style)],
+        DiffLineKind::Meta => vec![Span::styled(expand_tabs(content), content_style)],
+    }
+}
+
+fn highlight_context_content(
+    content: &str,
+    content_style: Style,
+    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
+    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
+) -> Vec<Span<'static>> {
+    if new_highlighter.is_enabled() {
+        let spans = new_highlighter.highlight_line(content, content_style);
+        old_highlighter.advance_line(content);
+        return spans;
+    }
+
+    let spans = old_highlighter.highlight_line(content, content_style);
+    new_highlighter.advance_line(content);
+    spans
+}
+
+impl<'a> DiffSyntaxHighlighter<'a> {
+    fn new(path: &str, source: Option<&'a str>, theme: Theme) -> Self {
+        Self {
+            highlighter: SyntaxHighlighter::for_path(path, theme.syntax),
+            source_lines: source.map(str::lines),
+            next_line: 1,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.highlighter.is_enabled()
+    }
+
+    fn advance_to(&mut self, target_line: u32) {
+        while self.next_line < target_line {
+            if !self.advance_source_line() {
+                self.next_line = target_line;
+                return;
+            }
+        }
+    }
+
+    fn highlight_line(&mut self, content: &str, base_style: Style) -> Vec<Span<'static>> {
+        let spans = self
+            .highlighter
+            .highlight_line(&expand_tabs(content), base_style);
+        self.advance_position();
+        spans
+    }
+
+    fn advance_line(&mut self, content: &str) {
+        self.advance_highlighter_line(content);
+        self.advance_position();
+    }
+
+    fn advance_source_line(&mut self) -> bool {
+        let Some(content) = self.take_source_line() else {
+            return false;
+        };
+
+        self.advance_highlighter_line(content);
+        self.next_line += 1;
+        true
+    }
+
+    fn advance_highlighter_line(&mut self, content: &str) {
+        self.highlighter.advance_line(&expand_tabs(content));
+    }
+
+    fn advance_position(&mut self) {
+        let _ = self.take_source_line();
+        self.next_line += 1;
+    }
+
+    fn take_source_line(&mut self) -> Option<&'a str> {
+        self.source_lines.as_mut().and_then(Iterator::next)
     }
 }
 
@@ -865,7 +947,7 @@ fn color_style(foreground: Color, background: Color) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Changeset, DiffLine};
+    use crate::model::{Changeset, DiffLine, SourceSnapshot};
 
     #[test]
     fn wraps_added_removed_context_and_meta_content() {
@@ -917,6 +999,55 @@ mod tests {
         let continuation_content = line_suffix(diff_rows[1], DIFF_GUTTER_WIDTH);
         assert!(!continuation_content.is_empty());
         assert!(!continuation_content.starts_with('+'));
+    }
+
+    #[test]
+    fn vue_hunks_use_source_context_before_the_hunk() {
+        let theme = Theme::github_dark();
+        let changed_line = "const getCurrentCursorPosition = () =>";
+        let file = DiffFile {
+            id: "0".to_string(),
+            old_path: "src/App.vue".to_string(),
+            path: "src/App.vue".to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::loaded(
+                "<template>\n</template>\n<script setup lang=\"ts\">\n".to_string(),
+            ),
+            status: FileStatus::Modified,
+            stage: FileStage::Unstaged,
+            additions: 1,
+            deletions: 0,
+            hunks: vec![DiffHunk {
+                header: "@@ -4 +4 @@".to_string(),
+                old_start: 4,
+                old_lines: 0,
+                new_start: 4,
+                new_lines: 1,
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Added,
+                    old_line: None,
+                    new_line: Some(4),
+                    content: changed_line.to_string(),
+                }],
+            }],
+            binary: false,
+        };
+
+        let lines = render_diff_lines(&file, DIFF_GUTTER_WIDTH + 80, theme);
+        let added_line = lines
+            .iter()
+            .find(|line| line_text(line).contains(changed_line))
+            .expect("changed Vue script line should render");
+
+        assert!(
+            added_line
+                .spans
+                .iter()
+                .any(|span| span.content.contains("const")
+                    && span.style.fg == Some(theme.syntax.keyword)),
+            "{:?}",
+            added_line.spans
+        );
     }
 
     #[test]
@@ -972,6 +1103,8 @@ mod tests {
             id: "0".to_string(),
             old_path: "sample.unknown".to_string(),
             path: "sample.unknown".to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
             status: FileStatus::Modified,
             stage: FileStage::Unstaged,
             additions: usize::from(matches!(kind, DiffLineKind::Added)),
