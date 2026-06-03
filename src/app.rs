@@ -57,6 +57,8 @@ pub struct App {
     pub selected_file_index: usize,
     /// Pane receiving keyboard and mouse wheel actions.
     pub focus: FocusPane,
+    /// Whether the files sidebar is visible in the current session.
+    pub files_panel_visible: bool,
     /// First rendered diff row visible in the diff pane.
     pub diff_scroll: usize,
     /// First file index considered for sidebar rendering.
@@ -94,6 +96,7 @@ impl App {
             live_error: None,
             selected_file_index: 0,
             focus: FocusPane::Sidebar,
+            files_panel_visible: true,
             diff_scroll: 0,
             sidebar_scroll: 0,
             diff_view_height: 1,
@@ -191,7 +194,8 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(false),
 
             KeyCode::Tab => self.toggle_focus(),
-            KeyCode::Left => self.focus = FocusPane::Sidebar,
+            KeyCode::Char('f') => self.toggle_files_panel(),
+            KeyCode::Left if self.files_panel_visible => self.focus = FocusPane::Sidebar,
             KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
 
             KeyCode::Char('j') => self.move_down(),
@@ -295,10 +299,24 @@ impl App {
     }
 
     fn toggle_focus(&mut self) {
+        if !self.files_panel_visible {
+            self.focus = FocusPane::Diff;
+            return;
+        }
+
         self.focus = match self.focus {
             FocusPane::Sidebar => FocusPane::Diff,
             FocusPane::Diff => FocusPane::Sidebar,
         };
+    }
+
+    fn toggle_files_panel(&mut self) {
+        self.files_panel_visible = !self.files_panel_visible;
+        if self.files_panel_visible {
+            self.focus = FocusPane::Sidebar;
+        } else {
+            self.focus = FocusPane::Diff;
+        }
     }
 
     fn move_down(&mut self) {
@@ -649,6 +667,51 @@ mod tests {
             Some("a.txt")
         );
         assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn hiding_files_panel_moves_focus_to_diff() {
+        let mut app = App::new(changeset_with_paths(["a.txt", "b.txt"]));
+        app.selected_file_index = 1;
+        app.sidebar_scroll = 1;
+        app.diff_scroll = 3;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.files_panel_visible);
+        assert_eq!(app.focus, FocusPane::Diff);
+        assert_eq!(app.selected_file_index, 1);
+        assert_eq!(app.sidebar_scroll, 1);
+        assert_eq!(app.diff_scroll, 3);
+    }
+
+    #[test]
+    fn hidden_files_panel_cannot_receive_keyboard_focus() {
+        let mut app = App::new(changeset_with_one_file());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Diff);
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Diff);
+    }
+
+    #[test]
+    fn showing_files_panel_moves_focus_to_sidebar() {
+        let mut app = App::new(changeset_with_one_file());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.files_panel_visible);
+        assert_eq!(app.focus, FocusPane::Sidebar);
     }
 
     #[test]

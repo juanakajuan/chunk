@@ -7,7 +7,7 @@
 use std::str::Lines;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -40,7 +40,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.sidebar_area = None;
     app.diff_area = None;
     frame.render_widget(Block::default().style(theme.base_style()), frame.area());
-    render_body(frame, frame.area(), app, theme);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame.area());
+
+    render_body(frame, chunks[0], app, theme);
+    render_keybind_bar(frame, chunks[1], app, theme);
 }
 
 fn active_theme() -> Theme {
@@ -51,6 +57,12 @@ fn active_theme() -> Theme {
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+    app.sidebar_row_indices.clear();
+    if !app.files_panel_visible {
+        render_diff(frame, area, app, theme);
+        return;
+    }
+
     let (direction, sidebar_size) = body_layout(area);
     let chunks = Layout::default()
         .direction(direction)
@@ -82,11 +94,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme
     app.sidebar_view_height = inner_height;
     app.ensure_scroll_bounds();
 
-    let title = if app.changeset.source.can_stage() {
-        " Files  [space] stage/unstage "
-    } else {
-        " Files "
-    };
+    let title = " Files ";
     let block = pane_block(title, app.focus, FocusPane::Sidebar, theme);
     let lines = sidebar_lines(app, content_width, inner_height, theme);
 
@@ -353,6 +361,36 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     lines.truncate(inner_height);
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let mut hints = vec![files_panel_toggle_label(app).to_string()];
+    if app.files_panel_visible {
+        hints.push("[Tab] switch focus".to_string());
+        if app.changeset.source.can_stage() {
+            hints.push("[Space] stage".to_string());
+        }
+    }
+    hints.push("[j/k] move".to_string());
+    hints.push("[Ctrl-d/u] scroll".to_string());
+    hints.push("[q] quit".to_string());
+
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            hints.join("  |  "),
+            Style::default().fg(theme.muted),
+        ))
+        .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn files_panel_toggle_label(app: &App) -> &'static str {
+    if app.files_panel_visible {
+        "[f] hide files"
+    } else {
+        "[f] show files"
+    }
 }
 
 fn render_diff_lines(
@@ -1267,6 +1305,7 @@ mod tests {
             live_error: None,
             selected_file_index,
             focus: FocusPane::Sidebar,
+            files_panel_visible: true,
             diff_scroll: 0,
             sidebar_scroll: 0,
             diff_view_height: 1,

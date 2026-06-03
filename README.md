@@ -32,6 +32,7 @@ When no base is passed, `pr` tries `origin/HEAD`, then `main`, then `master`.
 
 - `j` / `k`: move down or up in the focused pane
 - `Tab`: switch focus between file list and diff
+- `f`: show or hide the file list
 - `Left`: focus file list
 - `Right` / `Enter`: focus diff
 - `PageDown` / `Ctrl-d`: scroll diff down one page
