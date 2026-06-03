@@ -13,7 +13,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, FocusPane, RenderedDiffLines, SidebarRowCountsCache};
-use crate::model::{DiffFile, DiffHunk, DiffLineKind, DiffSource, FileStage, FileStatus};
+use crate::model::{
+    DiffFile, DiffHunk, DiffLineKind, DiffSource, FileStage, FileStatus, SourceSnapshot,
+};
 use crate::syntax::SyntaxHighlighter;
 use crate::theme::Theme;
 
@@ -461,9 +463,9 @@ fn render_diff_lines_until(
     }
 
     let mut old_highlighter =
-        DiffSyntaxHighlighter::new(diff_old_path(file), file.old_source.as_str(), theme);
+        DiffSyntaxHighlighter::new(diff_old_path(file), &file.old_source, theme);
     let mut new_highlighter =
-        DiffSyntaxHighlighter::new(diff_new_path(file), file.new_source.as_str(), theme);
+        DiffSyntaxHighlighter::new(diff_new_path(file), &file.new_source, theme);
 
     for hunk in &file.hunks {
         if !push_hunk_lines_until(
@@ -794,10 +796,17 @@ fn highlight_context_content(
 }
 
 impl<'a> DiffSyntaxHighlighter<'a> {
-    fn new(path: &str, source: Option<&'a str>, theme: Theme) -> Self {
+    fn new(path: &str, source: &'a SourceSnapshot, theme: Theme) -> Self {
+        let highlighter = match source {
+            SourceSnapshot::Unavailable => SyntaxHighlighter::disabled(),
+            SourceSnapshot::Loaded(_) | SourceSnapshot::Unloaded => {
+                SyntaxHighlighter::for_path(path, theme.syntax)
+            }
+        };
+
         Self {
-            highlighter: SyntaxHighlighter::for_path(path, theme.syntax),
-            source_lines: source.map(str::lines),
+            highlighter,
+            source_lines: source.as_str().map(str::lines),
             next_line: 1,
         }
     }

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::highlighting::{
     Color as SyntectColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
@@ -32,6 +32,10 @@ struct SyntaxEngine {
 }
 
 impl SyntaxHighlighter {
+    pub fn disabled() -> Self {
+        Self { engine: None }
+    }
+
     pub fn for_path(path: &str, palette: SyntaxPalette) -> Self {
         Self {
             engine: syntax_for_path(path).map(|syntax| SyntaxEngine::new(syntax, palette)),
@@ -157,6 +161,26 @@ fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
         return find_first_syntax(&[("env", "DotENV"), ("sh", "Bash")]);
     }
 
+    if matches!(file_name.as_str(), ".gitignore" | ".dockerignore") {
+        return find_by_extension_or_name("gitignore", "Git Ignore");
+    }
+
+    if matches!(file_name.as_str(), ".editorconfig" | "go.mod" | "go.sum") {
+        return find_toml_syntax();
+    }
+
+    if matches!(file_name.as_str(), "package-lock.json" | "flake.lock") {
+        return find_by_extension_or_name("json", "JSON");
+    }
+
+    if file_name == "pnpm-lock.yaml" {
+        return find_by_extension_or_name("yaml", "YAML");
+    }
+
+    if file_name == "yarn.lock" {
+        return find_first_syntax(&[("yaml", "YAML"), ("toml", "TOML")]);
+    }
+
     match extension.as_deref() {
         Some("rs") => find_by_extension_or_name("rs", "Rust"),
         Some("vue") => find_first_syntax(&[("vue", "Vue Component"), ("vue", "Vue")]),
@@ -273,7 +297,7 @@ fn syntax_theme(palette: SyntaxPalette) -> SyntectTheme {
                 "support.type, entity.name.type, entity.name.class",
                 palette.type_name,
             ),
-            theme_item("entity.name.function, support.function", palette.function),
+            bold_theme_item("entity.name.function, support.function", palette.function),
             theme_item(
                 "entity.name.macro, support.macro, meta.macro",
                 palette.macro_call,
@@ -417,7 +441,12 @@ fn xterm_level(value: u8) -> u8 {
 }
 
 fn token_style(style: SyntectStyle, base_style: Style) -> Style {
-    base_style.fg(ratatui_color(style.foreground))
+    let mut token_style = base_style.fg(ratatui_color(style.foreground));
+    if style.font_style.contains(FontStyle::BOLD) {
+        token_style = token_style.add_modifier(Modifier::BOLD);
+    }
+
+    token_style
 }
 
 fn ratatui_color(color: SyntectColor) -> Color {
@@ -455,6 +484,15 @@ mod tests {
             "src/plugin.lua",
             "script.sh",
             "Cargo.toml",
+            "go.mod",
+            "go.sum",
+            ".gitignore",
+            ".dockerignore",
+            ".editorconfig",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "flake.lock",
         ] {
             assert!(syntax_name_for_path(path).is_some(), "{path}");
         }
