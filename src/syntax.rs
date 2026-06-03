@@ -1,3 +1,9 @@
+//! Syntax highlighting adapter.
+//!
+//! This module isolates Syntect setup and scope-to-palette mapping from the UI.
+//! Callers provide file paths and plain line content; the adapter returns
+//! Ratatui spans.
+
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;

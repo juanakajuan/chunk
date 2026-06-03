@@ -1,3 +1,8 @@
+//! Git integration and source loading boundary.
+//!
+//! All shelling out to Git lives here. Other modules work with parsed model
+//! values and should not need to know which Git commands produced them.
+
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -70,7 +75,7 @@ pub fn load_source_snapshots(file: &mut DiffFile, source: &DiffSource) {
 
     match source {
         DiffSource::Worktree => {
-            let root = worktree_root();
+            let root = worktree_root().ok();
             load_worktree_source_snapshots(file, root.as_deref());
         }
         DiffSource::GitRefs { old_ref, new_ref } => {
@@ -87,6 +92,12 @@ pub fn toggle_staging_for_file(path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn worktree_root() -> Result<PathBuf> {
+    git_stdout(["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .ok_or_else(|| eyre!("could not determine Git worktree root"))
 }
 
 fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
@@ -349,10 +360,6 @@ fn read_source_prefix(
 fn stop_child(mut child: Child) {
     let _ = child.kill();
     let _ = child.wait();
-}
-
-fn worktree_root() -> Option<PathBuf> {
-    git_stdout(["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
 fn untracked_paths() -> Result<Vec<String>> {

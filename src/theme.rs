@@ -1,3 +1,5 @@
+//! UI and syntax color palettes.
+
 use ratatui::style::{Color, Style};
 
 const NIGHT_BLACK: Color = Color::Rgb(0x0b, 0x0b, 0x0a);

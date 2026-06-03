@@ -1,3 +1,8 @@
+//! Command-line entry point for `chunk`.
+//!
+//! This module keeps startup small: parse CLI arguments, load the requested
+//! diff source, then hand the resulting changeset to the terminal app.
+
 mod app;
 mod git;
 mod model;

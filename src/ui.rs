@@ -1,3 +1,9 @@
+//! Ratatui rendering for the application.
+//!
+//! This module converts `App` and model state into styled terminal rows. It also
+//! owns wrapping because mouse hit testing and scroll bounds depend on rendered
+//! row counts.
+
 use std::str::Lines;
 
 use ratatui::Frame;
@@ -327,13 +333,24 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     app.diff_area = Some(area);
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    app.diff_view_height = inner_height;
-    app.ensure_scroll_bounds();
 
     let title = format!(" {} ", changeset_title(app));
     let block = pane_block(title, app.focus, FocusPane::Diff, theme);
 
-    let lines = render_selected_diff_lines(app, content_width, inner_height, theme);
+    let mut lines = live_status_lines(app, content_width, theme);
+    let visible_diff_height = inner_height.saturating_sub(lines.len());
+    app.diff_view_height = visible_diff_height.max(1);
+    app.ensure_scroll_bounds();
+
+    if visible_diff_height > 0 {
+        lines.extend(render_selected_diff_lines(
+            app,
+            content_width,
+            visible_diff_height,
+            theme,
+        ));
+    }
+    lines.truncate(inner_height);
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -472,6 +489,20 @@ fn visible_diff_lines(
         .take(visible_height)
         .cloned()
         .collect()
+}
+
+fn live_status_lines(app: &App, content_width: usize, theme: Theme) -> Vec<Line<'static>> {
+    let Some(error) = app.live_error.as_ref() else {
+        return Vec::new();
+    };
+
+    wrap_line(
+        Line::styled(
+            format!("! {error}"),
+            color_style(theme.removed, theme.background),
+        ),
+        content_width,
+    )
 }
 
 fn diff_old_path(file: &DiffFile) -> &str {
@@ -1233,6 +1264,7 @@ mod tests {
                 source: DiffSource::Worktree,
                 files,
             },
+            live_error: None,
             selected_file_index,
             focus: FocusPane::Sidebar,
             diff_scroll: 0,

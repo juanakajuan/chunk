@@ -1,3 +1,9 @@
+//! Unified diff parser.
+//!
+//! The parser intentionally keeps a small surface: it accepts Git-style unified
+//! patch text and returns model values. It does not run Git and does not perform
+//! terminal formatting.
+
 use crate::model::{
     Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStage, FileStatus,
     SourceSnapshot,
