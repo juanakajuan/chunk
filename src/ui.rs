@@ -23,6 +23,7 @@ const PANE_BORDER_WIDTH: u16 = 2;
 const SIDEBAR_STAGE_GUTTER_WIDTH: usize = 8;
 const SIDEBAR_REVIEW_GUTTER_WIDTH: usize = 4;
 const DIFF_GUTTER_WIDTH: usize = 11;
+const DIFF_PREFETCH_ROWS: usize = 120;
 const RAIL_MARKER: &str = "▌";
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
 const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
@@ -421,12 +422,23 @@ fn files_panel_toggle_label(app: &App) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn render_diff_lines(
     file: &DiffFile,
     content_width: usize,
     theme: Theme,
     can_stage: bool,
 ) -> Vec<Line<'static>> {
+    render_diff_lines_until(file, content_width, theme, can_stage, usize::MAX).0
+}
+
+fn render_diff_lines_until(
+    file: &DiffFile,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+    target_rows: usize,
+) -> (Vec<Line<'static>>, bool) {
     let mut lines = wrap_line(
         render_file_header(file, content_width, can_stage, theme),
         content_width,
@@ -437,7 +449,7 @@ fn render_diff_lines(
             muted_line("Binary file changed", theme),
             content_width,
         ));
-        return lines;
+        return (lines, true);
     }
 
     if file.hunks.is_empty() {
@@ -445,7 +457,7 @@ fn render_diff_lines(
             muted_line("File changed without textual hunks", theme),
             content_width,
         ));
-        return lines;
+        return (lines, true);
     }
 
     let mut old_highlighter =
@@ -454,27 +466,31 @@ fn render_diff_lines(
         DiffSyntaxHighlighter::new(diff_new_path(file), file.new_source.as_str(), theme);
 
     for hunk in &file.hunks {
-        push_hunk_lines(
+        if !push_hunk_lines_until(
             &mut lines,
             hunk,
             &mut old_highlighter,
             &mut new_highlighter,
             content_width,
             theme,
-        );
+            target_rows,
+        ) {
+            return (lines, false);
+        }
     }
 
-    lines
+    (lines, true)
 }
 
-fn push_hunk_lines(
+fn push_hunk_lines_until(
     lines: &mut Vec<Line<'static>>,
     hunk: &DiffHunk,
     old_highlighter: &mut DiffSyntaxHighlighter<'_>,
     new_highlighter: &mut DiffSyntaxHighlighter<'_>,
     content_width: usize,
     theme: Theme,
-) {
+    target_rows: usize,
+) -> bool {
     old_highlighter.advance_to(hunk.old_start);
     new_highlighter.advance_to(hunk.new_start);
 
@@ -482,6 +498,9 @@ fn push_hunk_lines(
         hunk_header_line(&hunk.header, theme),
         content_width,
     ));
+    if lines.len() >= target_rows {
+        return false;
+    }
 
     for line in &hunk.lines {
         lines.extend(diff_line(
@@ -491,7 +510,12 @@ fn push_hunk_lines(
             content_width,
             theme,
         ));
+        if lines.len() >= target_rows {
+            return false;
+        }
     }
+
+    true
 }
 
 fn render_selected_diff_lines(
@@ -508,6 +532,11 @@ fn render_selected_diff_lines(
         return vec![muted_line(no_diff_message(&app.changeset.source), theme)];
     };
 
+    let target_rows = app
+        .diff_scroll
+        .saturating_add(visible_height)
+        .saturating_add(DIFF_PREFETCH_ROWS);
+
     let needs_render = {
         let file = &app.changeset.files[selected_file_index];
         diff_cache_needs_render(
@@ -518,18 +547,22 @@ fn render_selected_diff_lines(
             content_width,
             theme,
             can_stage,
+            target_rows,
         )
     };
 
     if needs_render {
         app.ensure_selected_file_sources_loaded();
         let file = app.changeset.files[selected_file_index].clone();
+        let (lines, complete) =
+            render_diff_lines_until(&file, content_width, theme, can_stage, target_rows);
         app.diff_lines_cache[selected_file_index] = Some(RenderedDiffLines {
             file_id: file.id.clone(),
             content_width,
             syntax_palette: theme.syntax,
             can_stage,
-            lines: render_diff_lines(&file, content_width, theme, can_stage),
+            lines,
+            complete,
         });
     }
 
@@ -557,6 +590,7 @@ fn diff_cache_needs_render(
     content_width: usize,
     theme: Theme,
     can_stage: bool,
+    target_rows: usize,
 ) -> bool {
     match cache {
         Some(cache) => {
@@ -564,6 +598,7 @@ fn diff_cache_needs_render(
                 || cache.content_width != content_width
                 || cache.syntax_palette != theme.syntax
                 || cache.can_stage != can_stage
+                || (!cache.complete && cache.lines.len() < target_rows)
         }
         None => true,
     }

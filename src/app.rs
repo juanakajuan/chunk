@@ -89,8 +89,10 @@ pub struct RenderedDiffLines {
     pub syntax_palette: SyntaxPalette,
     /// Whether staging controls were rendered in the cached header.
     pub can_stage: bool,
-    /// Fully rendered, wrapped lines for the selected file.
+    /// Rendered, wrapped lines for the selected file.
     pub lines: Vec<Line<'static>>,
+    /// Whether `lines` contains every rendered row for the file.
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,7 +156,12 @@ impl App {
             .get(self.selected_file_index)
             .and_then(Option::as_ref)
         {
-            Some(cache) if cache.file_id.as_str() == file.id.as_str() => cache.lines.len(),
+            Some(cache) if cache.file_id.as_str() == file.id.as_str() && cache.complete => {
+                cache.lines.len()
+            }
+            Some(cache) if cache.file_id.as_str() == file.id.as_str() => {
+                cache.lines.len().max(file.line_count())
+            }
             _ => file.line_count(),
         }
     }
@@ -650,6 +657,7 @@ mod tests {
             syntax_palette: Theme::github_dark().syntax,
             can_stage: true,
             lines: vec![Line::raw("row"); 8],
+            complete: true,
         })];
 
         app.ensure_scroll_bounds();
