@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{App, FocusPane, RenderedDiffLines};
+use crate::app::{App, FocusPane, RenderedDiffLines, SidebarRowCountsCache};
 use crate::model::{DiffFile, DiffHunk, DiffLineKind, DiffSource, FileStage, FileStatus};
 use crate::syntax::SyntaxHighlighter;
 use crate::theme::Theme;
@@ -116,8 +116,8 @@ fn sidebar_lines(
         )];
     }
 
-    ensure_wrapped_sidebar_selection_visible(app, content_width, visible_height, theme);
     let can_stage = app.changeset.source.can_stage();
+    ensure_wrapped_sidebar_selection_visible(app, content_width, visible_height, can_stage, theme);
 
     let mut lines = Vec::new();
     for (index, file) in app
@@ -206,6 +206,7 @@ fn ensure_wrapped_sidebar_selection_visible(
     app: &mut App,
     content_width: usize,
     visible_height: usize,
+    can_stage: bool,
     theme: Theme,
 ) {
     let file_count = app.changeset.files.len();
@@ -222,21 +223,48 @@ fn ensure_wrapped_sidebar_selection_visible(
         return;
     }
 
-    let row_counts = sidebar_row_counts(
-        &app.changeset.files,
-        content_width,
-        app.changeset.source.can_stage(),
-        theme,
-    );
-    if !sidebar_selection_visible(
-        &row_counts,
-        app.sidebar_scroll,
-        selected_index,
-        visible_height,
-    ) {
-        app.sidebar_scroll =
-            sidebar_scroll_for_selected(&row_counts, selected_index, visible_height);
+    let current_scroll = app.sidebar_scroll;
+    let next_scroll = {
+        let row_counts = cached_sidebar_row_counts(app, content_width, can_stage, theme);
+        if sidebar_selection_visible(row_counts, current_scroll, selected_index, visible_height) {
+            None
+        } else {
+            Some(sidebar_scroll_for_selected(
+                row_counts,
+                selected_index,
+                visible_height,
+            ))
+        }
+    };
+
+    if let Some(scroll) = next_scroll {
+        app.sidebar_scroll = scroll;
     }
+}
+
+fn cached_sidebar_row_counts(
+    app: &mut App,
+    content_width: usize,
+    can_stage: bool,
+    theme: Theme,
+) -> &[usize] {
+    let file_count = app.changeset.files.len();
+    let cache_matches = app
+        .sidebar_row_counts_cache
+        .as_ref()
+        .is_some_and(|cache| cache.matches(content_width, can_stage, file_count));
+
+    if !cache_matches {
+        app.sidebar_row_counts_cache = Some(SidebarRowCountsCache {
+            content_width,
+            can_stage,
+            row_counts: sidebar_row_counts(&app.changeset.files, content_width, can_stage, theme),
+        });
+    }
+
+    app.sidebar_row_counts_cache
+        .as_ref()
+        .map_or(&[], |cache| cache.row_counts.as_slice())
 }
 
 fn sidebar_row_counts(
@@ -472,31 +500,54 @@ fn render_selected_diff_lines(
     visible_height: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let Some(file) = app.changeset.files.get(app.selected_file_index) else {
+    ensure_diff_lines_cache_len(app);
+
+    let selected_file_index = app.selected_file_index;
+    let can_stage = app.changeset.source.can_stage();
+    let Some(_) = app.changeset.files.get(selected_file_index) else {
         return vec![muted_line(no_diff_message(&app.changeset.source), theme)];
     };
 
-    if diff_cache_needs_render(app.diff_lines_cache.as_ref(), file, content_width, theme) {
+    let needs_render = {
+        let file = &app.changeset.files[selected_file_index];
+        diff_cache_needs_render(
+            app.diff_lines_cache
+                .get(selected_file_index)
+                .and_then(Option::as_ref),
+            file,
+            content_width,
+            theme,
+            can_stage,
+        )
+    };
+
+    if needs_render {
         app.ensure_selected_file_sources_loaded();
-        let file = app.changeset.files[app.selected_file_index].clone();
-        app.diff_lines_cache = Some(RenderedDiffLines {
+        let file = app.changeset.files[selected_file_index].clone();
+        app.diff_lines_cache[selected_file_index] = Some(RenderedDiffLines {
             file_id: file.id.clone(),
             content_width,
             syntax_palette: theme.syntax,
-            lines: render_diff_lines(
-                &file,
-                content_width,
-                theme,
-                app.changeset.source.can_stage(),
-            ),
+            can_stage,
+            lines: render_diff_lines(&file, content_width, theme, can_stage),
         });
     }
 
     app.ensure_scroll_bounds();
 
-    match app.diff_lines_cache.as_ref() {
+    match app
+        .diff_lines_cache
+        .get(selected_file_index)
+        .and_then(Option::as_ref)
+    {
         Some(cache) => visible_diff_lines(&cache.lines, app.diff_scroll, visible_height),
         None => Vec::new(),
+    }
+}
+
+fn ensure_diff_lines_cache_len(app: &mut App) {
+    if app.diff_lines_cache.len() != app.changeset.files.len() {
+        app.diff_lines_cache = vec![None; app.changeset.files.len()];
     }
 }
 
@@ -505,12 +556,14 @@ fn diff_cache_needs_render(
     file: &DiffFile,
     content_width: usize,
     theme: Theme,
+    can_stage: bool,
 ) -> bool {
     match cache {
         Some(cache) => {
             cache.file_id != file.id
                 || cache.content_width != content_width
                 || cache.syntax_palette != theme.syntax
+                || cache.can_stage != can_stage
         }
         None => true,
     }
@@ -1295,6 +1348,8 @@ mod tests {
     }
 
     fn app_with_files(files: Vec<DiffFile>, selected_file_index: usize) -> App {
+        let file_count = files.len();
+
         App {
             changeset: Changeset {
                 title: String::new(),
@@ -1313,7 +1368,8 @@ mod tests {
             sidebar_area: None,
             diff_area: None,
             sidebar_row_indices: Vec::new(),
-            diff_lines_cache: None,
+            sidebar_row_counts_cache: None,
+            diff_lines_cache: vec![None; file_count],
         }
     }
 

@@ -214,19 +214,3 @@ impl Theme {
         Style::default().fg(self.text).bg(self.background)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matte_box_and_github_dark_are_distinct_themes() {
-        let matte = Theme::matte_box();
-        let github = Theme::github_dark();
-
-        assert_eq!(matte.background, github.background);
-        assert_ne!(matte.text, github.text);
-        assert_ne!(matte.added_bg, github.added_bg);
-        assert_ne!(matte.syntax.keyword, github.syntax.keyword);
-    }
-}

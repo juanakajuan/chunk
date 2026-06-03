@@ -73,8 +73,10 @@ pub struct App {
     pub diff_area: Option<Rect>,
     /// Rendered sidebar row to file index mapping for click handling.
     pub sidebar_row_indices: Vec<usize>,
-    /// Cached wrapped and highlighted diff lines for the selected file.
-    pub diff_lines_cache: Option<RenderedDiffLines>,
+    /// Cached sidebar row counts for the current sidebar layout.
+    pub sidebar_row_counts_cache: Option<SidebarRowCountsCache>,
+    /// Cached wrapped and highlighted diff lines by file index.
+    pub diff_lines_cache: Vec<Option<RenderedDiffLines>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,12 +87,34 @@ pub struct RenderedDiffLines {
     pub content_width: usize,
     /// Syntax palette used while highlighting cached lines.
     pub syntax_palette: SyntaxPalette,
+    /// Whether staging controls were rendered in the cached header.
+    pub can_stage: bool,
     /// Fully rendered, wrapped lines for the selected file.
     pub lines: Vec<Line<'static>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SidebarRowCountsCache {
+    /// Width used to wrap cached sidebar entries.
+    pub content_width: usize,
+    /// Whether row counts include staging controls.
+    pub can_stage: bool,
+    /// Wrapped row count for each file index.
+    pub row_counts: Vec<usize>,
+}
+
+impl SidebarRowCountsCache {
+    pub fn matches(&self, content_width: usize, can_stage: bool, file_count: usize) -> bool {
+        self.content_width == content_width
+            && self.can_stage == can_stage
+            && self.row_counts.len() == file_count
+    }
+}
+
 impl App {
     fn new(changeset: Changeset) -> Self {
+        let diff_lines_cache = vec![None; changeset.files.len()];
+
         Self {
             changeset,
             live_error: None,
@@ -104,7 +128,8 @@ impl App {
             sidebar_area: None,
             diff_area: None,
             sidebar_row_indices: Vec::new(),
-            diff_lines_cache: None,
+            sidebar_row_counts_cache: None,
+            diff_lines_cache,
         }
     }
 
@@ -124,7 +149,11 @@ impl App {
             return 0;
         };
 
-        match self.diff_lines_cache.as_ref() {
+        match self
+            .diff_lines_cache
+            .get(self.selected_file_index)
+            .and_then(Option::as_ref)
+        {
             Some(cache) if cache.file_id.as_str() == file.id.as_str() => cache.lines.len(),
             _ => file.line_count(),
         }
@@ -185,8 +214,13 @@ impl App {
         } else {
             0
         };
-        self.diff_lines_cache = None;
+        self.clear_render_caches();
         self.ensure_scroll_bounds();
+    }
+
+    fn clear_render_caches(&mut self) {
+        self.sidebar_row_counts_cache = None;
+        self.diff_lines_cache = vec![None; self.changeset.files.len()];
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -610,12 +644,13 @@ mod tests {
         let mut app = App::new(changeset_with_one_file());
         app.diff_view_height = 3;
         app.diff_scroll = 99;
-        app.diff_lines_cache = Some(RenderedDiffLines {
+        app.diff_lines_cache = vec![Some(RenderedDiffLines {
             file_id: "0".to_string(),
             content_width: 24,
             syntax_palette: Theme::github_dark().syntax,
+            can_stage: true,
             lines: vec![Line::raw("row"); 8],
-        });
+        })];
 
         app.ensure_scroll_bounds();
 
