@@ -1,7 +1,7 @@
 //! Rendered viewport state for terminal panes.
 //!
-//! This module owns geometry, row mapping, and render caches. `App` owns review
-//! state; `ui` owns drawing. Mouse hit testing and scroll bounds meet here.
+//! This module owns geometry, row mapping, render caches, and scroll limits.
+//! `App` owns review state; `ui` owns drawing.
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -24,6 +24,22 @@ pub struct RenderedViewport {
     sidebar_row_counts_cache: Option<SidebarRowCountsCache>,
     /// Cached wrapped and highlighted diff lines by file index.
     diff_lines_cache: Vec<Option<RenderedDiffLines>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportScrollInput<'a> {
+    pub diff_scroll: usize,
+    pub sidebar_scroll: usize,
+    pub selected_file_index: usize,
+    pub file_count: usize,
+    pub selected_file_id: Option<&'a str>,
+    pub selected_file_line_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportScrollState {
+    pub diff_scroll: usize,
+    pub sidebar_scroll: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -80,32 +96,24 @@ impl RenderedViewport {
         self.diff_view_height
     }
 
-    pub fn sidebar_view_height(&self) -> usize {
-        self.sidebar_view_height
-    }
-
-    pub fn set_diff_view_height(&mut self, height: usize) {
-        self.diff_view_height = height.max(1);
-    }
-
-    pub fn set_sidebar_view_height(&mut self, height: usize) {
-        self.sidebar_view_height = height.max(1);
-    }
-
-    pub fn set_sidebar_area(&mut self, area: Rect) {
+    pub fn begin_sidebar(&mut self, area: Rect, height: usize) {
         self.sidebar_area = Some(area);
-    }
-
-    pub fn set_diff_area(&mut self, area: Rect) {
-        self.diff_area = Some(area);
-    }
-
-    pub fn clear_sidebar_rows(&mut self) {
+        self.sidebar_view_height = height.max(1);
         self.sidebar_row_indices.clear();
     }
 
-    pub fn push_sidebar_row_index(&mut self, index: usize) {
-        self.sidebar_row_indices.push(index);
+    pub fn begin_diff(&mut self, area: Rect, height: usize) {
+        self.diff_area = Some(area);
+        self.diff_view_height = height.max(1);
+    }
+
+    pub fn begin_sidebar_rows(&mut self) {
+        self.sidebar_row_indices.clear();
+    }
+
+    pub fn record_sidebar_rows(&mut self, index: usize, row_count: usize) {
+        self.sidebar_row_indices
+            .extend(std::iter::repeat_n(index, row_count));
     }
 
     #[cfg(test)]
@@ -136,12 +144,59 @@ impl RenderedViewport {
             .is_some_and(|area| rect_contains(area, column, row))
     }
 
-    pub fn rendered_diff_line_count(
+    pub fn clamped_scrolls(&self, input: ViewportScrollInput<'_>) -> ViewportScrollState {
+        let selected_file_index = input
+            .selected_file_index
+            .min(input.file_count.saturating_sub(1));
+        let diff_scroll = input.diff_scroll.min(self.max_diff_scroll(input));
+        let sidebar_scroll = input.sidebar_scroll.min(input.file_count.saturating_sub(1));
+        let sidebar_scroll =
+            self.sidebar_scroll_with_selected_visible(sidebar_scroll, selected_file_index);
+
+        ViewportScrollState {
+            diff_scroll,
+            sidebar_scroll,
+        }
+    }
+
+    fn max_diff_scroll(&self, input: ViewportScrollInput<'_>) -> usize {
+        self.rendered_diff_line_count(
+            input.selected_file_index,
+            input.selected_file_id,
+            input.selected_file_line_count,
+        )
+        .saturating_sub(self.diff_view_height)
+    }
+
+    fn sidebar_scroll_with_selected_visible(
+        &self,
+        mut sidebar_scroll: usize,
+        selected_file_index: usize,
+    ) -> usize {
+        if selected_file_index < sidebar_scroll {
+            return selected_file_index;
+        }
+
+        let last_visible_sidebar_index =
+            sidebar_scroll + self.sidebar_view_height.saturating_sub(1);
+        if selected_file_index > last_visible_sidebar_index {
+            sidebar_scroll =
+                selected_file_index.saturating_sub(self.sidebar_view_height.saturating_sub(1));
+        }
+
+        sidebar_scroll
+    }
+
+    fn rendered_diff_line_count(
         &self,
         file_index: usize,
-        file_id: &str,
+        file_id: Option<&str>,
         fallback: usize,
     ) -> usize {
+        let Some(file_id) = file_id else {
+            return fallback;
+        };
+
         let Some(cache) = self.diff_lines_cache(file_index) else {
             return fallback;
         };
@@ -304,4 +359,75 @@ fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
         && column < area.x.saturating_add(area.width).saturating_sub(1)
         && row > area.y
         && row < area.y.saturating_add(area.height).saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+
+    #[test]
+    fn clamped_scrolls_use_complete_rendered_diff_count() {
+        let mut viewport = RenderedViewport::new(1);
+        viewport.begin_diff(Rect::default(), 3);
+        viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "file".to_string(),
+                80,
+                Theme::github_dark().syntax,
+                true,
+                vec![Line::raw("row"); 8],
+                true,
+            ),
+        );
+
+        let scrolls = viewport.clamped_scrolls(ViewportScrollInput {
+            diff_scroll: 99,
+            sidebar_scroll: 0,
+            selected_file_index: 0,
+            file_count: 1,
+            selected_file_id: Some("file"),
+            selected_file_line_count: 24,
+        });
+
+        assert_eq!(scrolls.diff_scroll, 5);
+    }
+
+    #[test]
+    fn clamped_scrolls_keep_selected_sidebar_file_visible() {
+        let mut viewport = RenderedViewport::new(6);
+        viewport.begin_sidebar(Rect::default(), 3);
+
+        let scrolls = viewport.clamped_scrolls(ViewportScrollInput {
+            diff_scroll: 0,
+            sidebar_scroll: 0,
+            selected_file_index: 4,
+            file_count: 6,
+            selected_file_id: None,
+            selected_file_line_count: 0,
+        });
+        assert_eq!(scrolls.sidebar_scroll, 2);
+
+        let scrolls = viewport.clamped_scrolls(ViewportScrollInput {
+            diff_scroll: 0,
+            sidebar_scroll: 3,
+            selected_file_index: 1,
+            file_count: 6,
+            selected_file_id: None,
+            selected_file_line_count: 0,
+        });
+        assert_eq!(scrolls.sidebar_scroll, 1);
+    }
+
+    #[test]
+    fn sidebar_row_mapping_records_visible_rows() {
+        let mut viewport = RenderedViewport::new(4);
+        viewport.begin_sidebar(Rect::new(0, 0, 12, 5), 3);
+        viewport.record_sidebar_rows(2, 3);
+
+        assert_eq!(viewport.sidebar_index_at(1, 1, 4), Some(2));
+        assert_eq!(viewport.sidebar_index_at(1, 3, 4), Some(2));
+        assert_eq!(viewport.sidebar_index_at(1, 4, 4), None);
+    }
 }

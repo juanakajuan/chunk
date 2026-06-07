@@ -27,7 +27,7 @@ use crate::git::{
 };
 use crate::model::{Changeset, DiffFile};
 use crate::ui;
-use crate::viewport::RenderedViewport;
+use crate::viewport::{RenderedViewport, ViewportScrollInput};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WORKTREE_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -91,45 +91,22 @@ impl App {
         }
     }
 
-    fn selected_file_line_count(&self) -> usize {
-        let Some(file) = self.selected_file() else {
-            return 0;
-        };
-
-        self.viewport.rendered_diff_line_count(
-            self.selected_file_index,
-            file.id.as_str(),
-            file.line_count(),
-        )
-    }
-
-    fn file_count(&self) -> usize {
-        self.changeset.files.len()
-    }
-
     pub fn ensure_scroll_bounds(&mut self) {
-        self.diff_scroll = self.diff_scroll.min(self.max_diff_scroll());
-        self.sidebar_scroll = self.sidebar_scroll.min(self.max_sidebar_scroll());
-        self.keep_selected_file_visible();
+        let scrolls = self.viewport.clamped_scrolls(self.viewport_scroll_input());
+        self.diff_scroll = scrolls.diff_scroll;
+        self.sidebar_scroll = scrolls.sidebar_scroll;
     }
 
-    fn keep_selected_file_visible(&mut self) {
-        if self.selected_file_index < self.sidebar_scroll {
-            self.sidebar_scroll = self.selected_file_index;
-            return;
+    fn viewport_scroll_input(&self) -> ViewportScrollInput<'_> {
+        let selected_file = self.selected_file();
+        ViewportScrollInput {
+            diff_scroll: self.diff_scroll,
+            sidebar_scroll: self.sidebar_scroll,
+            selected_file_index: self.selected_file_index,
+            file_count: self.changeset.files.len(),
+            selected_file_id: selected_file.map(|file| file.id.as_str()),
+            selected_file_line_count: selected_file.map_or(0, DiffFile::line_count),
         }
-
-        let last_visible_sidebar_index =
-            self.sidebar_scroll + self.viewport.sidebar_view_height().saturating_sub(1);
-        if self.selected_file_index > last_visible_sidebar_index {
-            self.sidebar_scroll = self
-                .selected_file_index
-                .saturating_sub(self.viewport.sidebar_view_height().saturating_sub(1));
-        }
-    }
-
-    fn max_sidebar_scroll(&self) -> usize {
-        self.file_count().saturating_sub(1)
     }
 
     fn reload_worktree(&mut self, preserve_scroll: bool) {
@@ -341,12 +318,7 @@ impl App {
     }
 
     fn scroll_diff_to_bottom(&mut self) {
-        self.diff_scroll = self.max_diff_scroll();
-    }
-
-    fn max_diff_scroll(&self) -> usize {
-        self.selected_file_line_count()
-            .saturating_sub(self.viewport.diff_view_height())
+        self.diff_scroll = usize::MAX;
     }
 
     fn toggle_selected_file_staging(&mut self) -> Result<()> {
@@ -560,12 +532,13 @@ mod tests {
     use crate::model::{DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStatus, SourceSnapshot};
     use crate::theme::Theme;
     use crate::viewport::RenderedDiffLines;
+    use ratatui::layout::Rect;
     use ratatui::text::Line;
 
     #[test]
     fn diff_scroll_bounds_use_rendered_rows_when_available() {
         let mut app = App::new(changeset_with_one_file());
-        app.viewport.set_diff_view_height(3);
+        app.viewport.begin_diff(Rect::default(), 3);
         app.diff_scroll = 99;
         app.viewport.cache_diff_lines(
             0,
@@ -588,7 +561,7 @@ mod tests {
     fn reload_preserves_selected_file_and_scroll_by_path() {
         let mut app = App::new(changeset_with_paths(["a.txt", "b.txt"]));
         app.selected_file_index = 1;
-        app.viewport.set_diff_view_height(3);
+        app.viewport.begin_diff(Rect::default(), 3);
         app.diff_scroll = 4;
 
         app.apply_reloaded_changeset(changeset_with_paths(["b.txt", "a.txt"]), true);
@@ -604,7 +577,7 @@ mod tests {
     #[test]
     fn reload_clamps_scroll_when_selected_file_shrinks() {
         let mut app = App::new(changeset_with_paths(["sample.txt"]));
-        app.viewport.set_diff_view_height(3);
+        app.viewport.begin_diff(Rect::default(), 3);
         app.diff_scroll = 99;
 
         app.apply_reloaded_changeset(changeset_with_short_file("sample.txt"), true);

@@ -60,7 +60,6 @@ fn active_theme() -> Theme {
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    app.viewport.clear_sidebar_rows();
     if !app.files_panel_visible {
         render_diff(frame, area, app, theme);
         return;
@@ -91,10 +90,9 @@ fn body_layout(area: Rect) -> (Direction, u16) {
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    app.viewport.set_sidebar_area(area);
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    app.viewport.set_sidebar_view_height(inner_height);
+    app.viewport.begin_sidebar(area, inner_height);
     app.ensure_scroll_bounds();
 
     let title = " Files ";
@@ -110,7 +108,7 @@ fn sidebar_lines(
     visible_height: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    app.viewport.clear_sidebar_rows();
+    app.viewport.begin_sidebar_rows();
 
     if app.changeset.files.is_empty() {
         return vec![muted_line(
@@ -130,20 +128,25 @@ fn sidebar_lines(
         .enumerate()
         .skip(app.sidebar_scroll)
     {
-        for line in render_file_entry(
+        let entry_lines = render_file_entry(
             index,
             file,
             app.selected_file_index,
             content_width,
             can_stage,
             theme,
-        ) {
-            if lines.len() >= visible_height {
-                return lines;
-            }
+        );
+        let visible_rows = entry_lines
+            .len()
+            .min(visible_height.saturating_sub(lines.len()));
+        if visible_rows == 0 {
+            return lines;
+        }
 
-            app.viewport.push_sidebar_row_index(index);
-            lines.push(line);
+        app.viewport.record_sidebar_rows(index, visible_rows);
+        lines.extend(entry_lines.into_iter().take(visible_rows));
+        if lines.len() >= visible_height {
+            return lines;
         }
     }
 
@@ -354,7 +357,6 @@ fn render_divider(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
 }
 
 fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    app.viewport.set_diff_area(area);
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
 
@@ -363,7 +365,7 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
 
     let mut lines = live_status_lines(app, content_width, theme);
     let visible_diff_height = inner_height.saturating_sub(lines.len());
-    app.viewport.set_diff_view_height(visible_diff_height);
+    app.viewport.begin_diff(area, visible_diff_height);
     app.ensure_scroll_bounds();
 
     if visible_diff_height > 0 {
