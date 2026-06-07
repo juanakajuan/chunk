@@ -116,11 +116,6 @@ impl RenderedViewport {
             .extend(std::iter::repeat_n(index, row_count));
     }
 
-    #[cfg(test)]
-    pub fn sidebar_row_indices(&self) -> &[usize] {
-        &self.sidebar_row_indices
-    }
-
     pub fn sidebar_index_at(&self, column: u16, row: u16, file_count: usize) -> Option<usize> {
         let area = self.sidebar_area?;
         if !rect_inner_contains(area, column, row) {

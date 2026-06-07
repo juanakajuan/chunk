@@ -7,6 +7,7 @@ mod app;
 mod git;
 mod model;
 mod patch;
+mod rows;
 mod runtime;
 mod syntax;
 mod theme;
