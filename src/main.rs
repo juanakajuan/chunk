@@ -10,6 +10,7 @@ mod patch;
 mod syntax;
 mod theme;
 mod ui;
+mod viewport;
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;

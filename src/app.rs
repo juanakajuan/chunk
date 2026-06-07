@@ -1,8 +1,8 @@
 //! Terminal application state and event loop.
 //!
-//! `App` owns selection, focus, scroll positions, live reload errors, and the
-//! rendered diff cache. Rendering is delegated to `ui`; Git mutations are
-//! delegated to `git`.
+//! `App` owns selection, focus, and live reload errors. Rendering is delegated
+//! to `ui`; rendered viewport state is delegated to `viewport`; Git mutations
+//! are delegated to `git`.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -21,15 +21,13 @@ use crossterm::terminal::{
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
-use ratatui::text::Line;
 
 use crate::git::{
     load_source_snapshots, load_worktree_diff, toggle_staging_for_file, worktree_root,
 };
 use crate::model::{Changeset, DiffFile};
-use crate::theme::SyntaxPalette;
 use crate::ui;
+use crate::viewport::RenderedViewport;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WORKTREE_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -63,60 +61,13 @@ pub struct App {
     pub diff_scroll: usize,
     /// First file index considered for sidebar rendering.
     pub sidebar_scroll: usize,
-    /// Current diff viewport height, updated by the renderer.
-    pub diff_view_height: usize,
-    /// Current sidebar viewport height, updated by the renderer.
-    pub sidebar_view_height: usize,
-    /// Last sidebar rectangle, used to map mouse events.
-    pub sidebar_area: Option<Rect>,
-    /// Last diff rectangle, used to map mouse events.
-    pub diff_area: Option<Rect>,
-    /// Rendered sidebar row to file index mapping for click handling.
-    pub sidebar_row_indices: Vec<usize>,
-    /// Cached sidebar row counts for the current sidebar layout.
-    pub sidebar_row_counts_cache: Option<SidebarRowCountsCache>,
-    /// Cached wrapped and highlighted diff lines by file index.
-    pub diff_lines_cache: Vec<Option<RenderedDiffLines>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RenderedDiffLines {
-    /// `DiffFile::id` for the cached file.
-    pub file_id: String,
-    /// Width used to wrap cached lines.
-    pub content_width: usize,
-    /// Syntax palette used while highlighting cached lines.
-    pub syntax_palette: SyntaxPalette,
-    /// Whether staging controls were rendered in the cached header.
-    pub can_stage: bool,
-    /// Rendered, wrapped lines for the selected file.
-    pub lines: Vec<Line<'static>>,
-    /// Whether `lines` contains every rendered row for the file.
-    pub complete: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SidebarRowCountsCache {
-    /// Width used to wrap cached sidebar entries.
-    pub content_width: usize,
-    /// Whether row counts include staging controls.
-    pub can_stage: bool,
-    /// Wrapped row count for each file index.
-    pub row_counts: Vec<usize>,
-}
-
-impl SidebarRowCountsCache {
-    pub fn matches(&self, content_width: usize, can_stage: bool, file_count: usize) -> bool {
-        self.content_width == content_width
-            && self.can_stage == can_stage
-            && self.row_counts.len() == file_count
-    }
+    /// Rendered viewport geometry, row mapping, and render caches.
+    pub viewport: RenderedViewport,
 }
 
 impl App {
-    fn new(changeset: Changeset) -> Self {
-        let diff_lines_cache = vec![None; changeset.files.len()];
-
+    pub(crate) fn new(changeset: Changeset) -> Self {
+        let file_count = changeset.files.len();
         Self {
             changeset,
             live_error: None,
@@ -125,13 +76,7 @@ impl App {
             files_panel_visible: true,
             diff_scroll: 0,
             sidebar_scroll: 0,
-            diff_view_height: 1,
-            sidebar_view_height: 1,
-            sidebar_area: None,
-            diff_area: None,
-            sidebar_row_indices: Vec::new(),
-            sidebar_row_counts_cache: None,
-            diff_lines_cache,
+            viewport: RenderedViewport::new(file_count),
         }
     }
 
@@ -151,23 +96,11 @@ impl App {
             return 0;
         };
 
-        let Some(cache) = self
-            .diff_lines_cache
-            .get(self.selected_file_index)
-            .and_then(Option::as_ref)
-        else {
-            return file.line_count();
-        };
-
-        if cache.file_id.as_str() != file.id.as_str() {
-            return file.line_count();
-        }
-
-        if cache.complete {
-            cache.lines.len()
-        } else {
-            cache.lines.len().max(file.line_count())
-        }
+        self.viewport.rendered_diff_line_count(
+            self.selected_file_index,
+            file.id.as_str(),
+            file.line_count(),
+        )
     }
 
     fn file_count(&self) -> usize {
@@ -187,11 +120,11 @@ impl App {
         }
 
         let last_visible_sidebar_index =
-            self.sidebar_scroll + self.sidebar_view_height.saturating_sub(1);
+            self.sidebar_scroll + self.viewport.sidebar_view_height().saturating_sub(1);
         if self.selected_file_index > last_visible_sidebar_index {
             self.sidebar_scroll = self
                 .selected_file_index
-                .saturating_sub(self.sidebar_view_height.saturating_sub(1));
+                .saturating_sub(self.viewport.sidebar_view_height().saturating_sub(1));
         }
     }
 
@@ -230,8 +163,8 @@ impl App {
     }
 
     fn clear_render_caches(&mut self) {
-        self.sidebar_row_counts_cache = None;
-        self.diff_lines_cache = vec![None; self.changeset.files.len()];
+        self.viewport
+            .clear_render_caches(self.changeset.files.len());
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -251,13 +184,13 @@ impl App {
 
             KeyCode::Char(' ') => self.toggle_selected_file_staging()?,
 
-            KeyCode::PageDown => self.scroll_diff_by(self.diff_view_height),
-            KeyCode::PageUp => self.scroll_diff_up_by(self.diff_view_height),
+            KeyCode::PageDown => self.scroll_diff_by(self.viewport.diff_view_height()),
+            KeyCode::PageUp => self.scroll_diff_up_by(self.viewport.diff_view_height()),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_diff_by(self.diff_view_height)
+                self.scroll_diff_by(self.viewport.diff_view_height())
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_diff_up_by(self.diff_view_height)
+                self.scroll_diff_up_by(self.viewport.diff_view_height())
             }
             _ => {}
         }
@@ -322,26 +255,16 @@ impl App {
     }
 
     fn sidebar_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        let area = self.sidebar_area?;
-        if !rect_inner_contains(area, column, row) {
-            return None;
-        }
-
-        let row_offset = row.saturating_sub(area.y + 1) as usize;
-        self.sidebar_row_indices
-            .get(row_offset)
-            .copied()
-            .filter(|index| *index < self.changeset.files.len())
+        self.viewport
+            .sidebar_index_at(column, row, self.changeset.files.len())
     }
 
     fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
-        self.sidebar_area
-            .is_some_and(|area| rect_contains(area, column, row))
+        self.viewport.is_sidebar_at(column, row)
     }
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
-        self.diff_area
-            .is_some_and(|area| rect_contains(area, column, row))
+        self.viewport.is_diff_at(column, row)
     }
 
     fn toggle_focus(&mut self) {
@@ -423,7 +346,7 @@ impl App {
 
     fn max_diff_scroll(&self) -> usize {
         self.selected_file_line_count()
-            .saturating_sub(self.diff_view_height.max(1))
+            .saturating_sub(self.viewport.diff_view_height())
     }
 
     fn toggle_selected_file_staging(&mut self) -> Result<()> {
@@ -511,20 +434,6 @@ pub fn run(changeset: Changeset) -> Result<()> {
     terminal.show_cursor()?;
 
     result
-}
-
-fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
-    column >= area.x
-        && column < area.x.saturating_add(area.width)
-        && row >= area.y
-        && row < area.y.saturating_add(area.height)
-}
-
-fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
-    column > area.x
-        && column < area.x.saturating_add(area.width).saturating_sub(1)
-        && row > area.y
-        && row < area.y.saturating_add(area.height).saturating_sub(1)
 }
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
@@ -650,20 +559,25 @@ mod tests {
     use super::*;
     use crate::model::{DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStatus, SourceSnapshot};
     use crate::theme::Theme;
+    use crate::viewport::RenderedDiffLines;
+    use ratatui::text::Line;
 
     #[test]
     fn diff_scroll_bounds_use_rendered_rows_when_available() {
         let mut app = App::new(changeset_with_one_file());
-        app.diff_view_height = 3;
+        app.viewport.set_diff_view_height(3);
         app.diff_scroll = 99;
-        app.diff_lines_cache = vec![Some(RenderedDiffLines {
-            file_id: "0".to_string(),
-            content_width: 24,
-            syntax_palette: Theme::github_dark().syntax,
-            can_stage: true,
-            lines: vec![Line::raw("row"); 8],
-            complete: true,
-        })];
+        app.viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "0".to_string(),
+                24,
+                Theme::github_dark().syntax,
+                true,
+                vec![Line::raw("row"); 8],
+                true,
+            ),
+        );
 
         app.ensure_scroll_bounds();
 
@@ -674,7 +588,7 @@ mod tests {
     fn reload_preserves_selected_file_and_scroll_by_path() {
         let mut app = App::new(changeset_with_paths(["a.txt", "b.txt"]));
         app.selected_file_index = 1;
-        app.diff_view_height = 3;
+        app.viewport.set_diff_view_height(3);
         app.diff_scroll = 4;
 
         app.apply_reloaded_changeset(changeset_with_paths(["b.txt", "a.txt"]), true);
@@ -690,7 +604,7 @@ mod tests {
     #[test]
     fn reload_clamps_scroll_when_selected_file_shrinks() {
         let mut app = App::new(changeset_with_paths(["sample.txt"]));
-        app.diff_view_height = 3;
+        app.viewport.set_diff_view_height(3);
         app.diff_scroll = 99;
 
         app.apply_reloaded_changeset(changeset_with_short_file("sample.txt"), true);

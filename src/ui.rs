@@ -12,12 +12,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{App, FocusPane, RenderedDiffLines, SidebarRowCountsCache};
+use crate::app::{App, FocusPane};
 use crate::model::{
     DiffFile, DiffHunk, DiffLineKind, DiffSource, FileStage, FileStatus, SourceSnapshot,
 };
 use crate::syntax::SyntaxHighlighter;
 use crate::theme::Theme;
+use crate::viewport::RenderedDiffLines;
 
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
@@ -40,8 +41,7 @@ struct DiffSyntaxHighlighter<'a> {
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = active_theme();
-    app.sidebar_area = None;
-    app.diff_area = None;
+    app.viewport.begin_frame();
     frame.render_widget(Block::default().style(theme.base_style()), frame.area());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -60,7 +60,7 @@ fn active_theme() -> Theme {
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    app.sidebar_row_indices.clear();
+    app.viewport.clear_sidebar_rows();
     if !app.files_panel_visible {
         render_diff(frame, area, app, theme);
         return;
@@ -91,10 +91,10 @@ fn body_layout(area: Rect) -> (Direction, u16) {
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    app.sidebar_area = Some(area);
+    app.viewport.set_sidebar_area(area);
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    app.sidebar_view_height = inner_height;
+    app.viewport.set_sidebar_view_height(inner_height);
     app.ensure_scroll_bounds();
 
     let title = " Files ";
@@ -110,7 +110,7 @@ fn sidebar_lines(
     visible_height: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    app.sidebar_row_indices.clear();
+    app.viewport.clear_sidebar_rows();
 
     if app.changeset.files.is_empty() {
         return vec![muted_line(
@@ -142,7 +142,7 @@ fn sidebar_lines(
                 return lines;
             }
 
-            app.sidebar_row_indices.push(index);
+            app.viewport.push_sidebar_row_index(index);
             lines.push(line);
         }
     }
@@ -252,22 +252,10 @@ fn cached_sidebar_row_counts(
     theme: Theme,
 ) -> &[usize] {
     let file_count = app.changeset.files.len();
-    let cache_matches = app
-        .sidebar_row_counts_cache
-        .as_ref()
-        .is_some_and(|cache| cache.matches(content_width, can_stage, file_count));
-
-    if !cache_matches {
-        app.sidebar_row_counts_cache = Some(SidebarRowCountsCache {
-            content_width,
-            can_stage,
-            row_counts: sidebar_row_counts(&app.changeset.files, content_width, can_stage, theme),
-        });
-    }
-
-    app.sidebar_row_counts_cache
-        .as_ref()
-        .map_or(&[], |cache| cache.row_counts.as_slice())
+    app.viewport
+        .cached_sidebar_row_counts(content_width, can_stage, file_count, || {
+            sidebar_row_counts(&app.changeset.files, content_width, can_stage, theme)
+        })
 }
 
 fn sidebar_row_counts(
@@ -366,7 +354,7 @@ fn render_divider(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
 }
 
 fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    app.diff_area = Some(area);
+    app.viewport.set_diff_area(area);
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
 
@@ -375,7 +363,7 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
 
     let mut lines = live_status_lines(app, content_width, theme);
     let visible_diff_height = inner_height.saturating_sub(lines.len());
-    app.diff_view_height = visible_diff_height.max(1);
+    app.viewport.set_diff_view_height(visible_diff_height);
     app.ensure_scroll_bounds();
 
     if visible_diff_height > 0 {
@@ -523,7 +511,8 @@ fn render_selected_diff_lines(
     visible_height: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    ensure_diff_lines_cache_len(app);
+    app.viewport
+        .ensure_diff_lines_cache_len(app.changeset.files.len());
 
     let selected_file_index = app.selected_file_index;
     let can_stage = app.changeset.source.can_stage();
@@ -538,13 +527,11 @@ fn render_selected_diff_lines(
 
     let needs_render = {
         let file = &app.changeset.files[selected_file_index];
-        diff_cache_needs_render(
-            app.diff_lines_cache
-                .get(selected_file_index)
-                .and_then(Option::as_ref),
-            file,
+        app.viewport.diff_lines_need_render(
+            selected_file_index,
+            file.id.as_str(),
             content_width,
-            theme,
+            theme.syntax,
             can_stage,
             target_rows,
         )
@@ -555,65 +542,23 @@ fn render_selected_diff_lines(
         let file = app.changeset.files[selected_file_index].clone();
         let (lines, complete) =
             render_diff_lines_until(&file, content_width, theme, can_stage, target_rows);
-        app.diff_lines_cache[selected_file_index] = Some(RenderedDiffLines {
-            file_id: file.id.clone(),
-            content_width,
-            syntax_palette: theme.syntax,
-            can_stage,
-            lines,
-            complete,
-        });
+        app.viewport.cache_diff_lines(
+            selected_file_index,
+            RenderedDiffLines::new(
+                file.id.clone(),
+                content_width,
+                theme.syntax,
+                can_stage,
+                lines,
+                complete,
+            ),
+        );
     }
 
     app.ensure_scroll_bounds();
 
-    match app
-        .diff_lines_cache
-        .get(selected_file_index)
-        .and_then(Option::as_ref)
-    {
-        Some(cache) => visible_diff_lines(&cache.lines, app.diff_scroll, visible_height),
-        None => Vec::new(),
-    }
-}
-
-fn ensure_diff_lines_cache_len(app: &mut App) {
-    if app.diff_lines_cache.len() != app.changeset.files.len() {
-        app.diff_lines_cache = vec![None; app.changeset.files.len()];
-    }
-}
-
-fn diff_cache_needs_render(
-    cache: Option<&RenderedDiffLines>,
-    file: &DiffFile,
-    content_width: usize,
-    theme: Theme,
-    can_stage: bool,
-    target_rows: usize,
-) -> bool {
-    match cache {
-        Some(cache) => {
-            cache.file_id != file.id
-                || cache.content_width != content_width
-                || cache.syntax_palette != theme.syntax
-                || cache.can_stage != can_stage
-                || (!cache.complete && cache.lines.len() < target_rows)
-        }
-        None => true,
-    }
-}
-
-fn visible_diff_lines(
-    lines: &[Line<'static>],
-    scroll: usize,
-    visible_height: usize,
-) -> Vec<Line<'static>> {
-    lines
-        .iter()
-        .skip(scroll)
-        .take(visible_height)
-        .cloned()
-        .collect()
+    app.viewport
+        .visible_diff_lines(selected_file_index, app.diff_scroll, visible_height)
 }
 
 fn live_status_lines(app: &App, content_width: usize, theme: Theme) -> Vec<Line<'static>> {
@@ -1319,7 +1264,7 @@ mod tests {
 
         assert!(lines.len() > 1);
         assert!(lines.iter().all(|line| line.width() <= content_width));
-        assert_eq!(app.sidebar_row_indices, vec![0; lines.len()]);
+        assert_eq!(app.viewport.sidebar_row_indices(), vec![0; lines.len()]);
     }
 
     #[test]
@@ -1335,7 +1280,7 @@ mod tests {
 
         assert_eq!(app.sidebar_scroll, 1);
         assert_eq!(lines.len(), 2);
-        assert_eq!(app.sidebar_row_indices, vec![1, 1]);
+        assert_eq!(app.viewport.sidebar_row_indices(), vec![1, 1]);
     }
 
     #[test]
@@ -1389,29 +1334,14 @@ mod tests {
     }
 
     fn app_with_files(files: Vec<DiffFile>, selected_file_index: usize) -> App {
-        let file_count = files.len();
-
-        App {
-            changeset: Changeset {
-                title: String::new(),
-                source_label: String::new(),
-                source: DiffSource::Worktree,
-                files,
-            },
-            live_error: None,
-            selected_file_index,
-            focus: FocusPane::Sidebar,
-            files_panel_visible: true,
-            diff_scroll: 0,
-            sidebar_scroll: 0,
-            diff_view_height: 1,
-            sidebar_view_height: 1,
-            sidebar_area: None,
-            diff_area: None,
-            sidebar_row_indices: Vec::new(),
-            sidebar_row_counts_cache: None,
-            diff_lines_cache: vec![None; file_count],
-        }
+        let mut app = App::new(Changeset {
+            title: String::new(),
+            source_label: String::new(),
+            source: DiffSource::Worktree,
+            files,
+        });
+        app.selected_file_index = selected_file_index;
+        app
     }
 
     fn line_prefix(line: &Line<'_>, width: usize) -> String {
