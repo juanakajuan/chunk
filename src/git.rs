@@ -86,12 +86,10 @@ pub fn load_source_snapshots(file: &mut DiffFile, source: &DiffSource) {
 
 pub fn toggle_staging_for_file(path: &str) -> Result<()> {
     if is_file_staged(path)? {
-        unstage_file(path)?;
+        unstage_file(path)
     } else {
-        stage_file(path)?;
+        stage_file(path)
     }
-
-    Ok(())
 }
 
 pub fn worktree_root() -> Result<PathBuf> {
@@ -258,8 +256,7 @@ fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> Sourc
     };
 
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(child);
         return SourceSnapshot::Unavailable;
     };
 
@@ -267,8 +264,7 @@ fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> Sourc
     let prefix = match read_source_prefix(&mut reader, max_context_line) {
         Ok(prefix) => prefix,
         Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_child(child);
             return SourceSnapshot::Unavailable;
         }
     };
@@ -384,11 +380,9 @@ fn worktree_title() -> String {
 }
 
 fn current_branch_label() -> Option<String> {
-    git_stdout(["branch", "--show-current"])
-        .filter(|branch| !branch.is_empty())
-        .or_else(|| {
-            git_stdout(["rev-parse", "--short", "HEAD"]).map(|sha| format!("detached {sha}"))
-        })
+    git_stdout(["branch", "--show-current"]).or_else(|| {
+        git_stdout(["rev-parse", "--short", "HEAD"]).map(|sha| format!("detached {sha}"))
+    })
 }
 
 fn git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
@@ -423,27 +417,26 @@ fn unstage_file(path: &str) -> Result<()> {
 }
 
 fn is_file_staged(path: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .args(["diff", "--cached", "--quiet", "--"])
-        .arg(path)
-        .status()?;
-
-    match status.code() {
-        Some(0) => Ok(false), // no staged diff for path
-        Some(1) => Ok(true),  // staged diff exists
-        _ => Err(eyre!("git diff --cached failed for {path}")),
-    }
+    has_file_diff(path, true)
 }
 
 fn is_file_unstaged(path: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .args(["diff", "--quiet", "--"])
-        .arg(path)
-        .status()?;
+    has_file_diff(path, false)
+}
+
+fn has_file_diff(path: &str, cached: bool) -> Result<bool> {
+    let mut command = Command::new("git");
+    command.arg("diff");
+    if cached {
+        command.arg("--cached");
+    }
+
+    let status = command.args(["--quiet", "--"]).arg(path).status()?;
 
     match status.code() {
         Some(0) => Ok(false),
         Some(1) => Ok(true),
+        _ if cached => Err(eyre!("git diff --cached failed for {path}")),
         _ => Err(eyre!("git diff failed for {path}")),
     }
 }

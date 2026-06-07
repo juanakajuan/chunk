@@ -297,12 +297,9 @@ fn sidebar_selection_visible(
 
     let visible_height = visible_height.max(1);
     let rows_before_selected: usize = row_counts[scroll..selected_index].iter().sum();
-    if rows_before_selected >= visible_height {
-        return false;
-    }
-
     let selected_rows = row_counts[selected_index];
-    rows_before_selected == 0 || rows_before_selected + selected_rows <= visible_height
+    rows_before_selected < visible_height
+        && (rows_before_selected == 0 || rows_before_selected + selected_rows <= visible_height)
 }
 
 fn sidebar_scroll_for_selected(
@@ -395,16 +392,16 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
 }
 
 fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let mut hints = vec![files_panel_toggle_label(app).to_string()];
+    let mut hints = vec![files_panel_toggle_label(app)];
     if app.files_panel_visible {
-        hints.push("[Tab] switch focus".to_string());
+        hints.push("[Tab] switch focus");
         if app.changeset.source.can_stage() {
-            hints.push("[Space] stage".to_string());
+            hints.push("[Space] stage");
         }
     }
-    hints.push("[j/k] move".to_string());
-    hints.push("[Ctrl-d/u] scroll".to_string());
-    hints.push("[q] quit".to_string());
+    hints.push("[j/k] move");
+    hints.push("[Ctrl-d/u] scroll");
+    hints.push("[q] quit");
 
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -530,9 +527,9 @@ fn render_selected_diff_lines(
 
     let selected_file_index = app.selected_file_index;
     let can_stage = app.changeset.source.can_stage();
-    let Some(_) = app.changeset.files.get(selected_file_index) else {
+    if selected_file_index >= app.changeset.files.len() {
         return vec![muted_line(no_diff_message(&app.changeset.source), theme)];
-    };
+    }
 
     let target_rows = app
         .diff_scroll

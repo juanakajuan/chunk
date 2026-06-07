@@ -47,18 +47,16 @@ impl SyntaxHighlighter {
     }
 
     pub fn highlight_line(&mut self, content: &str, base_style: Style) -> Vec<Span<'static>> {
-        let Some(engine) = self.engine.as_mut() else {
-            return plain_line(content, base_style);
-        };
-
-        let Some(ranges) = engine.highlight_line(content) else {
-            return plain_line(content, base_style);
-        };
-
-        ranges
-            .into_iter()
-            .map(|(style, text)| styled_token(text, style, base_style))
-            .collect()
+        self.engine
+            .as_mut()
+            .and_then(|engine| engine.highlight_line(content))
+            .map(|ranges| {
+                ranges
+                    .into_iter()
+                    .map(|(style, text)| styled_token(text, style, base_style))
+                    .collect()
+            })
+            .unwrap_or_else(|| plain_line(content, base_style))
     }
 
     pub fn advance_line(&mut self, content: &str) {
@@ -124,30 +122,31 @@ fn syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
 }
 
 fn syntax_for_path_parts(path: &str) -> Option<&'static SyntaxReference> {
-    let path_value = Path::new(path);
-    let file_name = path_value.file_name().and_then(|value| value.to_str())?;
-    let extension = path_value.extension().and_then(|value| value.to_str());
+    let path = Path::new(path);
+    let file_name = path.file_name().and_then(|value| value.to_str())?;
+    let extension = path.extension().and_then(|value| value.to_str());
 
     SYNTAX_SET
         .find_syntax_by_extension(file_name)
         .or_else(|| extension.and_then(|extension| SYNTAX_SET.find_syntax_by_extension(extension)))
 }
 
-fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
-    let path_value = Path::new(path);
-    let file_name = path_value
+fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
+    let path = Path::new(path_text);
+    let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or(path)
+        .unwrap_or(path_text)
         .to_ascii_lowercase();
-    let extension = path_value
+    let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase);
 
-    if file_name == "dockerfile"
+    let file_name = file_name.as_str();
+
+    if matches!(file_name, "dockerfile" | "containerfile")
         || file_name.starts_with("dockerfile.")
-        || file_name == "containerfile"
         || file_name.starts_with("containerfile.")
     {
         return find_by_extension_or_name("dockerfile", "Dockerfile");
@@ -161,27 +160,18 @@ fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
         return find_first_syntax(&[("env", "DotENV"), ("sh", "Bash")]);
     }
 
-    if matches!(file_name.as_str(), ".gitignore" | ".dockerignore") {
-        return find_by_extension_or_name("gitignore", "Git Ignore");
+    match file_name {
+        ".gitignore" | ".dockerignore" => find_by_extension_or_name("gitignore", "Git Ignore"),
+        ".editorconfig" | "cargo.lock" | "go.mod" | "go.sum" => find_toml_syntax(),
+        "package-lock.json" | "flake.lock" => find_by_extension_or_name("json", "JSON"),
+        "pnpm-lock.yaml" => find_by_extension_or_name("yaml", "YAML"),
+        "yarn.lock" => find_first_syntax(&[("yaml", "YAML"), ("toml", "TOML")]),
+        _ => syntax_for_known_extension(extension.as_deref()),
     }
+}
 
-    if matches!(file_name.as_str(), ".editorconfig" | "go.mod" | "go.sum") {
-        return find_toml_syntax();
-    }
-
-    if matches!(file_name.as_str(), "package-lock.json" | "flake.lock") {
-        return find_by_extension_or_name("json", "JSON");
-    }
-
-    if file_name == "pnpm-lock.yaml" {
-        return find_by_extension_or_name("yaml", "YAML");
-    }
-
-    if file_name == "yarn.lock" {
-        return find_first_syntax(&[("yaml", "YAML"), ("toml", "TOML")]);
-    }
-
-    match extension.as_deref() {
+fn syntax_for_known_extension(extension: Option<&str>) -> Option<&'static SyntaxReference> {
+    match extension {
         Some("rs") => find_by_extension_or_name("rs", "Rust"),
         Some("vue") => find_first_syntax(&[("vue", "Vue Component"), ("vue", "Vue")]),
         Some("svelte") => find_by_extension_or_name("svelte", "Svelte"),
@@ -197,8 +187,7 @@ fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
             ("js", "JavaScript"),
         ]),
         Some("json") | Some("jsonc") | Some("json5") => find_by_extension_or_name("json", "JSON"),
-        Some("md") | Some("markdown") => find_by_extension_or_name("md", "Markdown"),
-        Some("mdx") => find_by_extension_or_name("md", "Markdown"),
+        Some("md") | Some("markdown") | Some("mdx") => find_by_extension_or_name("md", "Markdown"),
         Some("html") | Some("htm") => find_by_extension_or_name("html", "HTML"),
         Some("xml") | Some("xhtml") | Some("svg") => find_by_extension_or_name("xml", "XML"),
         Some("css") => find_by_extension_or_name("css", "CSS"),
@@ -230,7 +219,6 @@ fn syntax_for_known_path(path: &str) -> Option<&'static SyntaxReference> {
             find_by_extension_or_name("cpp", "C++")
         }
         Some("cs") => find_by_extension_or_name("cs", "C#"),
-        _ if file_name == "cargo.lock" => find_toml_syntax(),
         _ => None,
     }
 }

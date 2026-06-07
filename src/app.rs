@@ -151,18 +151,22 @@ impl App {
             return 0;
         };
 
-        match self
+        let Some(cache) = self
             .diff_lines_cache
             .get(self.selected_file_index)
             .and_then(Option::as_ref)
-        {
-            Some(cache) if cache.file_id.as_str() == file.id.as_str() && cache.complete => {
-                cache.lines.len()
-            }
-            Some(cache) if cache.file_id.as_str() == file.id.as_str() => {
-                cache.lines.len().max(file.line_count())
-            }
-            _ => file.line_count(),
+        else {
+            return file.line_count();
+        };
+
+        if cache.file_id.as_str() != file.id.as_str() {
+            return file.line_count();
+        }
+
+        if cache.complete {
+            cache.lines.len()
+        } else {
+            cache.lines.len().max(file.line_count())
         }
     }
 
@@ -209,9 +213,9 @@ impl App {
         let reselected_file_index = previous_identity
             .as_deref()
             .and_then(|identity| find_file_index(&changeset, identity));
+        let fallback_index = previous_index.min(changeset.files.len().saturating_sub(1));
         let kept_selection = reselected_file_index.is_some();
-        let selected_file_index = reselected_file_index
-            .unwrap_or_else(|| previous_index.min(changeset.files.len().saturating_sub(1)));
+        let selected_file_index = reselected_file_index.unwrap_or(fallback_index);
 
         self.changeset = changeset;
         self.live_error = None;
@@ -298,13 +302,14 @@ impl App {
     }
 
     fn handle_wheel(&mut self, column: u16, row: u16, direction: WheelDirection) {
-        self.focus = if self.is_sidebar_at(column, row) {
+        let focus = if self.is_sidebar_at(column, row) {
             FocusPane::Sidebar
         } else {
             FocusPane::Diff
         };
+        self.focus = focus;
 
-        match (self.focus, direction) {
+        match (focus, direction) {
             (FocusPane::Sidebar, WheelDirection::Down) => {
                 self.select_next_file_by(MOUSE_WHEEL_STEP)
             }
@@ -353,11 +358,11 @@ impl App {
 
     fn toggle_files_panel(&mut self) {
         self.files_panel_visible = !self.files_panel_visible;
-        if self.files_panel_visible {
-            self.focus = FocusPane::Sidebar;
+        self.focus = if self.files_panel_visible {
+            FocusPane::Sidebar
         } else {
-            self.focus = FocusPane::Diff;
-        }
+            FocusPane::Diff
+        };
     }
 
     fn move_down(&mut self) {
