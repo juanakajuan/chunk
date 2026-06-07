@@ -7,6 +7,7 @@ mod app;
 mod git;
 mod model;
 mod patch;
+mod runtime;
 mod syntax;
 mod theme;
 mod ui;
@@ -39,7 +40,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Diff) {
-        Command::Diff => app::run(git::load_worktree_diff()?),
-        Command::Pr { base } => app::run(git::load_pr_diff(base.as_deref())?),
+        Command::Diff => runtime::run(app::App::new(git::load_worktree_diff()?)),
+        Command::Pr { base } => runtime::run(app::App::new(git::load_pr_diff(base.as_deref())?)),
     }
 }

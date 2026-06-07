@@ -1,40 +1,20 @@
-//! Terminal application state and event loop.
+//! Terminal application session state.
 //!
-//! `App` owns selection, focus, and live reload errors. Rendering is delegated
-//! to `ui`; rendered viewport state is delegated to `viewport`; Git mutations
-//! are delegated to `git`.
-
-use std::io;
-use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+//! `App` owns selection, focus, scroll state, live reload errors, and staging
+//! behavior. Terminal and watch orchestration live in `runtime`; rendering is
+//! delegated to `ui`; rendered viewport state is delegated to `viewport`.
 
 use color_eyre::eyre::Result;
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::git::{
-    load_source_snapshots, load_worktree_diff, toggle_staging_for_file, worktree_root,
-};
+use crate::git::{load_source_snapshots, load_worktree_diff, toggle_staging_for_file};
 use crate::model::{Changeset, DiffFile};
-use crate::ui;
 use crate::viewport::{RenderedViewport, ViewportScrollInput};
 
-const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const WORKTREE_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 const MOUSE_WHEEL_STEP: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusPane {
+pub(crate) enum FocusPane {
     Sidebar,
     Diff,
 }
@@ -46,23 +26,23 @@ enum WheelDirection {
 }
 
 #[derive(Debug)]
-pub struct App {
+pub(crate) struct App {
     /// Current diff data being reviewed.
-    pub changeset: Changeset,
+    pub(crate) changeset: Changeset,
     /// Last live reload/watch error, rendered above the diff when present.
-    pub live_error: Option<String>,
+    pub(crate) live_error: Option<String>,
     /// Index into `changeset.files`.
-    pub selected_file_index: usize,
+    pub(crate) selected_file_index: usize,
     /// Pane receiving keyboard and mouse wheel actions.
-    pub focus: FocusPane,
+    pub(crate) focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
-    pub files_panel_visible: bool,
+    pub(crate) files_panel_visible: bool,
     /// First rendered diff row visible in the diff pane.
-    pub diff_scroll: usize,
+    pub(crate) diff_scroll: usize,
     /// First file index considered for sidebar rendering.
-    pub sidebar_scroll: usize,
+    pub(crate) sidebar_scroll: usize,
     /// Rendered viewport geometry, row mapping, and render caches.
-    pub viewport: RenderedViewport,
+    pub(crate) viewport: RenderedViewport,
 }
 
 impl App {
@@ -80,18 +60,18 @@ impl App {
         }
     }
 
-    pub fn selected_file(&self) -> Option<&DiffFile> {
+    pub(crate) fn selected_file(&self) -> Option<&DiffFile> {
         self.changeset.files.get(self.selected_file_index)
     }
 
-    pub fn ensure_selected_file_sources_loaded(&mut self) {
+    pub(crate) fn ensure_selected_file_sources_loaded(&mut self) {
         let source = &self.changeset.source;
         if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
             load_source_snapshots(file, source);
         }
     }
 
-    pub fn ensure_scroll_bounds(&mut self) {
+    pub(crate) fn ensure_scroll_bounds(&mut self) {
         let scrolls = self.viewport.clamped_scrolls(self.viewport_scroll_input());
         self.diff_scroll = scrolls.diff_scroll;
         self.sidebar_scroll = scrolls.sidebar_scroll;
@@ -109,7 +89,15 @@ impl App {
         }
     }
 
-    fn reload_worktree(&mut self, preserve_scroll: bool) {
+    pub(crate) fn can_live_reload(&self) -> bool {
+        self.changeset.source.can_stage()
+    }
+
+    pub(crate) fn set_live_error(&mut self, error: String) {
+        self.live_error = Some(error);
+    }
+
+    pub(crate) fn reload_worktree(&mut self, preserve_scroll: bool) {
         match load_worktree_diff() {
             Ok(changeset) => self.apply_reloaded_changeset(changeset, preserve_scroll),
             Err(error) => self.live_error = Some(format!("reload failed: {error}")),
@@ -144,7 +132,7 @@ impl App {
             .clear_render_caches(self.changeset.files.len());
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(false),
 
@@ -176,7 +164,7 @@ impl App {
         Ok(true)
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
         let column = mouse.column;
         let row = mouse.row;
 
@@ -340,181 +328,6 @@ impl App {
     }
 }
 
-struct WorktreeWatcher {
-    _watcher: RecommendedWatcher,
-    events: Receiver<notify::Result<notify::Event>>,
-    root: PathBuf,
-}
-
-struct DrainedWorktreeEvents {
-    changed: bool,
-    error: Option<notify::Error>,
-}
-
-impl WorktreeWatcher {
-    fn start() -> Result<Self> {
-        let root = worktree_root()?;
-        let (sender, events) = mpsc::channel();
-        let mut watcher = RecommendedWatcher::new(
-            move |event| {
-                let _ = sender.send(event);
-            },
-            Config::default(),
-        )?;
-        watcher.watch(&root, RecursiveMode::Recursive)?;
-
-        Ok(Self {
-            _watcher: watcher,
-            events,
-            root,
-        })
-    }
-
-    fn drain(&self) -> DrainedWorktreeEvents {
-        let mut changed = false;
-        let mut error = None;
-
-        while let Ok(event) = self.events.try_recv() {
-            match event {
-                Ok(event) if is_relevant_worktree_event(&event, &self.root) => changed = true,
-                Ok(_) => {}
-                Err(latest_error) => error = Some(latest_error),
-            }
-        }
-
-        DrainedWorktreeEvents { changed, error }
-    }
-}
-
-pub fn run(changeset: Changeset) -> Result<()> {
-    let mut app = App::new(changeset);
-    enable_raw_mode()?;
-
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    let result = run_loop(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    result
-}
-
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
-    let watcher = start_live_worktree_watcher(app);
-    let mut pending_reload_at: Option<Instant> = None;
-
-    loop {
-        terminal.draw(|frame| ui::draw(frame, app))?;
-
-        if let Some(watcher) = watcher.as_ref() {
-            let drained = watcher.drain();
-            if let Some(error) = drained.error {
-                app.live_error = Some(format!("watch failed: {error}"));
-            }
-            if drained.changed {
-                pending_reload_at = Some(Instant::now() + WORKTREE_RELOAD_DEBOUNCE);
-            }
-        }
-
-        if pending_reload_at.is_some_and(|deadline| Instant::now() >= deadline) {
-            app.reload_worktree(true);
-            pending_reload_at = None;
-            continue;
-        }
-
-        if !event::poll(next_event_poll_interval(pending_reload_at))? {
-            continue;
-        }
-
-        match event::read()? {
-            Event::Key(key) if !app.handle_key(key)? => break,
-            Event::Key(_) => {}
-            Event::Mouse(mouse) => app.handle_mouse(mouse),
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-fn start_live_worktree_watcher(app: &mut App) -> Option<WorktreeWatcher> {
-    if !app.changeset.source.can_stage() {
-        return None;
-    }
-
-    match WorktreeWatcher::start() {
-        Ok(watcher) => Some(watcher),
-        Err(error) => {
-            app.live_error = Some(format!("watch failed: {error}"));
-            None
-        }
-    }
-}
-
-fn next_event_poll_interval(pending_reload_at: Option<Instant>) -> Duration {
-    let Some(deadline) = pending_reload_at else {
-        return EVENT_POLL_INTERVAL;
-    };
-
-    deadline
-        .saturating_duration_since(Instant::now())
-        .min(EVENT_POLL_INTERVAL)
-}
-
-fn is_relevant_worktree_event(event: &notify::Event, root: &Path) -> bool {
-    if !is_worktree_change_kind(&event.kind) {
-        return false;
-    }
-
-    event
-        .paths
-        .iter()
-        .any(|path| is_relevant_worktree_path(path, root))
-}
-
-fn is_worktree_change_kind(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
-}
-
-fn is_relevant_worktree_path(path: &Path, root: &Path) -> bool {
-    let Ok(relative_path) = path.strip_prefix(root) else {
-        return true;
-    };
-
-    let mut components = relative_path.components();
-    match components.next() {
-        Some(Component::Normal(name)) if name == ".git" => {
-            is_relevant_git_metadata_path(components.as_path())
-        }
-        _ => true,
-    }
-}
-
-fn is_relevant_git_metadata_path(path: &Path) -> bool {
-    let mut components = path.components();
-    let Some(Component::Normal(name)) = components.next() else {
-        return false;
-    };
-
-    match name.to_str() {
-        Some("index" | "HEAD" | "packed-refs") => components.next().is_none(),
-        Some("refs") => true,
-        _ => false,
-    }
-}
-
 fn file_identity(file: &DiffFile) -> String {
     file.display_path().to_string()
 }
@@ -649,56 +462,8 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Sidebar);
     }
 
-    #[test]
-    fn live_reload_treats_git_state_files_as_relevant() {
-        for path in [
-            ".git/index",
-            ".git/HEAD",
-            ".git/packed-refs",
-            ".git/refs/heads/main",
-            ".git/refs/remotes/origin/HEAD",
-        ] {
-            assert!(
-                is_relevant_worktree_event(&worktree_event(path), worktree_test_root()),
-                "{path} should trigger live reload",
-            );
-        }
-    }
-
-    #[test]
-    fn live_reload_ignores_noisy_git_metadata() {
-        for path in [
-            ".git",
-            ".git/objects/12/3456789",
-            ".git/logs/HEAD",
-            ".git/index.lock",
-        ] {
-            assert!(
-                !is_relevant_worktree_event(&worktree_event(path), worktree_test_root()),
-                "{path} should not trigger live reload",
-            );
-        }
-    }
-
-    #[test]
-    fn live_reload_ignores_non_mutating_git_state_events() {
-        let event = notify::Event::new(EventKind::Access(notify::event::AccessKind::Any))
-            .add_path(worktree_test_root().join(".git/index"));
-
-        assert!(!is_relevant_worktree_event(&event, worktree_test_root()));
-    }
-
     fn changeset_with_one_file() -> Changeset {
         changeset_with_paths(["sample.txt"])
-    }
-
-    fn worktree_event(path: &str) -> notify::Event {
-        notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
-            .add_path(worktree_test_root().join(path))
-    }
-
-    fn worktree_test_root() -> &'static Path {
-        Path::new("/tmp/chunk-worktree")
     }
 
     fn changeset_with_short_file(path: &str) -> Changeset {
