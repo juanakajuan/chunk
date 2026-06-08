@@ -1,0 +1,156 @@
+//! Review-source module for worktree and pull-request diffs.
+//!
+//! This module owns source-specific behavior: loading, live reload capability,
+//! staging, source snapshots, and empty-state messages. The app session handles
+//! selection and scroll; callers do not need to know which Git commands back a
+//! source.
+
+use std::path::PathBuf;
+
+use color_eyre::eyre::Result;
+
+use crate::git;
+use crate::model::{Changeset, DiffFile};
+
+const NO_TRACKED_CHANGES: &str = "No tracked changes";
+const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
+const NO_BRANCH_CHANGES: &str = "No branch changes";
+const NO_PR_DIFF_MESSAGE: &str = "No diff to review. Current branch has no changes against base.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedReview {
+    pub(crate) source: ReviewSource,
+    pub(crate) changeset: Changeset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewSource {
+    Worktree(WorktreeReviewSource),
+    PullRequest(PullRequestReviewSource),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorktreeReviewSource;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequestReviewSource {
+    old_ref: String,
+    new_ref: String,
+    title: String,
+    source_label: String,
+}
+
+impl LoadedReview {
+    #[cfg(test)]
+    pub(crate) fn worktree(changeset: Changeset) -> Self {
+        Self {
+            source: ReviewSource::worktree(),
+            changeset,
+        }
+    }
+}
+
+impl ReviewSource {
+    pub(crate) fn load_worktree() -> Result<LoadedReview> {
+        let source = Self::worktree();
+        let changeset = source.reload()?;
+        Ok(LoadedReview { source, changeset })
+    }
+
+    pub(crate) fn load_pull_request(base: Option<&str>) -> Result<LoadedReview> {
+        let diff = git::load_pr_diff(base)?;
+        let source = Self::PullRequest(PullRequestReviewSource {
+            old_ref: diff.old_ref,
+            new_ref: diff.new_ref,
+            title: diff.changeset.title.clone(),
+            source_label: diff.changeset.source_label.clone(),
+        });
+
+        Ok(LoadedReview {
+            source,
+            changeset: diff.changeset,
+        })
+    }
+
+    pub(crate) fn can_stage(&self) -> bool {
+        matches!(self, Self::Worktree(_))
+    }
+
+    pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
+        match self {
+            Self::Worktree(source) => source.live_watch_root().map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn reload(&self) -> Result<Changeset> {
+        match self {
+            Self::Worktree(source) => source.reload(),
+            Self::PullRequest(source) => source.reload(),
+        }
+    }
+
+    pub(crate) fn load_source_snapshots(&self, file: &mut DiffFile) {
+        match self {
+            Self::Worktree(source) => source.load_source_snapshots(file),
+            Self::PullRequest(source) => source.load_source_snapshots(file),
+        }
+    }
+
+    pub(crate) fn toggle_staging_for_file(&self, path: &str) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.toggle_staging_for_file(path).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn empty_sidebar_message(&self) -> &'static str {
+        match self {
+            Self::Worktree(_) => NO_TRACKED_CHANGES,
+            Self::PullRequest(_) => NO_BRANCH_CHANGES,
+        }
+    }
+
+    pub(crate) fn no_diff_message(&self) -> &'static str {
+        match self {
+            Self::Worktree(_) => NO_DIFF_MESSAGE,
+            Self::PullRequest(_) => NO_PR_DIFF_MESSAGE,
+        }
+    }
+
+    fn worktree() -> Self {
+        Self::Worktree(WorktreeReviewSource)
+    }
+}
+
+impl WorktreeReviewSource {
+    fn live_watch_root(self) -> Result<PathBuf> {
+        git::worktree_root()
+    }
+
+    fn reload(self) -> Result<Changeset> {
+        git::load_worktree_diff()
+    }
+
+    fn load_source_snapshots(self, file: &mut DiffFile) {
+        git::load_worktree_source_snapshots(file);
+    }
+
+    fn toggle_staging_for_file(self, path: &str) -> Result<Changeset> {
+        git::toggle_staging_for_file(path)?;
+        git::load_worktree_diff()
+    }
+}
+
+impl PullRequestReviewSource {
+    fn reload(&self) -> Result<Changeset> {
+        let mut changeset = git::load_ref_diff(&self.old_ref, &self.new_ref)?;
+        changeset.title.clone_from(&self.title);
+        changeset.source_label.clone_from(&self.source_label);
+        Ok(changeset)
+    }
+
+    fn load_source_snapshots(&self, file: &mut DiffFile) {
+        git::load_ref_source_snapshots(file, &self.old_ref, &self.new_ref);
+    }
+}

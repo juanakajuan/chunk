@@ -10,13 +10,19 @@ use std::process::{Child, Command, Output, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::model::{Changeset, DiffFile, DiffSource, FileStage, SourceSnapshot};
+use crate::model::{Changeset, DiffFile, FileStage, SourceSnapshot};
 use crate::patch::parse_unified_diff;
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 512 * 1024;
 const DEFAULT_BASE_REFS: [&str; 3] = ["origin/HEAD", "main", "master"];
 
-pub fn load_worktree_diff() -> Result<Changeset> {
+pub(crate) struct LoadedPrDiff {
+    pub(crate) changeset: Changeset,
+    pub(crate) old_ref: String,
+    pub(crate) new_ref: String,
+}
+
+pub(crate) fn load_worktree_diff() -> Result<Changeset> {
     let output = Command::new("git")
         .args([
             "diff",
@@ -40,9 +46,22 @@ pub fn load_worktree_diff() -> Result<Changeset> {
     Ok(changeset)
 }
 
-pub fn load_pr_diff(base: Option<&str>) -> Result<Changeset> {
+pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
     let base_ref = resolve_base_ref(base)?;
     let merge_base = merge_base(&base_ref)?;
+    let mut changeset = load_ref_diff(&merge_base, "HEAD")?;
+    let head = current_branch_label().unwrap_or_else(|| "HEAD".to_string());
+    changeset.title = format!("PR review {head} into {base_ref}");
+    changeset.source_label = format!("git diff {base_ref}...HEAD");
+
+    Ok(LoadedPrDiff {
+        changeset,
+        old_ref: merge_base,
+        new_ref: "HEAD".to_string(),
+    })
+}
+
+pub(crate) fn load_ref_diff(old_ref: &str, new_ref: &str) -> Result<Changeset> {
     let output = Command::new("git")
         .args([
             "diff",
@@ -51,40 +70,38 @@ pub fn load_pr_diff(base: Option<&str>) -> Result<Changeset> {
             "--find-renames",
             "--default-prefix",
         ])
-        .arg(&merge_base)
-        .arg("HEAD")
+        .arg(old_ref)
+        .arg(new_ref)
         .output()?;
 
     ensure_success(&output, "git diff failed")?;
 
-    let mut changeset = parse_unified_diff(&String::from_utf8_lossy(&output.stdout));
-    let head = current_branch_label().unwrap_or_else(|| "HEAD".to_string());
-    changeset.title = format!("PR review {head} into {base_ref}");
-    changeset.source_label = format!("git diff {base_ref}...HEAD");
-    changeset.source = DiffSource::GitRefs {
-        old_ref: merge_base,
-        new_ref: "HEAD".to_string(),
-    };
-    Ok(changeset)
+    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
 }
 
-pub fn load_source_snapshots(file: &mut DiffFile, source: &DiffSource) {
+pub(crate) fn load_worktree_source_snapshots(file: &mut DiffFile) {
+    let root = worktree_root().ok();
+    load_worktree_source_snapshots_with_root(file, root.as_deref());
+}
+
+pub(crate) fn load_ref_source_snapshots(file: &mut DiffFile, old_ref: &str, new_ref: &str) {
     if file.binary || file.hunks.is_empty() {
         return;
     }
 
-    match source {
-        DiffSource::Worktree => {
-            let root = worktree_root().ok();
-            load_worktree_source_snapshots(file, root.as_deref());
-        }
-        DiffSource::GitRefs { old_ref, new_ref } => {
-            load_ref_source_snapshots(file, old_ref, new_ref);
-        }
-    }
+    let old_context_line = max_old_context_line(file);
+    let new_context_line = max_new_context_line(file);
+
+    load_git_snapshot(
+        &mut file.old_source,
+        old_ref,
+        &file.old_path,
+        old_context_line,
+    );
+    load_git_snapshot(&mut file.new_source, new_ref, &file.path, new_context_line);
 }
 
-pub fn toggle_staging_for_file(path: &str) -> Result<()> {
+pub(crate) fn toggle_staging_for_file(path: &str) -> Result<()> {
     if is_file_staged(path)? {
         unstage_file(path)
     } else {
@@ -92,7 +109,7 @@ pub fn toggle_staging_for_file(path: &str) -> Result<()> {
     }
 }
 
-pub fn worktree_root() -> Result<PathBuf> {
+pub(crate) fn worktree_root() -> Result<PathBuf> {
     git_stdout(["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .ok_or_else(|| eyre!("could not determine Git worktree root"))
@@ -186,7 +203,11 @@ fn merge_base(base_ref: &str) -> Result<String> {
     Ok(merge_base)
 }
 
-fn load_worktree_source_snapshots(file: &mut DiffFile, worktree_root: Option<&Path>) {
+fn load_worktree_source_snapshots_with_root(file: &mut DiffFile, worktree_root: Option<&Path>) {
+    if file.binary || file.hunks.is_empty() {
+        return;
+    }
+
     let old_context_line = max_old_context_line(file);
     load_git_snapshot(
         &mut file.old_source,
@@ -199,19 +220,6 @@ fn load_worktree_source_snapshots(file: &mut DiffFile, worktree_root: Option<&Pa
         file.new_source =
             load_worktree_source_prefix(worktree_root, &file.path, max_new_context_line(file));
     }
-}
-
-fn load_ref_source_snapshots(file: &mut DiffFile, old_ref: &str, new_ref: &str) {
-    let old_context_line = max_old_context_line(file);
-    let new_context_line = max_new_context_line(file);
-
-    load_git_snapshot(
-        &mut file.old_source,
-        old_ref,
-        &file.old_path,
-        old_context_line,
-    );
-    load_git_snapshot(&mut file.new_source, new_ref, &file.path, new_context_line);
 }
 
 fn load_git_snapshot(snapshot: &mut SourceSnapshot, rev: &str, path: &str, max_context_line: u32) {
@@ -487,7 +495,7 @@ mod tests {
             binary: false,
         };
 
-        load_worktree_source_snapshots(&mut file, Some(&root));
+        load_worktree_source_snapshots_with_root(&mut file, Some(&root));
 
         assert_eq!(file.old_source.as_str(), Some(""));
         assert_eq!(

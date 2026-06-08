@@ -74,7 +74,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme
     app.viewport.begin_sidebar(area, inner_height);
     app.ensure_scroll_bounds();
 
-    let can_stage = app.changeset.source.can_stage();
+    let can_stage = app.can_stage();
     let row_counts = app
         .viewport
         .cached_sidebar_row_counts(content_width, can_stage, app.changeset.files.len(), || {
@@ -84,7 +84,8 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme
 
     let rendered_rows = rows::sidebar_rows(SidebarRowsInput {
         files: &app.changeset.files,
-        source: &app.changeset.source,
+        empty_message: app.empty_sidebar_message(),
+        can_stage,
         selected_file_index: app.selected_file_index,
         sidebar_scroll: app.sidebar_scroll,
         row_counts: &row_counts,
@@ -139,7 +140,7 @@ fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme
     frame.render_widget(
         Paragraph::new(rows::keybind_bar_line(
             app.files_panel_visible,
-            app.changeset.source.can_stage(),
+            app.can_stage(),
             theme,
         ))
         .alignment(Alignment::Center),
@@ -157,9 +158,9 @@ fn render_selected_diff_lines(
         .ensure_diff_lines_cache_len(app.changeset.files.len());
 
     let selected_file_index = app.selected_file_index;
-    let can_stage = app.changeset.source.can_stage();
+    let can_stage = app.can_stage();
     if selected_file_index >= app.changeset.files.len() {
-        return rows::no_diff_lines(&app.changeset.source, content_width, theme);
+        return rows::no_diff_lines(app.no_diff_message(), content_width, theme);
     }
 
     let target_rows = app

@@ -9,8 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::model::{
-    Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStage, FileStatus,
-    SourceSnapshot,
+    Changeset, DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStage, FileStatus, SourceSnapshot,
 };
 use crate::syntax::SyntaxHighlighter;
 use crate::theme::Theme;
@@ -20,14 +19,11 @@ const SIDEBAR_REVIEW_GUTTER_WIDTH: usize = 4;
 const DIFF_GUTTER_WIDTH: usize = 11;
 pub(crate) const DIFF_PREFETCH_ROWS: usize = 120;
 const RAIL_MARKER: &str = "▌";
-const NO_TRACKED_CHANGES: &str = "No tracked changes";
-const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
-const NO_BRANCH_CHANGES: &str = "No branch changes";
-const NO_PR_DIFF_MESSAGE: &str = "No diff to review. Current branch has no changes against base.";
 
 pub(crate) struct SidebarRowsInput<'a> {
     pub(crate) files: &'a [DiffFile],
-    pub(crate) source: &'a DiffSource,
+    pub(crate) empty_message: &'static str,
+    pub(crate) can_stage: bool,
     pub(crate) selected_file_index: usize,
     pub(crate) sidebar_scroll: usize,
     pub(crate) row_counts: &'a [usize],
@@ -77,13 +73,12 @@ struct DiffSyntaxHighlighter<'a> {
 pub(crate) fn sidebar_rows(input: SidebarRowsInput<'_>) -> RenderedSidebarRows {
     if input.files.is_empty() {
         return RenderedSidebarRows {
-            lines: vec![muted_line(empty_sidebar_message(input.source), input.theme)],
+            lines: vec![muted_line(input.empty_message, input.theme)],
             row_records: Vec::new(),
             sidebar_scroll: 0,
         };
     }
 
-    let can_stage = input.source.can_stage();
     let sidebar_scroll = visible_sidebar_scroll(
         input.row_counts,
         input.sidebar_scroll,
@@ -101,7 +96,7 @@ pub(crate) fn sidebar_rows(input: SidebarRowsInput<'_>) -> RenderedSidebarRows {
             file,
             selected_file_index,
             input.content_width,
-            can_stage,
+            input.can_stage,
             input.theme,
         );
         let visible_rows = entry_lines
@@ -194,11 +189,11 @@ pub(crate) fn diff_lines_until(
 }
 
 pub(crate) fn no_diff_lines(
-    source: &DiffSource,
+    message: &'static str,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    wrap_line(muted_line(no_diff_message(source), theme), content_width)
+    wrap_line(muted_line(message, theme), content_width)
 }
 
 pub(crate) fn live_status_lines(
@@ -836,22 +831,6 @@ fn sidebar_gutter_width(can_stage: bool) -> usize {
     }
 }
 
-fn empty_sidebar_message(source: &DiffSource) -> &'static str {
-    if source.can_stage() {
-        NO_TRACKED_CHANGES
-    } else {
-        NO_BRANCH_CHANGES
-    }
-}
-
-fn no_diff_message(source: &DiffSource) -> &'static str {
-    if source.can_stage() {
-        NO_DIFF_MESSAGE
-    } else {
-        NO_PR_DIFF_MESSAGE
-    }
-}
-
 fn push_stat_spans(
     spans: &mut Vec<Span<'static>>,
     file: &DiffFile,
@@ -1101,7 +1080,8 @@ mod tests {
         let row_counts = sidebar_row_counts(&files, content_width, true, Theme::github_dark());
         let rows = sidebar_rows(SidebarRowsInput {
             files: &files,
-            source: &DiffSource::Worktree,
+            empty_message: "No tracked changes",
+            can_stage: true,
             selected_file_index: 0,
             sidebar_scroll: 0,
             row_counts: &row_counts,
@@ -1126,7 +1106,8 @@ mod tests {
         let row_counts = sidebar_row_counts(&files, 14, true, Theme::github_dark());
         let rows = sidebar_rows(SidebarRowsInput {
             files: &files,
-            source: &DiffSource::Worktree,
+            empty_message: "No tracked changes",
+            can_stage: true,
             selected_file_index: 1,
             sidebar_scroll: 0,
             row_counts: &row_counts,

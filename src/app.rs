@@ -1,14 +1,16 @@
 //! Terminal application session state.
 //!
-//! `App` owns selection, focus, scroll state, live reload errors, and staging
-//! behavior. Terminal and watch orchestration live in `runtime`; rendering is
-//! delegated to `ui`; rendered viewport state is delegated to `viewport`.
+//! `App` owns selection, focus, scroll state, and live reload errors. Review
+//! source behavior lives in `review_source`; terminal and watch orchestration
+//! live in `runtime`; rendering is delegated to `ui`.
+
+use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::git::{load_source_snapshots, load_worktree_diff, toggle_staging_for_file};
 use crate::model::{Changeset, DiffFile};
+use crate::review_source::{LoadedReview, ReviewSource};
 use crate::viewport::{RenderedViewport, ViewportScrollInput};
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -27,6 +29,8 @@ enum WheelDirection {
 
 #[derive(Debug)]
 pub(crate) struct App {
+    /// Review source behavior for this session.
+    source: ReviewSource,
     /// Current diff data being reviewed.
     pub(crate) changeset: Changeset,
     /// Last live reload/watch error, rendered above the diff when present.
@@ -46,9 +50,11 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(changeset: Changeset) -> Self {
+    pub(crate) fn new(review: LoadedReview) -> Self {
+        let LoadedReview { source, changeset } = review;
         let file_count = changeset.files.len();
         Self {
+            source,
             changeset,
             live_error: None,
             selected_file_index: 0,
@@ -60,14 +66,30 @@ impl App {
         }
     }
 
+    pub(crate) fn can_stage(&self) -> bool {
+        self.source.can_stage()
+    }
+
+    pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
+        self.source.live_watch_root()
+    }
+
+    pub(crate) fn empty_sidebar_message(&self) -> &'static str {
+        self.source.empty_sidebar_message()
+    }
+
+    pub(crate) fn no_diff_message(&self) -> &'static str {
+        self.source.no_diff_message()
+    }
+
     pub(crate) fn selected_file(&self) -> Option<&DiffFile> {
         self.changeset.files.get(self.selected_file_index)
     }
 
     pub(crate) fn ensure_selected_file_sources_loaded(&mut self) {
-        let source = &self.changeset.source;
+        let source = &self.source;
         if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
-            load_source_snapshots(file, source);
+            source.load_source_snapshots(file);
         }
     }
 
@@ -89,16 +111,12 @@ impl App {
         }
     }
 
-    pub(crate) fn can_live_reload(&self) -> bool {
-        self.changeset.source.can_stage()
-    }
-
     pub(crate) fn set_live_error(&mut self, error: String) {
         self.live_error = Some(error);
     }
 
-    pub(crate) fn reload_worktree(&mut self, preserve_scroll: bool) {
-        match load_worktree_diff() {
+    pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
+        match self.source.reload() {
             Ok(changeset) => self.apply_reloaded_changeset(changeset, preserve_scroll),
             Err(error) => self.live_error = Some(format!("reload failed: {error}")),
         }
@@ -310,7 +328,7 @@ impl App {
     }
 
     fn toggle_selected_file_staging(&mut self) -> Result<()> {
-        if self.focus != FocusPane::Sidebar || !self.changeset.source.can_stage() {
+        if self.focus != FocusPane::Sidebar {
             return Ok(());
         }
 
@@ -319,10 +337,9 @@ impl App {
         };
 
         let path = file.display_path().to_string();
-        toggle_staging_for_file(&path)?;
-
-        let reloaded_changeset = load_worktree_diff()?;
-        self.apply_reloaded_changeset(reloaded_changeset, false);
+        if let Some(reloaded_changeset) = self.source.toggle_staging_for_file(&path)? {
+            self.apply_reloaded_changeset(reloaded_changeset, false);
+        }
 
         Ok(())
     }
@@ -342,7 +359,7 @@ fn find_file_index(changeset: &Changeset, identity: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DiffHunk, DiffLine, DiffLineKind, DiffSource, FileStatus, SourceSnapshot};
+    use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
     use crate::theme::Theme;
     use crate::viewport::RenderedDiffLines;
     use ratatui::layout::Rect;
@@ -350,7 +367,7 @@ mod tests {
 
     #[test]
     fn diff_scroll_bounds_use_rendered_rows_when_available() {
-        let mut app = App::new(changeset_with_one_file());
+        let mut app = app_with(changeset_with_one_file());
         app.viewport.begin_diff(Rect::default(), 3);
         app.diff_scroll = 99;
         app.viewport.cache_diff_lines(
@@ -372,7 +389,7 @@ mod tests {
 
     #[test]
     fn reload_preserves_selected_file_and_scroll_by_path() {
-        let mut app = App::new(changeset_with_paths(["a.txt", "b.txt"]));
+        let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
         app.selected_file_index = 1;
         app.viewport.begin_diff(Rect::default(), 3);
         app.diff_scroll = 4;
@@ -389,7 +406,7 @@ mod tests {
 
     #[test]
     fn reload_clamps_scroll_when_selected_file_shrinks() {
-        let mut app = App::new(changeset_with_paths(["sample.txt"]));
+        let mut app = app_with(changeset_with_paths(["sample.txt"]));
         app.viewport.begin_diff(Rect::default(), 3);
         app.diff_scroll = 99;
 
@@ -404,7 +421,7 @@ mod tests {
 
     #[test]
     fn reload_resets_selection_and_scroll_when_selected_file_disappears() {
-        let mut app = App::new(changeset_with_paths(["a.txt", "b.txt"]));
+        let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
         app.selected_file_index = 1;
         app.diff_scroll = 4;
 
@@ -419,7 +436,7 @@ mod tests {
 
     #[test]
     fn hiding_files_panel_moves_focus_to_diff() {
-        let mut app = App::new(changeset_with_paths(["a.txt", "b.txt"]));
+        let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
         app.selected_file_index = 1;
         app.sidebar_scroll = 1;
         app.diff_scroll = 3;
@@ -436,7 +453,7 @@ mod tests {
 
     #[test]
     fn hidden_files_panel_cannot_receive_keyboard_focus() {
-        let mut app = App::new(changeset_with_one_file());
+        let mut app = app_with(changeset_with_one_file());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 
@@ -451,7 +468,7 @@ mod tests {
 
     #[test]
     fn showing_files_panel_moves_focus_to_sidebar() {
-        let mut app = App::new(changeset_with_one_file());
+        let mut app = app_with(changeset_with_one_file());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 
@@ -462,6 +479,10 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Sidebar);
     }
 
+    fn app_with(changeset: Changeset) -> App {
+        App::new(LoadedReview::worktree(changeset))
+    }
+
     fn changeset_with_one_file() -> Changeset {
         changeset_with_paths(["sample.txt"])
     }
@@ -470,7 +491,6 @@ mod tests {
         Changeset {
             title: String::new(),
             source_label: String::new(),
-            source: DiffSource::Worktree,
             files: vec![diff_file(path, 1)],
         }
     }
@@ -479,7 +499,6 @@ mod tests {
         Changeset {
             title: String::new(),
             source_label: String::new(),
-            source: DiffSource::Worktree,
             files: paths
                 .into_iter()
                 .enumerate()

@@ -7,6 +7,7 @@ mod app;
 mod git;
 mod model;
 mod patch;
+mod review_source;
 mod rows;
 mod runtime;
 mod syntax;
@@ -41,7 +42,9 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Diff) {
-        Command::Diff => runtime::run(app::App::new(git::load_worktree_diff()?)),
-        Command::Pr { base } => runtime::run(app::App::new(git::load_pr_diff(base.as_deref())?)),
+        Command::Diff => runtime::run(app::App::new(review_source::ReviewSource::load_worktree()?)),
+        Command::Pr { base } => runtime::run(app::App::new(
+            review_source::ReviewSource::load_pull_request(base.as_deref())?,
+        )),
     }
 }

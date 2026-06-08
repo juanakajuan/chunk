@@ -7,26 +7,8 @@ pub struct Changeset {
     pub title: String,
     /// Short description of the Git command or source refs behind the diff.
     pub source_label: String,
-    /// Where this diff came from, used to decide whether actions like staging
-    /// are available.
-    pub source: DiffSource,
     /// Files in display order.
     pub files: Vec<DiffFile>,
-}
-
-/// Origin of a changeset.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiffSource {
-    /// Current worktree against `HEAD`.
-    Worktree,
-    /// Fixed Git references, usually merge-base to `HEAD` for PR review.
-    GitRefs { old_ref: String, new_ref: String },
-}
-
-impl DiffSource {
-    pub fn can_stage(&self) -> bool {
-        matches!(self, Self::Worktree)
-    }
 }
 
 /// One file entry in a parsed diff.

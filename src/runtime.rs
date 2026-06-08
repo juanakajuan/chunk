@@ -19,7 +19,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::App;
-use crate::git::worktree_root;
 use crate::ui;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -37,8 +36,7 @@ struct DrainedWorktreeEvents {
 }
 
 impl WorktreeWatcher {
-    fn start() -> Result<Self> {
-        let root = worktree_root()?;
+    fn start(root: PathBuf) -> Result<Self> {
         let (sender, events) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(
             move |event| {
@@ -148,18 +146,21 @@ fn reload_worktree_if_due(app: &mut App, pending_reload_at: &mut Option<Instant>
         return false;
     }
 
-    app.reload_worktree(true);
+    app.reload_review_source(true);
     *pending_reload_at = None;
     true
 }
 
 fn start_live_worktree_watcher(app: &mut App) -> Option<WorktreeWatcher> {
-    if !app.can_live_reload() {
-        return None;
-    }
-
-    match WorktreeWatcher::start() {
-        Ok(watcher) => Some(watcher),
+    match app.live_watch_root() {
+        Ok(Some(root)) => match WorktreeWatcher::start(root) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                app.set_live_error(format!("watch failed: {error}"));
+                None
+            }
+        },
+        Ok(None) => None,
         Err(error) => {
             app.set_live_error(format!("watch failed: {error}"));
             None
