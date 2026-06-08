@@ -145,18 +145,17 @@ fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
 
     let file_name = file_name.as_str();
 
-    if matches!(file_name, "dockerfile" | "containerfile")
-        || file_name.starts_with("dockerfile.")
-        || file_name.starts_with("containerfile.")
-    {
+    let is_container_build_file = matches_known_file(file_name, "dockerfile")
+        || matches_known_file(file_name, "containerfile");
+    if is_container_build_file {
         return find_by_extension_or_name("dockerfile", "Dockerfile");
     }
 
-    if file_name == "makefile" || file_name.starts_with("makefile.") {
+    if matches_known_file(file_name, "makefile") {
         return find_by_extension_or_name("makefile", "Makefile");
     }
 
-    if file_name == ".env" || file_name.starts_with(".env.") {
+    if matches_known_file(file_name, ".env") {
         return find_first_syntax(&[("env", "DotENV"), ("sh", "Bash")]);
     }
 
@@ -168,6 +167,13 @@ fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
         "yarn.lock" => find_first_syntax(&[("yaml", "YAML"), ("toml", "TOML")]),
         _ => syntax_for_known_extension(extension.as_deref()),
     }
+}
+
+fn matches_known_file(file_name: &str, known_file_name: &str) -> bool {
+    file_name == known_file_name
+        || file_name
+            .strip_prefix(known_file_name)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn syntax_for_known_extension(extension: Option<&str>) -> Option<&'static SyntaxReference> {

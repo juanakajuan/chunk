@@ -237,12 +237,8 @@ fn max_new_context_line(file: &DiffFile) -> u32 {
 }
 
 fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> SourceSnapshot {
-    if max_context_line == 0 {
-        return SourceSnapshot::loaded(String::new());
-    }
-
-    if path.is_empty() {
-        return SourceSnapshot::Unavailable;
+    if let Some(snapshot) = guarded_source_prefix(path, max_context_line) {
+        return snapshot;
     }
 
     let mut child = match Command::new("git")
@@ -255,6 +251,10 @@ fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> Sourc
         Err(_) => return SourceSnapshot::Unavailable,
     };
 
+    load_source_prefix_from_child(&mut child, max_context_line)
+}
+
+fn load_source_prefix_from_child(child: &mut Child, max_context_line: u32) -> SourceSnapshot {
     let Some(stdout) = child.stdout.take() else {
         stop_child(child);
         return SourceSnapshot::Unavailable;
@@ -269,7 +269,7 @@ fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> Sourc
         }
     };
 
-    if prefix.reached_line_limit {
+    if prefix.line_limit_reached {
         stop_child(child);
         return SourceSnapshot::loaded(prefix.content);
     }
@@ -285,12 +285,8 @@ fn load_worktree_source_prefix(
     path: &str,
     max_context_line: u32,
 ) -> SourceSnapshot {
-    if max_context_line == 0 {
-        return SourceSnapshot::loaded(String::new());
-    }
-
-    if path.is_empty() {
-        return SourceSnapshot::Unavailable;
+    if let Some(snapshot) = guarded_source_prefix(path, max_context_line) {
+        return snapshot;
     }
 
     let path = match worktree_root {
@@ -317,9 +313,17 @@ fn load_source_prefix_from_reader(
     }
 }
 
+fn guarded_source_prefix(path: &str, max_context_line: u32) -> Option<SourceSnapshot> {
+    if max_context_line == 0 {
+        return Some(SourceSnapshot::loaded(String::new()));
+    }
+
+    path.is_empty().then_some(SourceSnapshot::Unavailable)
+}
+
 struct SourcePrefix {
     content: String,
-    reached_line_limit: bool,
+    line_limit_reached: bool,
 }
 
 fn read_source_prefix(
@@ -333,7 +337,7 @@ fn read_source_prefix(
         if byte_count == 0 {
             return Ok(SourcePrefix {
                 content,
-                reached_line_limit: false,
+                line_limit_reached: false,
             });
         }
 
@@ -349,11 +353,11 @@ fn read_source_prefix(
 
     Ok(SourcePrefix {
         content,
-        reached_line_limit: true,
+        line_limit_reached: true,
     })
 }
 
-fn stop_child(mut child: Child) {
+fn stop_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }

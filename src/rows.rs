@@ -52,6 +52,22 @@ pub(crate) struct RenderedRows {
     pub(crate) complete: bool,
 }
 
+impl RenderedRows {
+    fn complete(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            lines,
+            complete: true,
+        }
+    }
+
+    fn partial(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            lines,
+            complete: false,
+        }
+    }
+}
+
 struct DiffSyntaxHighlighter<'a> {
     highlighter: SyntaxHighlighter,
     source_lines: Option<Lines<'a>>,
@@ -144,10 +160,7 @@ pub(crate) fn diff_lines_until(
             muted_line("Binary file changed", theme),
             content_width,
         ));
-        return RenderedRows {
-            lines,
-            complete: true,
-        };
+        return RenderedRows::complete(lines);
     }
 
     if file.hunks.is_empty() {
@@ -155,10 +168,7 @@ pub(crate) fn diff_lines_until(
             muted_line("File changed without textual hunks", theme),
             content_width,
         ));
-        return RenderedRows {
-            lines,
-            complete: true,
-        };
+        return RenderedRows::complete(lines);
     }
 
     let mut old_highlighter =
@@ -176,17 +186,11 @@ pub(crate) fn diff_lines_until(
             theme,
             target_rows,
         ) {
-            return RenderedRows {
-                lines,
-                complete: false,
-            };
+            return RenderedRows::partial(lines);
         }
     }
 
-    RenderedRows {
-        lines,
-        complete: true,
-    }
+    RenderedRows::complete(lines)
 }
 
 pub(crate) fn no_diff_lines(
@@ -263,14 +267,14 @@ fn visible_sidebar_scroll(
     }
 
     let selected_index = selected_file_index.min(file_count - 1);
-    let sidebar_scroll = sidebar_scroll.min(file_count - 1);
+    let scroll = sidebar_scroll.min(file_count - 1);
 
-    if selected_index < sidebar_scroll {
+    if selected_index < scroll {
         return selected_index;
     }
 
-    if sidebar_selection_visible(row_counts, sidebar_scroll, selected_index, visible_height) {
-        sidebar_scroll
+    if sidebar_selection_visible(row_counts, scroll, selected_index, visible_height) {
+        scroll
     } else {
         sidebar_scroll_for_selected(row_counts, selected_index, visible_height)
     }
@@ -288,9 +292,11 @@ fn sidebar_selection_visible(
 
     let visible_height = visible_height.max(1);
     let rows_before_selected: usize = row_counts[scroll..selected_index].iter().sum();
-    let selected_rows = row_counts[selected_index];
-    rows_before_selected < visible_height
-        && (rows_before_selected == 0 || rows_before_selected + selected_rows <= visible_height)
+    if rows_before_selected >= visible_height {
+        return false;
+    }
+
+    rows_before_selected == 0 || rows_before_selected + row_counts[selected_index] <= visible_height
 }
 
 fn sidebar_scroll_for_selected(
@@ -602,18 +608,18 @@ impl<'a> DiffSyntaxHighlighter<'a> {
     }
 
     fn advance_to(&mut self, target_line: u32) {
-        while self.next_line < target_line {
-            if !self.advance_source_line() {
-                self.next_line = target_line;
-                return;
-            }
+        while self.next_line < target_line && self.advance_source_line() {}
+
+        if self.next_line < target_line {
+            self.next_line = target_line;
         }
     }
 
     fn highlight_line(&mut self, content: &str, base_style: Style) -> Vec<Span<'static>> {
+        let expanded_content = expand_tabs(content);
         let spans = self
             .highlighter
-            .highlight_line(&expand_tabs(content), base_style);
+            .highlight_line(&expanded_content, base_style);
         self.advance_position();
         spans
     }
@@ -634,7 +640,8 @@ impl<'a> DiffSyntaxHighlighter<'a> {
     }
 
     fn advance_highlighter_line(&mut self, content: &str) {
-        self.highlighter.advance_line(&expand_tabs(content));
+        let expanded_content = expand_tabs(content);
+        self.highlighter.advance_line(&expanded_content);
     }
 
     fn advance_position(&mut self) {

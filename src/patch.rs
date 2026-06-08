@@ -247,27 +247,17 @@ fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
         return true;
     }
 
-    if let Some(path) = line.strip_prefix("copy from ") {
-        file.status = FileStatus::Copied;
-        file.old_path = path.to_string();
+    if apply_path_change_metadata(file, line, "copy from ", "copy to ", FileStatus::Copied) {
         return true;
     }
 
-    if let Some(path) = line.strip_prefix("copy to ") {
-        file.status = FileStatus::Copied;
-        file.path = path.to_string();
-        return true;
-    }
-
-    if let Some(path) = line.strip_prefix("rename from ") {
-        file.status = FileStatus::Renamed;
-        file.old_path = path.to_string();
-        return true;
-    }
-
-    if let Some(path) = line.strip_prefix("rename to ") {
-        file.status = FileStatus::Renamed;
-        file.path = path.to_string();
+    if apply_path_change_metadata(
+        file,
+        line,
+        "rename from ",
+        "rename to ",
+        FileStatus::Renamed,
+    ) {
         return true;
     }
 
@@ -276,17 +266,46 @@ fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
         return true;
     }
 
-    if let Some(path) = line.strip_prefix("--- ") {
-        update_path_unless_dev_null(&mut file.old_path, path);
+    if update_prefixed_path(&mut file.old_path, line, "--- ") {
         return true;
     }
 
-    if let Some(path) = line.strip_prefix("+++ ") {
-        update_path_unless_dev_null(&mut file.path, path);
+    if update_prefixed_path(&mut file.path, line, "+++ ") {
         return true;
     }
 
     false
+}
+
+fn apply_path_change_metadata(
+    file: &mut FileBuilder,
+    line: &str,
+    from_prefix: &str,
+    to_prefix: &str,
+    status: FileStatus,
+) -> bool {
+    if let Some(path) = line.strip_prefix(from_prefix) {
+        file.status = status;
+        file.old_path = path.to_string();
+        return true;
+    }
+
+    if let Some(path) = line.strip_prefix(to_prefix) {
+        file.status = status;
+        file.path = path.to_string();
+        return true;
+    }
+
+    false
+}
+
+fn update_prefixed_path(target: &mut String, line: &str, prefix: &str) -> bool {
+    let Some(path) = line.strip_prefix(prefix) else {
+        return false;
+    };
+
+    update_path_unless_dev_null(target, path);
+    true
 }
 
 fn update_path_unless_dev_null(target: &mut String, path: &str) {

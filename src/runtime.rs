@@ -99,19 +99,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if let Some(watcher) = watcher.as_ref() {
-            let drained = watcher.drain();
-            if let Some(error) = drained.error {
-                app.set_live_error(format!("watch failed: {error}"));
-            }
-            if drained.changed {
-                pending_reload_at = Some(Instant::now() + WORKTREE_RELOAD_DEBOUNCE);
-            }
-        }
-
-        if pending_reload_at.is_some_and(|deadline| Instant::now() >= deadline) {
-            app.reload_worktree(true);
-            pending_reload_at = None;
+        drain_live_worktree_events(watcher.as_ref(), app, &mut pending_reload_at);
+        if reload_worktree_if_due(app, &mut pending_reload_at) {
             continue;
         }
 
@@ -128,6 +117,40 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     }
 
     Ok(())
+}
+
+fn drain_live_worktree_events(
+    watcher: Option<&WorktreeWatcher>,
+    app: &mut App,
+    pending_reload_at: &mut Option<Instant>,
+) {
+    let Some(watcher) = watcher else {
+        return;
+    };
+
+    let DrainedWorktreeEvents { changed, error } = watcher.drain();
+
+    if let Some(error) = error {
+        app.set_live_error(format!("watch failed: {error}"));
+    }
+
+    if changed {
+        *pending_reload_at = Some(Instant::now() + WORKTREE_RELOAD_DEBOUNCE);
+    }
+}
+
+fn reload_worktree_if_due(app: &mut App, pending_reload_at: &mut Option<Instant>) -> bool {
+    let Some(deadline) = *pending_reload_at else {
+        return false;
+    };
+
+    if Instant::now() < deadline {
+        return false;
+    }
+
+    app.reload_worktree(true);
+    *pending_reload_at = None;
+    true
 }
 
 fn start_live_worktree_watcher(app: &mut App) -> Option<WorktreeWatcher> {
