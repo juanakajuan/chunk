@@ -2,7 +2,12 @@
 
 `chunk` is a minimal terminal diff reviewer for Git repositories. It renders a
 file list and a syntax-highlighted unified diff in the terminal, with keyboard
-and mouse navigation.
+and mouse navigation, live worktree refresh, and per-file staging.
+
+## Requirements
+
+- Rust 2024 toolchain
+- Git
 
 ## Usage
 
@@ -12,8 +17,9 @@ Run from inside a Git worktree:
 cargo run -- diff
 ```
 
-`diff` reviews the current working tree against `HEAD`, including untracked
-files. This is also the default command:
+`diff` reviews the current working tree against `HEAD`, including staged,
+unstaged, mixed, and untracked files. It live-refreshes as the worktree changes.
+This is also the default command:
 
 ```sh
 cargo run
@@ -27,10 +33,13 @@ cargo run -- pr main
 ```
 
 When no base is passed, `pr` tries `origin/HEAD`, then `main`, then `master`.
+PR mode compares the merge-base of the base ref and `HEAD` against `HEAD`.
+It does not live-refresh or stage files.
 
 ## Controls
 
-- `j` / `k`: move down or up in the focused pane
+- `j` / `k`: move down or up in the focused pane; in the file list this changes
+  files, in the diff pane this scrolls by one row
 - `Tab`: switch focus between file list and diff
 - `f`: show or hide the file list
 - `Left`: focus file list
@@ -39,7 +48,8 @@ When no base is passed, `pr` tries `origin/HEAD`, then `main`, then `master`.
 - `PageUp` / `Ctrl-u`: scroll diff up one page
 - `g` / `Home`: jump to top of diff
 - `G` / `End`: jump to bottom of diff
-- `Space`: stage or unstage the selected file in `diff` mode
+- `Space`: stage or unstage the selected file when the file list is focused in
+  `diff` mode
 - `q` / `Esc`: quit
 
 Mouse hover changes focus. Click a file to select it. Wheel scrolling moves
@@ -57,7 +67,21 @@ CHUNK_THEME=github-dark cargo run
 ## Development
 
 ```sh
+cargo fmt --check
 cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the code map and data flow.
+Code map:
+
+- `src/main.rs`: CLI parsing and review source selection
+- `src/review_source.rs`: worktree vs PR behavior, reloads, staging capability
+- `src/git.rs`: Git command boundary and source snapshot loading
+- `src/patch.rs`: unified diff parser
+- `src/model.rs`: parsed diff data structures
+- `src/app.rs`: selection, focus, scroll, reload, and staging session state
+- `src/runtime.rs`: terminal setup, event loop, mouse capture, live watcher
+- `src/ui.rs`: Ratatui layout and widget drawing
+- `src/rows.rs`: rendered sidebar, diff, status, and keybind rows
+- `src/viewport.rs`: viewport geometry, scroll clamping, render caches
+- `src/syntax.rs` and `src/theme.rs`: syntax adapter and palettes
