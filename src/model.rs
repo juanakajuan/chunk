@@ -57,6 +57,38 @@ impl DiffFile {
                 .map(|hunk| hunk.lines.len() + 1)
                 .sum::<usize>()
     }
+
+    /// Best-effort line in the new file to place an external editor near.
+    pub fn first_changed_line(&self) -> Option<u32> {
+        if self.binary {
+            return None;
+        }
+
+        self.hunks.iter().find_map(first_changed_line_in_hunk)
+    }
+}
+
+fn first_changed_line_in_hunk(hunk: &DiffHunk) -> Option<u32> {
+    let mut next_new_line = hunk.new_start.max(1);
+
+    for line in &hunk.lines {
+        match line.kind {
+            DiffLineKind::Added => return Some(valid_line_number(line.new_line, next_new_line)),
+            DiffLineKind::Removed => return Some(next_new_line),
+            DiffLineKind::Context => {
+                if let Some(line_number) = line.new_line {
+                    next_new_line = line_number.saturating_add(1).max(1);
+                }
+            }
+            DiffLineKind::Meta => {}
+        }
+    }
+
+    None
+}
+
+fn valid_line_number(line: Option<u32>, fallback: u32) -> u32 {
+    line.filter(|line| *line > 0).unwrap_or(fallback)
 }
 
 /// Source text needed to seed syntax highlighting before a hunk.
@@ -145,4 +177,75 @@ pub enum DiffLineKind {
     Added,
     Removed,
     Meta,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_changed_line_skips_context_prefix() {
+        let file = text_file(
+            10,
+            vec![
+                diff_line(DiffLineKind::Context, Some(10), Some(10)),
+                diff_line(DiffLineKind::Added, None, Some(11)),
+            ],
+        );
+
+        assert_eq!(file.first_changed_line(), Some(11));
+    }
+
+    #[test]
+    fn first_changed_line_for_removal_uses_current_new_line() {
+        let file = text_file(
+            20,
+            vec![
+                diff_line(DiffLineKind::Context, Some(20), Some(20)),
+                diff_line(DiffLineKind::Removed, Some(21), None),
+            ],
+        );
+
+        assert_eq!(file.first_changed_line(), Some(21));
+    }
+
+    #[test]
+    fn first_changed_line_ignores_binary_files() {
+        let mut file = text_file(1, vec![diff_line(DiffLineKind::Added, None, Some(1))]);
+        file.binary = true;
+
+        assert_eq!(file.first_changed_line(), None);
+    }
+
+    fn text_file(new_start: u32, lines: Vec<DiffLine>) -> DiffFile {
+        DiffFile {
+            id: "0".to_string(),
+            old_path: "sample.txt".to_string(),
+            path: "sample.txt".to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
+            status: FileStatus::Modified,
+            stage: FileStage::Unstaged,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![DiffHunk {
+                header: format!("@@ -{new_start} +{new_start} @@"),
+                old_start: new_start,
+                old_lines: 1,
+                new_start,
+                new_lines: 1,
+                lines,
+            }],
+            binary: false,
+        }
+    }
+
+    fn diff_line(kind: DiffLineKind, old_line: Option<u32>, new_line: Option<u32>) -> DiffLine {
+        DiffLine {
+            kind,
+            old_line,
+            new_line,
+            content: "line".to_string(),
+        }
+    }
 }

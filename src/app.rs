@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile};
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::viewport::{RenderedViewport, ViewportScrollInput};
@@ -47,6 +48,8 @@ pub(crate) struct App {
     pub(crate) sidebar_scroll: usize,
     /// Rendered viewport geometry, row mapping, and render caches.
     pub(crate) viewport: RenderedViewport,
+    /// Deferred request for runtime to open an external editor safely.
+    editor_request: Option<EditorRequest>,
 }
 
 impl App {
@@ -63,6 +66,7 @@ impl App {
             diff_scroll: 0,
             sidebar_scroll: 0,
             viewport: RenderedViewport::new(file_count),
+            editor_request: None,
         }
     }
 
@@ -113,6 +117,10 @@ impl App {
 
     pub(crate) fn set_live_error(&mut self, error: String) {
         self.live_error = Some(error);
+    }
+
+    pub(crate) fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
     }
 
     pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
@@ -166,6 +174,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
 
             KeyCode::Char(' ') => self.toggle_selected_file_staging()?,
+            KeyCode::Char('e') => self.queue_selected_file_editor_request(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
             KeyCode::PageUp => self.scroll_diff_page(VerticalDirection::Up),
@@ -329,6 +338,22 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn queue_selected_file_editor_request(&mut self) {
+        self.editor_request = None;
+        let Some(file) = self.selected_file() else {
+            self.live_error = Some("no selected file to open".to_string());
+            return;
+        };
+
+        match self.source.editor_request(file) {
+            Ok(request) => {
+                self.live_error = None;
+                self.editor_request = Some(request);
+            }
+            Err(error) => self.live_error = Some(format!("edit failed: {error}")),
+        }
     }
 }
 

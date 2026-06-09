@@ -5,12 +5,13 @@
 //! selection and scroll; callers do not need to know which Git commands back a
 //! source.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 
+use crate::editor::EditorRequest;
 use crate::git;
-use crate::model::{Changeset, DiffFile};
+use crate::model::{Changeset, DiffFile, FileStatus};
 
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
 const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
@@ -104,6 +105,15 @@ impl ReviewSource {
         }
     }
 
+    pub(crate) fn editor_request(&self, file: &DiffFile) -> Result<EditorRequest> {
+        match self {
+            Self::Worktree(source) => source.editor_request(file),
+            Self::PullRequest(_) => Err(eyre!(
+                "cannot open PR snapshot in editor; run `chunk diff` to edit worktree files"
+            )),
+        }
+    }
+
     pub(crate) fn empty_sidebar_message(&self) -> &'static str {
         match self {
             Self::Worktree(_) => NO_TRACKED_CHANGES,
@@ -140,6 +150,16 @@ impl WorktreeReviewSource {
         git::toggle_staging_for_file(path)?;
         git::load_worktree_diff()
     }
+
+    fn editor_request(self, file: &DiffFile) -> Result<EditorRequest> {
+        let path = editable_file_path(file)?;
+        let root = git::worktree_root()?;
+
+        Ok(EditorRequest {
+            path: worktree_file_path(&root, path)?,
+            line: file.first_changed_line(),
+        })
+    }
 }
 
 impl PullRequestReviewSource {
@@ -153,4 +173,35 @@ impl PullRequestReviewSource {
     fn load_source_snapshots(&self, file: &mut DiffFile) {
         git::load_ref_source_snapshots(file, &self.old_ref, &self.new_ref);
     }
+}
+
+fn editable_file_path(file: &DiffFile) -> Result<&str> {
+    if file.status == FileStatus::Deleted {
+        return Err(eyre!(
+            "cannot open deleted file in editor: {}",
+            file.display_path()
+        ));
+    }
+
+    if file.path.is_empty() {
+        return Err(eyre!("selected file has no worktree path to open"));
+    }
+
+    Ok(&file.path)
+}
+
+fn worktree_file_path(root: &Path, path: &str) -> Result<PathBuf> {
+    let relative = Path::new(path);
+    if relative.is_absolute() || relative.components().any(escapes_worktree) {
+        return Err(eyre!("cannot open path outside worktree: {path}"));
+    }
+
+    Ok(root.join(relative))
+}
+
+fn escapes_worktree(component: Component<'_>) -> bool {
+    matches!(
+        component,
+        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+    )
 }

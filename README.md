@@ -50,6 +50,8 @@ It does not live-refresh or stage files.
 - `G` / `End`: jump to bottom of diff
 - `Space`: stage or unstage the selected file when the file list is focused in
   `diff` mode
+- `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
+  mode
 - `q` / `Esc`: quit
 
 Mouse hover changes focus. Click a file to select it. Wheel scrolling moves
@@ -75,6 +77,7 @@ cargo clippy --all-targets -- -D warnings
 Code map:
 
 - `src/main.rs`: CLI parsing and review source selection
+- `src/editor.rs`: external editor command resolution
 - `src/review_source.rs`: worktree vs PR behavior, reloads, staging capability
 - `src/git.rs`: Git command boundary and source snapshot loading
 - `src/patch.rs`: unified diff parser

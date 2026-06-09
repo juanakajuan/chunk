@@ -4,6 +4,7 @@
 //! diff source, then hand the resulting changeset to the terminal app.
 
 mod app;
+mod editor;
 mod git;
 mod model;
 mod patch;

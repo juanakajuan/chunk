@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -19,10 +19,13 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::App;
+use crate::editor::{EditorCommand, EditorRequest};
 use crate::ui;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WORKTREE_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
+
+type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 struct WorktreeWatcher {
     _watcher: RecommendedWatcher,
@@ -90,7 +93,7 @@ pub(crate) fn run(mut app: App) -> Result<()> {
     result
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
     let watcher = start_live_worktree_watcher(app);
     let mut pending_reload_at: Option<Instant> = None;
 
@@ -107,13 +110,80 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
         }
 
         match event::read()? {
-            Event::Key(key) if !app.handle_key(key)? => break,
+            Event::Key(key) if !handle_key_event(terminal, app, key)? => break,
             Event::Key(_) => {}
             Event::Mouse(mouse) => app.handle_mouse(mouse),
             _ => {}
         }
     }
 
+    Ok(())
+}
+
+fn handle_key_event(terminal: &mut TuiTerminal, app: &mut App, key: KeyEvent) -> Result<bool> {
+    if !app.handle_key(key)? {
+        return Ok(false);
+    }
+
+    if let Some(request) = app.take_editor_request() {
+        open_requested_editor(terminal, app, &request)?;
+    }
+
+    Ok(true)
+}
+
+fn open_requested_editor(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    request: &EditorRequest,
+) -> Result<()> {
+    match open_editor(terminal, request)? {
+        Some(error) => app.set_live_error(error),
+        None => app.reload_review_source(true),
+    }
+
+    Ok(())
+}
+
+fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<Option<String>> {
+    let editor = match EditorCommand::from_env() {
+        Ok(editor) => editor,
+        Err(error) => return Ok(Some(error)),
+    };
+
+    suspend_terminal(terminal)?;
+    let status = editor.status(request);
+    resume_terminal(terminal)?;
+    terminal.clear()?;
+
+    match status {
+        Ok(status) if status.success() => Ok(None),
+        Ok(status) => Ok(Some(format!("editor exited with status {status}"))),
+        Err(error) => Ok(Some(format!(
+            "failed to start editor `{}`: {error}",
+            editor.display_name()
+        ))),
+    }
+}
+
+fn suspend_terminal(terminal: &mut TuiTerminal) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn resume_terminal(terminal: &mut TuiTerminal) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
     Ok(())
 }
 

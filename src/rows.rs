@@ -238,6 +238,7 @@ pub(crate) fn keybind_bar_line(
     }
     hints.push("[j/k] move");
     hints.push("[Ctrl-d/u] scroll");
+    hints.push("[e] edit");
     hints.push("[q] quit");
 
     Line::styled(hints.join("  |  "), Style::default().fg(theme.muted))
