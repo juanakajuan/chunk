@@ -54,6 +54,8 @@ pub struct RenderedDiffLines {
     can_stage: bool,
     /// Rendered, wrapped lines for the selected file.
     lines: Vec<Line<'static>>,
+    /// Rendered row offsets for each hunk header under this cache layout.
+    hunk_offsets: Vec<usize>,
     /// Whether `lines` contains every rendered row for the file.
     complete: bool,
 }
@@ -155,12 +157,17 @@ impl RenderedViewport {
     }
 
     fn max_diff_scroll(&self, input: ViewportScrollInput<'_>) -> usize {
-        self.rendered_diff_line_count(
-            input.selected_file_index,
-            input.selected_file_id,
-            input.selected_file_line_count,
-        )
-        .saturating_sub(self.diff_view_height)
+        let rendered_scroll = self
+            .rendered_diff_line_count(
+                input.selected_file_index,
+                input.selected_file_id,
+                input.selected_file_line_count,
+            )
+            .saturating_sub(self.diff_view_height);
+        let hunk_scroll = self
+            .partial_cache_hunk_scroll_target(input.selected_file_index, input.selected_file_id);
+
+        rendered_scroll.max(hunk_scroll)
     }
 
     fn sidebar_scroll_with_selected_visible(
@@ -251,6 +258,12 @@ impl RenderedViewport {
             .unwrap_or_default()
     }
 
+    pub fn diff_hunk_offsets(&self, file_index: usize, file_id: &str) -> Option<&[usize]> {
+        self.diff_lines_cache(file_index)
+            .filter(|cache| cache.matches_file(file_id))
+            .map(|cache| cache.hunk_offsets.as_slice())
+    }
+
     pub fn cached_sidebar_row_counts(
         &mut self,
         content_width: usize,
@@ -281,6 +294,17 @@ impl RenderedViewport {
             .get(file_index)
             .and_then(Option::as_ref)
     }
+
+    fn partial_cache_hunk_scroll_target(&self, file_index: usize, file_id: Option<&str>) -> usize {
+        let Some(file_id) = file_id else {
+            return 0;
+        };
+
+        self.diff_lines_cache(file_index)
+            .filter(|cache| cache.matches_file(file_id) && !cache.complete)
+            .and_then(|cache| cache.hunk_offsets.last().copied())
+            .unwrap_or(0)
+    }
 }
 
 impl RenderedDiffLines {
@@ -298,8 +322,14 @@ impl RenderedDiffLines {
             syntax_palette,
             can_stage,
             lines,
+            hunk_offsets: Vec::new(),
             complete,
         }
+    }
+
+    pub fn with_hunk_offsets(mut self, hunk_offsets: Vec<usize>) -> Self {
+        self.hunk_offsets = hunk_offsets;
+        self
     }
 
     fn matches_file(&self, file_id: &str) -> bool {

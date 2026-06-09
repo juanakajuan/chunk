@@ -183,6 +183,7 @@ fn render_selected_diff_lines(
     if let Some(render_target) = render_target {
         app.ensure_selected_file_sources_loaded();
         let file = app.changeset.files[selected_file_index].clone();
+        let hunk_offsets = rows::hunk_offsets(&file, content_width, theme, can_stage);
         let rendered_rows =
             rows::diff_lines_until(&file, content_width, theme, can_stage, render_target);
         app.viewport.cache_diff_lines(
@@ -194,7 +195,8 @@ fn render_selected_diff_lines(
                 can_stage,
                 rendered_rows.lines,
                 rendered_rows.complete,
-            ),
+            )
+            .with_hunk_offsets(hunk_offsets),
         );
     }
 

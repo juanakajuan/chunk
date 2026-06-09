@@ -170,6 +170,9 @@ impl App {
             KeyCode::Char('j') => self.move_by(VerticalDirection::Down),
             KeyCode::Char('k') => self.move_by(VerticalDirection::Up),
 
+            KeyCode::Char('n') => self.jump_hunk(VerticalDirection::Down),
+            KeyCode::Char('N') => self.jump_hunk(VerticalDirection::Up),
+
             KeyCode::Home | KeyCode::Char('g') => self.diff_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
 
@@ -321,6 +324,30 @@ impl App {
 
     fn scroll_diff_to_bottom(&mut self) {
         self.diff_scroll = usize::MAX;
+    }
+
+    fn jump_hunk(&mut self, direction: VerticalDirection) {
+        let Some(file) = self.selected_file() else {
+            return;
+        };
+        let Some(offsets) = self
+            .viewport
+            .diff_hunk_offsets(self.selected_file_index, file.id.as_str())
+        else {
+            return;
+        };
+
+        let target = match direction {
+            VerticalDirection::Down => offsets.iter().find(|offset| **offset > self.diff_scroll),
+            VerticalDirection::Up => offsets
+                .iter()
+                .rev()
+                .find(|offset| **offset < self.diff_scroll),
+        };
+
+        if let Some(offset) = target {
+            self.diff_scroll = *offset;
+        }
     }
 
     fn toggle_selected_file_staging(&mut self) -> Result<()> {
@@ -489,6 +516,83 @@ mod tests {
 
         assert!(app.files_panel_visible);
         assert_eq!(app.focus, FocusPane::Sidebar);
+    }
+
+    #[test]
+    fn hunk_jump_uses_cached_wrapped_offsets() {
+        let mut app = app_with(changeset_with_one_file());
+        let theme = Theme::github_dark();
+        app.viewport.begin_diff(Rect::default(), 3);
+        app.viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "0".to_string(),
+                24,
+                theme.syntax,
+                true,
+                vec![Line::raw("row"); 10],
+                false,
+            )
+            .with_hunk_offsets(vec![1, 80]),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.diff_scroll, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.diff_scroll, 80);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.diff_scroll, 1);
+    }
+
+    #[test]
+    fn hunk_jump_handles_missing_and_single_offsets() {
+        let mut app = app_with(changeset_with_one_file());
+        let theme = Theme::github_dark();
+        app.viewport.begin_diff(Rect::default(), 3);
+        app.viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "0".to_string(),
+                24,
+                theme.syntax,
+                true,
+                vec![Line::raw("row"); 8],
+                true,
+            )
+            .with_hunk_offsets(Vec::new()),
+        );
+        app.diff_scroll = 4;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.diff_scroll, 4);
+
+        app.viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "0".to_string(),
+                24,
+                theme.syntax,
+                true,
+                vec![Line::raw("row"); 8],
+                true,
+            )
+            .with_hunk_offsets(vec![5]),
+        );
+        app.diff_scroll = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.diff_scroll, 5);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.diff_scroll, 5);
     }
 
     fn app_with(changeset: Changeset) -> App {

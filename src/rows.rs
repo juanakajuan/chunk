@@ -193,6 +193,31 @@ pub(crate) fn diff_lines_until(
     RenderedRows::complete(lines)
 }
 
+pub(crate) fn hunk_offsets(
+    file: &DiffFile,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+) -> Vec<usize> {
+    if file.binary || file.hunks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut offset = wrap_line(
+        render_file_header(file, content_width, can_stage, theme),
+        content_width,
+    )
+    .len();
+    let mut offsets = Vec::with_capacity(file.hunks.len());
+
+    for hunk in &file.hunks {
+        offsets.push(offset);
+        offset += hunk_row_count(hunk, content_width, theme);
+    }
+
+    offsets
+}
+
 pub(crate) fn no_diff_lines(
     message: &'static str,
     content_width: usize,
@@ -238,6 +263,7 @@ pub(crate) fn keybind_bar_line(
     }
     hints.push("[j/k] move");
     hints.push("[Ctrl-d/u] scroll");
+    hints.push("[n/N] hunk");
     hints.push("[e] edit");
     hints.push("[q] quit");
 
@@ -482,6 +508,23 @@ fn path_or_display<'a>(path: &'a str, file: &'a DiffFile) -> &'a str {
     } else {
         path
     }
+}
+
+fn hunk_row_count(hunk: &DiffHunk, content_width: usize, theme: Theme) -> usize {
+    wrap_line(hunk_header_line(&hunk.header, theme), content_width).len()
+        + hunk
+            .lines
+            .iter()
+            .map(|line| diff_line_row_count(line, content_width))
+            .sum::<usize>()
+}
+
+fn diff_line_row_count(line: &DiffLine, content_width: usize) -> usize {
+    wrap_styled_spans(
+        vec![Span::raw(expand_tabs(&line.content))],
+        diff_content_width(content_width),
+    )
+    .len()
 }
 
 fn muted_line(text: impl Into<String>, theme: Theme) -> Line<'static> {
@@ -1338,6 +1381,29 @@ mod tests {
     }
 
     #[test]
+    fn hunk_offsets_match_wrapped_rendered_rows() {
+        let theme = Theme::github_dark();
+        let file = diff_file_with_hunks(vec![
+            (
+                "@@ -1 +1 @@",
+                vec![added_diff_line(
+                    "alpha beta gamma delta epsilon zeta eta theta iota",
+                )],
+            ),
+            ("@@ -10 +10 @@", vec![added_diff_line("short")]),
+        ]);
+        let content_width = DIFF_GUTTER_WIDTH + 12;
+
+        let offsets = hunk_offsets(&file, content_width, theme, true);
+        let lines = diff_lines_until(&file, content_width, theme, true, usize::MAX).lines;
+
+        assert_eq!(offsets.len(), 2);
+        assert_eq!(line_text(&lines[offsets[0]]), " @@ -1 +1 @@");
+        assert_eq!(line_text(&lines[offsets[1]]), " @@ -10 +10 @@");
+        assert!(offsets[1] > offsets[0] + 2);
+    }
+
+    #[test]
     fn intraline_highlights_inserted_spans() {
         let removed = r#"let title = format!("{} +{}", path, additions);"#;
         let added = r#"let title = format!("{} +{} -{}", path, additions, deletions);"#;
@@ -1585,6 +1651,45 @@ mod tests {
                 new_lines,
                 lines,
             }],
+            binary: false,
+        }
+    }
+
+    fn diff_file_with_hunks(hunks: Vec<(&str, Vec<DiffLine>)>) -> DiffFile {
+        let additions = hunks
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .count();
+        let deletions = hunks
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .filter(|line| line.kind == DiffLineKind::Removed)
+            .count();
+        let hunks = hunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, (header, lines))| DiffHunk {
+                header: header.to_string(),
+                old_start: index as u32 + 1,
+                old_lines: 1,
+                new_start: index as u32 + 1,
+                new_lines: 1,
+                lines,
+            })
+            .collect();
+
+        DiffFile {
+            id: "0".to_string(),
+            old_path: "sample.unknown".to_string(),
+            path: "sample.unknown".to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
+            status: FileStatus::Modified,
+            stage: FileStage::Unstaged,
+            additions,
+            deletions,
+            hunks,
             binary: false,
         }
     }

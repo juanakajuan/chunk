@@ -46,6 +46,7 @@ It does not live-refresh or stage files.
 - `Right` / `Enter`: focus diff
 - `PageDown` / `Ctrl-d`: scroll diff down one page
 - `PageUp` / `Ctrl-u`: scroll diff up one page
+- `n` / `N`: jump to the next or previous hunk in the selected file
 - `g` / `Home`: jump to top of diff
 - `G` / `End`: jump to bottom of diff
 - `Space`: stage or unstage the selected file when the file list is focused in
