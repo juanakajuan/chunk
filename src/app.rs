@@ -2,17 +2,22 @@
 //!
 //! `App` owns selection, focus, scroll state, and live reload errors. Review
 //! source behavior lives in `review_source`; terminal and watch orchestration
-//! live in `runtime`; rendering is delegated to `ui`.
+//! live in `runtime`; rendered row preparation lives here while `ui` draws
+//! Ratatui widgets.
 
 use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use ratatui::text::Line;
 
 use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile};
 use crate::review_source::{LoadedReview, ReviewSource};
-use crate::viewport::{RenderedViewport, ViewportScrollInput};
+use crate::rows::{self, SidebarRowsInput};
+use crate::theme::Theme;
+use crate::viewport::{RenderedDiffLines, RenderedViewport, ViewportScrollInput};
 
 const MOUSE_WHEEL_STEP: usize = 3;
 
@@ -33,23 +38,28 @@ pub(crate) struct App {
     /// Review source behavior for this session.
     source: ReviewSource,
     /// Current diff data being reviewed.
-    pub(crate) changeset: Changeset,
+    changeset: Changeset,
     /// Last live reload/watch error, rendered above the diff when present.
-    pub(crate) live_error: Option<String>,
+    live_error: Option<String>,
     /// Index into `changeset.files`.
-    pub(crate) selected_file_index: usize,
+    selected_file_index: usize,
     /// Pane receiving keyboard and mouse wheel actions.
-    pub(crate) focus: FocusPane,
+    focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
-    pub(crate) files_panel_visible: bool,
+    files_panel_visible: bool,
     /// First rendered diff row visible in the diff pane.
-    pub(crate) diff_scroll: usize,
+    diff_scroll: usize,
     /// First file index considered for sidebar rendering.
-    pub(crate) sidebar_scroll: usize,
+    sidebar_scroll: usize,
     /// Rendered viewport geometry, row mapping, and render caches.
-    pub(crate) viewport: RenderedViewport,
+    viewport: RenderedViewport,
     /// Deferred request for runtime to open an external editor safely.
     editor_request: Option<EditorRequest>,
+}
+
+pub(crate) struct DiffPaneRows {
+    pub(crate) title: String,
+    pub(crate) lines: Vec<Line<'static>>,
 }
 
 impl App {
@@ -70,7 +80,83 @@ impl App {
         }
     }
 
-    pub(crate) fn can_stage(&self) -> bool {
+    pub(crate) fn begin_render_frame(&mut self) {
+        self.viewport.begin_frame();
+    }
+
+    pub(crate) fn files_panel_visible(&self) -> bool {
+        self.files_panel_visible
+    }
+
+    pub(crate) fn focus(&self) -> FocusPane {
+        self.focus
+    }
+
+    pub(crate) fn sidebar_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        self.viewport.begin_sidebar(area, visible_height);
+        self.ensure_scroll_bounds();
+
+        let can_stage = self.can_stage();
+        let row_counts = self
+            .viewport
+            .cached_sidebar_row_counts(content_width, can_stage, self.changeset.files.len(), || {
+                rows::sidebar_row_counts(&self.changeset.files, content_width, can_stage, theme)
+            })
+            .to_vec();
+
+        let rendered_rows = rows::sidebar_rows(SidebarRowsInput {
+            files: &self.changeset.files,
+            empty_message: self.empty_sidebar_message(),
+            can_stage,
+            selected_file_index: self.selected_file_index,
+            sidebar_scroll: self.sidebar_scroll,
+            row_counts: &row_counts,
+            content_width,
+            visible_height,
+            theme,
+        });
+        self.sidebar_scroll = rendered_rows.sidebar_scroll;
+        self.viewport.begin_sidebar_rows();
+        for record in rendered_rows.row_records {
+            self.viewport
+                .record_sidebar_rows(record.index, record.row_count);
+        }
+
+        rendered_rows.lines
+    }
+
+    pub(crate) fn diff_pane_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> DiffPaneRows {
+        let title = format!(" {} ", rows::changeset_title(&self.changeset));
+        let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+        let visible_diff_height = visible_height.saturating_sub(lines.len());
+        self.viewport.begin_diff(area, visible_diff_height);
+        self.ensure_scroll_bounds();
+
+        if visible_diff_height > 0 {
+            lines.extend(self.selected_diff_lines(content_width, visible_diff_height, theme));
+        }
+        lines.truncate(visible_height);
+
+        DiffPaneRows { title, lines }
+    }
+
+    pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
+        rows::keybind_bar_line(self.files_panel_visible, self.can_stage(), theme)
+    }
+
+    fn can_stage(&self) -> bool {
         self.source.can_stage()
     }
 
@@ -78,26 +164,26 @@ impl App {
         self.source.live_watch_root()
     }
 
-    pub(crate) fn empty_sidebar_message(&self) -> &'static str {
+    fn empty_sidebar_message(&self) -> &'static str {
         self.source.empty_sidebar_message()
     }
 
-    pub(crate) fn no_diff_message(&self) -> &'static str {
+    fn no_diff_message(&self) -> &'static str {
         self.source.no_diff_message()
     }
 
-    pub(crate) fn selected_file(&self) -> Option<&DiffFile> {
+    fn selected_file(&self) -> Option<&DiffFile> {
         self.changeset.files.get(self.selected_file_index)
     }
 
-    pub(crate) fn ensure_selected_file_sources_loaded(&mut self) {
+    fn ensure_selected_file_sources_loaded(&mut self) {
         let source = &self.source;
         if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
             source.load_source_snapshots(file);
         }
     }
 
-    pub(crate) fn ensure_scroll_bounds(&mut self) {
+    fn ensure_scroll_bounds(&mut self) {
         let scrolls = self.viewport.clamped_scrolls(self.viewport_scroll_input());
         self.diff_scroll = scrolls.diff_scroll;
         self.sidebar_scroll = scrolls.sidebar_scroll;
@@ -113,6 +199,64 @@ impl App {
             selected_file_id: selected_file.map(|file| file.id.as_str()),
             selected_file_line_count: selected_file.map_or(0, DiffFile::line_count),
         }
+    }
+
+    fn selected_diff_lines(
+        &mut self,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        self.viewport
+            .ensure_diff_lines_cache_len(self.changeset.files.len());
+
+        let selected_file_index = self.selected_file_index;
+        let can_stage = self.can_stage();
+        if selected_file_index >= self.changeset.files.len() {
+            return rows::no_diff_lines(self.no_diff_message(), content_width, theme);
+        }
+
+        let target_rows = self
+            .diff_scroll
+            .saturating_add(visible_height)
+            .saturating_add(rows::DIFF_PREFETCH_ROWS);
+
+        let render_target = {
+            let file = &self.changeset.files[selected_file_index];
+            self.viewport.diff_lines_render_target(
+                selected_file_index,
+                file.id.as_str(),
+                content_width,
+                theme.syntax,
+                can_stage,
+                target_rows,
+            )
+        };
+
+        if let Some(render_target) = render_target {
+            self.ensure_selected_file_sources_loaded();
+            let file = self.changeset.files[selected_file_index].clone();
+            let hunk_offsets = rows::hunk_offsets(&file, content_width, theme, can_stage);
+            let rendered_rows =
+                rows::diff_lines_until(&file, content_width, theme, can_stage, render_target);
+            self.viewport.cache_diff_lines(
+                selected_file_index,
+                RenderedDiffLines::new(
+                    file.id.clone(),
+                    content_width,
+                    theme.syntax,
+                    can_stage,
+                    rendered_rows.lines,
+                    rendered_rows.complete,
+                )
+                .with_hunk_offsets(hunk_offsets),
+            );
+        }
+
+        self.ensure_scroll_bounds();
+
+        self.viewport
+            .visible_diff_lines(selected_file_index, self.diff_scroll, visible_height)
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
