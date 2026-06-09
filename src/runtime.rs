@@ -152,15 +152,11 @@ fn reload_worktree_if_due(app: &mut App, pending_reload_at: &mut Option<Instant>
 }
 
 fn start_live_worktree_watcher(app: &mut App) -> Option<WorktreeWatcher> {
-    match app.live_watch_root() {
-        Ok(Some(root)) => match WorktreeWatcher::start(root) {
-            Ok(watcher) => Some(watcher),
-            Err(error) => {
-                app.set_live_error(format!("watch failed: {error}"));
-                None
-            }
-        },
-        Ok(None) => None,
+    match app
+        .live_watch_root()
+        .and_then(|root| root.map(WorktreeWatcher::start).transpose())
+    {
+        Ok(watcher) => watcher,
         Err(error) => {
             app.set_live_error(format!("watch failed: {error}"));
             None
@@ -202,12 +198,8 @@ fn is_relevant_worktree_path(path: &Path, root: &Path) -> bool {
     };
 
     let mut components = relative_path.components();
-    match components.next() {
-        Some(Component::Normal(name)) if name == ".git" => {
-            is_relevant_git_metadata_path(components.as_path())
-        }
-        _ => true,
-    }
+    !matches!(components.next(), Some(Component::Normal(name)) if name == ".git")
+        || is_relevant_git_metadata_path(components.as_path())
 }
 
 fn is_relevant_git_metadata_path(path: &Path) -> bool {
@@ -216,11 +208,11 @@ fn is_relevant_git_metadata_path(path: &Path) -> bool {
         return false;
     };
 
-    match name.to_str() {
-        Some("index" | "HEAD" | "packed-refs") => components.next().is_none(),
-        Some("refs") => true,
-        _ => false,
+    if name == "refs" {
+        return true;
     }
+
+    (name == "index" || name == "HEAD" || name == "packed-refs") && components.next().is_none()
 }
 
 #[cfg(test)]

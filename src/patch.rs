@@ -208,14 +208,16 @@ pub fn parse_unified_diff(input: &str) -> Changeset {
     let mut current_file: Option<FileBuilder> = None;
 
     for line in input.lines() {
-        if let Some((old_path, path)) = parse_diff_git_line(line) {
-            finish_current_file(&mut files, &mut current_file);
-            current_file = Some(FileBuilder::new(old_path, path));
-            continue;
-        }
-
-        if let Some(file) = current_file.as_mut() {
-            file.push_patch_line(line);
+        match parse_diff_git_line(line) {
+            Some((old_path, path)) => {
+                finish_current_file(&mut files, &mut current_file);
+                current_file = Some(FileBuilder::new(old_path, path));
+            }
+            None => {
+                if let Some(file) = current_file.as_mut() {
+                    file.push_patch_line(line);
+                }
+            }
         }
     }
 
@@ -235,28 +237,23 @@ fn finish_current_file(files: &mut Vec<DiffFile>, current_file: &mut Option<File
 }
 
 fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
-    if line.starts_with("new file mode ") {
-        file.status = FileStatus::Added;
-        return true;
+    for (prefix, status) in [
+        ("new file mode ", FileStatus::Added),
+        ("deleted file mode ", FileStatus::Deleted),
+    ] {
+        if line.starts_with(prefix) {
+            file.status = status;
+            return true;
+        }
     }
 
-    if line.starts_with("deleted file mode ") {
-        file.status = FileStatus::Deleted;
-        return true;
-    }
-
-    if apply_path_change_metadata(file, line, "copy from ", "copy to ", FileStatus::Copied) {
-        return true;
-    }
-
-    if apply_path_change_metadata(
-        file,
-        line,
-        "rename from ",
-        "rename to ",
-        FileStatus::Renamed,
-    ) {
-        return true;
+    for (from_prefix, to_prefix, status) in [
+        ("copy from ", "copy to ", FileStatus::Copied),
+        ("rename from ", "rename to ", FileStatus::Renamed),
+    ] {
+        if apply_path_change_metadata(file, line, from_prefix, to_prefix, status) {
+            return true;
+        }
     }
 
     if line.starts_with("Binary files ") {
@@ -264,15 +261,8 @@ fn apply_file_metadata(file: &mut FileBuilder, line: &str) -> bool {
         return true;
     }
 
-    if update_prefixed_path(&mut file.old_path, line, "--- ") {
-        return true;
-    }
-
-    if update_prefixed_path(&mut file.path, line, "+++ ") {
-        return true;
-    }
-
-    false
+    update_prefixed_path(&mut file.old_path, line, "--- ")
+        || update_prefixed_path(&mut file.path, line, "+++ ")
 }
 
 fn apply_path_change_metadata(
@@ -364,19 +354,13 @@ fn parse_line_range(input: &str, sign: char) -> Option<LineRange> {
 }
 
 fn parse_hunk_line(line: &str) -> HunkLine<'_> {
-    if let Some(content) = line.strip_prefix('+') {
-        return HunkLine::Added(content);
+    let mut chars = line.chars();
+    match chars.next() {
+        Some('+') => HunkLine::Added(chars.as_str()),
+        Some('-') => HunkLine::Removed(chars.as_str()),
+        Some(' ') => HunkLine::Context(chars.as_str()),
+        _ => HunkLine::Meta(line),
     }
-
-    if let Some(content) = line.strip_prefix('-') {
-        return HunkLine::Removed(content);
-    }
-
-    if let Some(content) = line.strip_prefix(' ') {
-        return HunkLine::Context(content);
-    }
-
-    HunkLine::Meta(line)
 }
 
 #[cfg(test)]

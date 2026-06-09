@@ -85,12 +85,9 @@ pub(crate) fn load_worktree_source_snapshots(file: &mut DiffFile) {
 }
 
 pub(crate) fn load_ref_source_snapshots(file: &mut DiffFile, old_ref: &str, new_ref: &str) {
-    if file.binary || file.hunks.is_empty() {
+    let Some((old_context_line, new_context_line)) = source_context_lines(file) else {
         return;
-    }
-
-    let old_context_line = max_old_context_line(file);
-    let new_context_line = max_new_context_line(file);
+    };
 
     load_git_snapshot(
         &mut file.old_source,
@@ -204,22 +201,22 @@ fn merge_base(base_ref: &str) -> Result<String> {
 }
 
 fn load_worktree_source_snapshots_with_root(file: &mut DiffFile, worktree_root: Option<&Path>) {
-    if file.binary || file.hunks.is_empty() {
+    let Some((old_context_line, new_context_line)) = source_context_lines(file) else {
         return;
-    }
+    };
 
-    let old_context_line = max_old_context_line(file);
     load_git_snapshot(
         &mut file.old_source,
         "HEAD",
         &file.old_path,
         old_context_line,
     );
-
-    if file.new_source.is_unloaded() {
-        file.new_source =
-            load_worktree_source_prefix(worktree_root, &file.path, max_new_context_line(file));
-    }
+    load_worktree_snapshot(
+        &mut file.new_source,
+        worktree_root,
+        &file.path,
+        new_context_line,
+    );
 }
 
 fn load_git_snapshot(snapshot: &mut SourceSnapshot, rev: &str, path: &str, max_context_line: u32) {
@@ -228,20 +225,28 @@ fn load_git_snapshot(snapshot: &mut SourceSnapshot, rev: &str, path: &str, max_c
     }
 }
 
-fn max_old_context_line(file: &DiffFile) -> u32 {
-    file.hunks
-        .iter()
-        .map(|hunk| hunk.old_start.saturating_sub(1))
-        .max()
-        .unwrap_or(0)
+fn load_worktree_snapshot(
+    snapshot: &mut SourceSnapshot,
+    worktree_root: Option<&Path>,
+    path: &str,
+    max_context_line: u32,
+) {
+    if snapshot.is_unloaded() {
+        *snapshot = load_worktree_source_prefix(worktree_root, path, max_context_line);
+    }
 }
 
-fn max_new_context_line(file: &DiffFile) -> u32 {
-    file.hunks
-        .iter()
-        .map(|hunk| hunk.new_start.saturating_sub(1))
-        .max()
-        .unwrap_or(0)
+fn source_context_lines(file: &DiffFile) -> Option<(u32, u32)> {
+    if file.binary || file.hunks.is_empty() {
+        return None;
+    }
+
+    Some(file.hunks.iter().fold((0, 0), |(old, new), hunk| {
+        (
+            old.max(hunk.old_start.saturating_sub(1)),
+            new.max(hunk.new_start.saturating_sub(1)),
+        )
+    }))
 }
 
 fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> SourceSnapshot {
@@ -249,14 +254,13 @@ fn load_git_source_prefix(rev: &str, path: &str, max_context_line: u32) -> Sourc
         return snapshot;
     }
 
-    let mut child = match Command::new("git")
+    let Ok(mut child) = Command::new("git")
         .args(["show", "--textconv", &format!("{rev}:{path}")])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return SourceSnapshot::Unavailable,
+    else {
+        return SourceSnapshot::Unavailable;
     };
 
     load_source_prefix_from_child(&mut child, max_context_line)
@@ -282,9 +286,10 @@ fn load_source_prefix_from_child(child: &mut Child, max_context_line: u32) -> So
         return SourceSnapshot::loaded(prefix.content);
     }
 
-    match child.wait() {
-        Ok(status) if status.success() => SourceSnapshot::loaded(prefix.content),
-        _ => SourceSnapshot::Unavailable,
+    if child.wait().is_ok_and(|status| status.success()) {
+        SourceSnapshot::loaded(prefix.content)
+    } else {
+        SourceSnapshot::Unavailable
     }
 }
 
@@ -302,9 +307,8 @@ fn load_worktree_source_prefix(
         None => PathBuf::from(path),
     };
 
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return SourceSnapshot::Unavailable,
+    let Ok(file) = File::open(path) else {
+        return SourceSnapshot::Unavailable;
     };
     let mut reader = BufReader::new(file);
 
@@ -315,10 +319,9 @@ fn load_source_prefix_from_reader(
     reader: &mut impl BufRead,
     max_context_line: u32,
 ) -> SourceSnapshot {
-    match read_source_prefix(reader, max_context_line) {
-        Ok(prefix) => SourceSnapshot::loaded(prefix.content),
-        Err(_) => SourceSnapshot::Unavailable,
-    }
+    read_source_prefix(reader, max_context_line)
+        .map(|prefix| SourceSnapshot::loaded(prefix.content))
+        .unwrap_or(SourceSnapshot::Unavailable)
 }
 
 fn guarded_source_prefix(path: &str, max_context_line: u32) -> Option<SourceSnapshot> {

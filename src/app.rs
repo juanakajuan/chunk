@@ -22,7 +22,7 @@ pub(crate) enum FocusPane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WheelDirection {
+enum VerticalDirection {
     Down,
     Up,
 }
@@ -159,21 +159,21 @@ impl App {
             KeyCode::Left if self.files_panel_visible => self.focus = FocusPane::Sidebar,
             KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
 
-            KeyCode::Char('j') => self.move_down(),
-            KeyCode::Char('k') => self.move_up(),
+            KeyCode::Char('j') => self.move_by(VerticalDirection::Down),
+            KeyCode::Char('k') => self.move_by(VerticalDirection::Up),
 
             KeyCode::Home | KeyCode::Char('g') => self.diff_scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
 
             KeyCode::Char(' ') => self.toggle_selected_file_staging()?,
 
-            KeyCode::PageDown => self.scroll_diff_by(self.viewport.diff_view_height()),
-            KeyCode::PageUp => self.scroll_diff_up_by(self.viewport.diff_view_height()),
+            KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
+            KeyCode::PageUp => self.scroll_diff_page(VerticalDirection::Up),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_diff_by(self.viewport.diff_view_height())
+                self.scroll_diff_page(VerticalDirection::Down)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_diff_up_by(self.viewport.diff_view_height())
+                self.scroll_diff_page(VerticalDirection::Up)
             }
             _ => {}
         }
@@ -188,8 +188,8 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(column, row),
-            MouseEventKind::ScrollDown => self.handle_wheel(column, row, WheelDirection::Down),
-            MouseEventKind::ScrollUp => self.handle_wheel(column, row, WheelDirection::Up),
+            MouseEventKind::ScrollDown => self.handle_wheel(column, row, VerticalDirection::Down),
+            MouseEventKind::ScrollUp => self.handle_wheel(column, row, VerticalDirection::Up),
             MouseEventKind::Moved => self.handle_hover(column, row),
             _ => {}
         }
@@ -210,30 +210,28 @@ impl App {
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) {
-        if self.is_sidebar_at(column, row) {
-            self.focus = FocusPane::Sidebar;
-        } else if self.is_diff_at(column, row) {
-            self.focus = FocusPane::Diff;
+        if let Some(focus) = self.pane_at(column, row) {
+            self.focus = focus;
         }
     }
 
-    fn handle_wheel(&mut self, column: u16, row: u16, direction: WheelDirection) {
-        let focus = if self.is_sidebar_at(column, row) {
-            FocusPane::Sidebar
-        } else {
-            FocusPane::Diff
-        };
+    fn handle_wheel(&mut self, column: u16, row: u16, direction: VerticalDirection) {
+        let focus = self.pane_at(column, row).unwrap_or(FocusPane::Diff);
         self.focus = focus;
 
-        match (focus, direction) {
-            (FocusPane::Sidebar, WheelDirection::Down) => {
-                self.select_next_file_by(MOUSE_WHEEL_STEP)
-            }
-            (FocusPane::Sidebar, WheelDirection::Up) => {
-                self.select_previous_file_by(MOUSE_WHEEL_STEP)
-            }
-            (FocusPane::Diff, WheelDirection::Down) => self.scroll_diff_by(MOUSE_WHEEL_STEP),
-            (FocusPane::Diff, WheelDirection::Up) => self.scroll_diff_up_by(MOUSE_WHEEL_STEP),
+        match focus {
+            FocusPane::Sidebar => self.select_file_by(direction, MOUSE_WHEEL_STEP),
+            FocusPane::Diff => self.scroll_diff_by(direction, MOUSE_WHEEL_STEP),
+        }
+    }
+
+    fn pane_at(&self, column: u16, row: u16) -> Option<FocusPane> {
+        if self.is_sidebar_at(column, row) {
+            Some(FocusPane::Sidebar)
+        } else if self.is_diff_at(column, row) {
+            Some(FocusPane::Diff)
+        } else {
+            None
         }
     }
 
@@ -271,39 +269,25 @@ impl App {
         };
     }
 
-    fn move_down(&mut self) {
+    fn move_by(&mut self, direction: VerticalDirection) {
         match self.focus {
-            FocusPane::Sidebar => self.select_next_file(),
-            FocusPane::Diff => self.scroll_diff_by(1),
+            FocusPane::Sidebar => self.select_file_by(direction, 1),
+            FocusPane::Diff => self.scroll_diff_by(direction, 1),
         }
     }
 
-    fn move_up(&mut self) {
-        match self.focus {
-            FocusPane::Sidebar => self.select_previous_file(),
-            FocusPane::Diff => self.scroll_diff_up_by(1),
-        }
-    }
+    fn select_file_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let index = match direction {
+            VerticalDirection::Down => {
+                let max_index = self.changeset.files.len().saturating_sub(1);
+                self.selected_file_index
+                    .saturating_add(amount)
+                    .min(max_index)
+            }
+            VerticalDirection::Up => self.selected_file_index.saturating_sub(amount),
+        };
 
-    fn select_next_file(&mut self) {
-        self.select_next_file_by(1);
-    }
-
-    fn select_previous_file(&mut self) {
-        self.select_previous_file_by(1);
-    }
-
-    fn select_next_file_by(&mut self, amount: usize) {
-        let max_index = self.changeset.files.len().saturating_sub(1);
-        self.select_file(
-            self.selected_file_index
-                .saturating_add(amount)
-                .min(max_index),
-        );
-    }
-
-    fn select_previous_file_by(&mut self, amount: usize) {
-        self.select_file(self.selected_file_index.saturating_sub(amount));
+        self.select_file(index);
     }
 
     fn select_file(&mut self, index: usize) {
@@ -315,12 +299,15 @@ impl App {
         self.diff_scroll = 0;
     }
 
-    fn scroll_diff_by(&mut self, amount: usize) {
-        self.diff_scroll = self.diff_scroll.saturating_add(amount);
+    fn scroll_diff_page(&mut self, direction: VerticalDirection) {
+        self.scroll_diff_by(direction, self.viewport.diff_view_height());
     }
 
-    fn scroll_diff_up_by(&mut self, amount: usize) {
-        self.diff_scroll = self.diff_scroll.saturating_sub(amount);
+    fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
+        self.diff_scroll = match direction {
+            VerticalDirection::Down => self.diff_scroll.saturating_add(amount),
+            VerticalDirection::Up => self.diff_scroll.saturating_sub(amount),
+        };
     }
 
     fn scroll_diff_to_bottom(&mut self) {
