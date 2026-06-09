@@ -1,6 +1,6 @@
 # chunk
 
-`chunk` is a minimal terminal diff reviewer for Git repositories. It renders a
+`chunk` is a compact terminal diff reviewer for Git repositories. It renders a
 file list and a syntax-highlighted unified diff in the terminal, with keyboard
 and mouse navigation, live worktree refresh, and per-file staging.
 

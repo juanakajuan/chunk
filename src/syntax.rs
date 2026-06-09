@@ -159,14 +159,16 @@ fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
         return find_first_syntax(&[("env", "DotENV"), ("sh", "Bash")]);
     }
 
-    match file_name {
-        ".gitignore" | ".dockerignore" => find_by_extension_or_name("gitignore", "Git Ignore"),
-        ".editorconfig" | "cargo.lock" | "go.mod" | "go.sum" => find_toml_syntax(),
-        "package-lock.json" | "flake.lock" => find_by_extension_or_name("json", "JSON"),
-        "pnpm-lock.yaml" => find_by_extension_or_name("yaml", "YAML"),
-        "yarn.lock" => find_first_syntax(&[("yaml", "YAML"), ("toml", "TOML")]),
-        _ => syntax_for_known_extension(extension.as_deref()),
-    }
+    let (syntax_extension, syntax_name) = match file_name {
+        ".gitignore" | ".dockerignore" => ("gitignore", "Git Ignore"),
+        ".editorconfig" | "cargo.lock" | "go.mod" | "go.sum" => return find_toml_syntax(),
+        "package-lock.json" | "flake.lock" => ("json", "JSON"),
+        "pnpm-lock.yaml" => ("yaml", "YAML"),
+        "yarn.lock" => return find_first_syntax(&[("yaml", "YAML"), ("toml", "TOML")]),
+        _ => return syntax_for_known_extension(extension.as_deref()),
+    };
+
+    find_by_extension_or_name(syntax_extension, syntax_name)
 }
 
 fn matches_known_file(file_name: &str, known_file_name: &str) -> bool {
@@ -177,56 +179,58 @@ fn matches_known_file(file_name: &str, known_file_name: &str) -> bool {
 }
 
 fn syntax_for_known_extension(extension: Option<&str>) -> Option<&'static SyntaxReference> {
-    match extension {
-        Some("rs") => find_by_extension_or_name("rs", "Rust"),
-        Some("vue") => find_first_syntax(&[("vue", "Vue Component"), ("vue", "Vue")]),
-        Some("svelte") => find_by_extension_or_name("svelte", "Svelte"),
-        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
-            find_by_extension_or_name("js", "JavaScript")
+    let (syntax_extension, syntax_name) = match extension? {
+        "rs" => ("rs", "Rust"),
+        "vue" => return find_first_syntax(&[("vue", "Vue Component"), ("vue", "Vue")]),
+        "svelte" => ("svelte", "Svelte"),
+        "js" | "jsx" | "mjs" | "cjs" => ("js", "JavaScript"),
+        "ts" | "mts" | "cts" => {
+            return find_first_syntax(&[("ts", "TypeScript"), ("js", "JavaScript")]);
         }
-        Some("ts") | Some("mts") | Some("cts") => {
-            find_first_syntax(&[("ts", "TypeScript"), ("js", "JavaScript")])
+        "tsx" => {
+            return find_first_syntax(&[
+                ("tsx", "TypescriptReact"),
+                ("ts", "TypeScript"),
+                ("js", "JavaScript"),
+            ]);
         }
-        Some("tsx") => find_first_syntax(&[
-            ("tsx", "TypescriptReact"),
-            ("ts", "TypeScript"),
-            ("js", "JavaScript"),
-        ]),
-        Some("json") | Some("jsonc") | Some("json5") => find_by_extension_or_name("json", "JSON"),
-        Some("md") | Some("markdown") | Some("mdx") => find_by_extension_or_name("md", "Markdown"),
-        Some("html") | Some("htm") => find_by_extension_or_name("html", "HTML"),
-        Some("xml") | Some("xhtml") | Some("svg") => find_by_extension_or_name("xml", "XML"),
-        Some("css") => find_by_extension_or_name("css", "CSS"),
-        Some("scss") => find_by_extension_or_name("scss", "SCSS"),
-        Some("sass") => find_first_syntax(&[("sass", "Sass"), ("scss", "SCSS"), ("css", "CSS")]),
-        Some("less") => find_by_extension_or_name("less", "LESS"),
-        Some("styl") | Some("stylus") => find_by_extension_or_name("styl", "Stylus"),
-        Some("yaml") | Some("yml") => find_by_extension_or_name("yaml", "YAML"),
-        Some("graphql") | Some("gql") => find_by_extension_or_name("graphql", "GraphQL"),
-        Some("sql") | Some("psql") | Some("mysql") => find_by_extension_or_name("sql", "SQL"),
-        Some("sh") | Some("bash") | Some("zsh") => find_by_extension_or_name("sh", "ShellScript"),
-        Some("fish") => find_by_extension_or_name("fish", "Fish"),
-        Some("ps1") => find_by_extension_or_name("ps1", "PowerShell"),
-        Some("toml") => find_toml_syntax(),
-        Some("ini") => find_by_extension_or_name("ini", "INI"),
-        Some("py") | Some("pyw") => find_by_extension_or_name("py", "Python"),
-        Some("go") => find_by_extension_or_name("go", "Go"),
-        Some("java") => find_by_extension_or_name("java", "Java"),
-        Some("kt") | Some("kts") => find_by_extension_or_name("kt", "Kotlin"),
-        Some("swift") => find_by_extension_or_name("swift", "Swift"),
-        Some("php") => find_by_extension_or_name("php", "PHP"),
-        Some("rb") => find_by_extension_or_name("rb", "Ruby"),
-        Some("lua") => find_by_extension_or_name("lua", "Lua"),
-        Some("vim") => find_by_extension_or_name("vim", "VimL"),
-        Some("nix") => find_by_extension_or_name("nix", "Nix"),
-        Some("tf") | Some("tfvars") => find_by_extension_or_name("tf", "Terraform"),
-        Some("c") | Some("h") => find_by_extension_or_name("c", "C"),
-        Some("cc") | Some("cpp") | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") => {
-            find_by_extension_or_name("cpp", "C++")
+        "json" | "jsonc" | "json5" => ("json", "JSON"),
+        "md" | "markdown" | "mdx" => ("md", "Markdown"),
+        "html" | "htm" => ("html", "HTML"),
+        "xml" | "xhtml" | "svg" => ("xml", "XML"),
+        "css" => ("css", "CSS"),
+        "scss" => ("scss", "SCSS"),
+        "sass" => {
+            return find_first_syntax(&[("sass", "Sass"), ("scss", "SCSS"), ("css", "CSS")]);
         }
-        Some("cs") => find_by_extension_or_name("cs", "C#"),
-        _ => None,
-    }
+        "less" => ("less", "LESS"),
+        "styl" | "stylus" => ("styl", "Stylus"),
+        "yaml" | "yml" => ("yaml", "YAML"),
+        "graphql" | "gql" => ("graphql", "GraphQL"),
+        "sql" | "psql" | "mysql" => ("sql", "SQL"),
+        "sh" | "bash" | "zsh" => ("sh", "ShellScript"),
+        "fish" => ("fish", "Fish"),
+        "ps1" => ("ps1", "PowerShell"),
+        "toml" => return find_toml_syntax(),
+        "ini" => ("ini", "INI"),
+        "py" | "pyw" => ("py", "Python"),
+        "go" => ("go", "Go"),
+        "java" => ("java", "Java"),
+        "kt" | "kts" => ("kt", "Kotlin"),
+        "swift" => ("swift", "Swift"),
+        "php" => ("php", "PHP"),
+        "rb" => ("rb", "Ruby"),
+        "lua" => ("lua", "Lua"),
+        "vim" => ("vim", "VimL"),
+        "nix" => ("nix", "Nix"),
+        "tf" | "tfvars" => ("tf", "Terraform"),
+        "c" | "h" => ("c", "C"),
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => ("cpp", "C++"),
+        "cs" => ("cs", "C#"),
+        _ => return None,
+    };
+
+    find_by_extension_or_name(syntax_extension, syntax_name)
 }
 
 fn find_toml_syntax() -> Option<&'static SyntaxReference> {
@@ -251,15 +255,17 @@ fn find_by_extension_or_name(extension: &str, name: &str) -> Option<&'static Syn
 }
 
 fn syntax_theme(palette: SyntaxPalette) -> SyntectTheme {
+    let color = |color| Some(syntect_color(color));
+
     SyntectTheme {
         name: Some("chunk".to_string()),
         author: Some("chunk".to_string()),
         settings: ThemeSettings {
-            foreground: Some(syntect_color(palette.foreground)),
-            background: Some(syntect_color(palette.background)),
-            caret: Some(syntect_color(palette.foreground)),
-            accent: Some(syntect_color(palette.support)),
-            selection: Some(syntect_color(palette.selection)),
+            foreground: color(palette.foreground),
+            background: color(palette.background),
+            caret: color(palette.foreground),
+            accent: color(palette.support),
+            selection: color(palette.selection),
             ..ThemeSettings::default()
         },
         scopes: vec![

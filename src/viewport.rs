@@ -213,24 +213,25 @@ impl RenderedViewport {
         }
     }
 
-    pub fn diff_lines_need_render(
+    pub fn diff_lines_render_target(
         &self,
         file_index: usize,
         file_id: &str,
         content_width: usize,
         syntax_palette: SyntaxPalette,
         can_stage: bool,
-        target_rows: usize,
-    ) -> bool {
-        self.diff_lines_cache(file_index).is_none_or(|cache| {
-            !cache.is_valid_for(
-                file_id,
-                content_width,
-                syntax_palette,
-                can_stage,
-                target_rows,
-            )
-        })
+        requested_rows: usize,
+    ) -> Option<usize> {
+        self.diff_lines_cache(file_index)
+            .map_or(Some(requested_rows), |cache| {
+                cache.render_target_if_needed(
+                    file_id,
+                    content_width,
+                    syntax_palette,
+                    can_stage,
+                    requested_rows,
+                )
+            })
     }
 
     pub fn cache_diff_lines(&mut self, file_index: usize, lines: RenderedDiffLines) {
@@ -305,19 +306,27 @@ impl RenderedDiffLines {
         self.file_id == file_id
     }
 
-    fn is_valid_for(
+    fn render_target_if_needed(
         &self,
         file_id: &str,
         content_width: usize,
         syntax_palette: SyntaxPalette,
         can_stage: bool,
-        target_rows: usize,
-    ) -> bool {
-        self.matches_file(file_id)
-            && self.content_width == content_width
-            && self.syntax_palette == syntax_palette
-            && self.can_stage == can_stage
-            && (self.complete || self.lines.len() >= target_rows)
+        requested_rows: usize,
+    ) -> Option<usize> {
+        if !self.matches_file(file_id)
+            || self.content_width != content_width
+            || self.syntax_palette != syntax_palette
+            || self.can_stage != can_stage
+        {
+            return Some(requested_rows);
+        }
+
+        if self.complete || self.lines.len() >= requested_rows {
+            return None;
+        }
+
+        Some(next_diff_cache_target(self.lines.len(), requested_rows))
     }
 
     fn len(&self) -> usize {
@@ -332,6 +341,12 @@ impl RenderedDiffLines {
             .cloned()
             .collect()
     }
+}
+
+fn next_diff_cache_target(current_rows: usize, requested_rows: usize) -> usize {
+    requested_rows
+        .max(current_rows.saturating_mul(2))
+        .max(current_rows.saturating_add(1))
 }
 
 impl SidebarRowCountsCache {
@@ -424,5 +439,31 @@ mod tests {
         assert_eq!(viewport.sidebar_index_at(1, 1, 4), Some(2));
         assert_eq!(viewport.sidebar_index_at(1, 3, 4), Some(2));
         assert_eq!(viewport.sidebar_index_at(1, 4, 4), None);
+    }
+
+    #[test]
+    fn diff_lines_render_target_grows_partial_cache_geometrically() {
+        let mut viewport = RenderedViewport::new(1);
+        let theme = Theme::github_dark();
+        viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "file".to_string(),
+                80,
+                theme.syntax,
+                true,
+                vec![Line::raw("row"); 100],
+                false,
+            ),
+        );
+
+        assert_eq!(
+            viewport.diff_lines_render_target(0, "file", 80, theme.syntax, true, 101),
+            Some(200)
+        );
+        assert_eq!(
+            viewport.diff_lines_render_target(0, "file", 80, theme.syntax, true, 250),
+            Some(250)
+        );
     }
 }

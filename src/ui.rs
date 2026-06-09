@@ -168,9 +168,9 @@ fn render_selected_diff_lines(
         .saturating_add(visible_height)
         .saturating_add(rows::DIFF_PREFETCH_ROWS);
 
-    let needs_render = {
+    let render_target = {
         let file = &app.changeset.files[selected_file_index];
-        app.viewport.diff_lines_need_render(
+        app.viewport.diff_lines_render_target(
             selected_file_index,
             file.id.as_str(),
             content_width,
@@ -180,11 +180,11 @@ fn render_selected_diff_lines(
         )
     };
 
-    if needs_render {
+    if let Some(render_target) = render_target {
         app.ensure_selected_file_sources_loaded();
         let file = app.changeset.files[selected_file_index].clone();
         let rendered_rows =
-            rows::diff_lines_until(&file, content_width, theme, can_stage, target_rows);
+            rows::diff_lines_until(&file, content_width, theme, can_stage, render_target);
         app.viewport.cache_diff_lines(
             selected_file_index,
             RenderedDiffLines::new(
