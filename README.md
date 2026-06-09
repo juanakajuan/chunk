@@ -86,6 +86,6 @@ Code map:
 - `src/app.rs`: selection, focus, scroll, reload, and staging session state
 - `src/runtime.rs`: terminal setup, event loop, mouse capture, live watcher
 - `src/ui.rs`: Ratatui layout and widget drawing
-- `src/rows.rs`: rendered sidebar, diff, status, and keybind rows
+- `src/rows.rs` and `src/rows/`: rendered sidebar, diff, status, and keybind rows
 - `src/viewport.rs`: viewport geometry, scroll clamping, render caches
 - `src/syntax.rs` and `src/theme.rs`: syntax adapter and palettes
