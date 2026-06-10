@@ -266,6 +266,12 @@ impl RenderedViewport {
             .unwrap_or_default()
     }
 
+    pub fn diff_lines(&self, file_index: usize, file_id: &str) -> Option<&[Line<'static>]> {
+        self.diff_lines_cache(file_index)
+            .filter(|cache| cache.matches_file(file_id))
+            .map(|cache| cache.lines.as_slice())
+    }
+
     pub fn diff_hunk_offsets(&self, file_index: usize, file_id: &str) -> Option<&[usize]> {
         self.diff_lines_cache(file_index)
             .filter(|cache| cache.matches_file(file_id))

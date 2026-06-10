@@ -51,6 +51,51 @@ pub(crate) fn live_status_lines(
     )
 }
 
+pub(crate) enum SearchStatus<'a> {
+    Prompt {
+        input: &'a str,
+    },
+    Active {
+        query: &'a str,
+        active: Option<usize>,
+        total: usize,
+    },
+}
+
+pub(crate) fn search_status_lines(
+    status: Option<SearchStatus<'_>>,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Some(status) = status else {
+        return Vec::new();
+    };
+
+    let text = match status {
+        SearchStatus::Prompt { input: "" } => {
+            "/ type search, Enter to apply, Esc to cancel".to_string()
+        }
+        SearchStatus::Prompt { input } => format!("/ {input}"),
+        SearchStatus::Active {
+            query, total: 0, ..
+        } => format!("Search: {query:?}  no matches"),
+        SearchStatus::Active {
+            query,
+            active,
+            total,
+        } => format!(
+            "Search: {query:?}  {}/{}  [n/N] next/prev  [Esc] clear",
+            active.unwrap_or(0),
+            total
+        ),
+    };
+
+    wrap_line(
+        Line::styled(text, color_style(theme.accent, theme.background)),
+        content_width,
+    )
+}
+
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
     stage_hint: Option<&'static str>,
@@ -68,11 +113,12 @@ pub(crate) fn keybind_bar_line(
     if let Some(stage_hint) = stage_hint {
         hints.push(stage_hint);
     }
+    hints.push("[/] search");
     hints.push("[j/k] move");
     hints.push("[Ctrl-d/u] scroll");
-    hints.push("[n/N] hunk");
+    hints.push("[n/N] next");
     hints.push("[e] edit");
-    hints.push("[q] quit");
+    hints.push("[q/Ctrl-c] quit");
 
     Line::styled(hints.join("  |  "), Style::default().fg(theme.muted))
 }

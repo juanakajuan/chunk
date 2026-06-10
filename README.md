@@ -46,14 +46,17 @@ It does not live-refresh or stage files.
 - `Right` / `Enter`: focus diff
 - `PageDown` / `Ctrl-d`: scroll diff down one page
 - `PageUp` / `Ctrl-u`: scroll diff up one page
-- `n` / `N`: select and jump to the next or previous hunk in the selected file
+- `/`: open a literal search prompt for the selected file; `Enter` applies the
+  query and `Esc` cancels or clears search
+- `n` / `N`: with search active, jump to the next or previous match; otherwise
+  select and jump to the next or previous hunk in the selected file
 - `g` / `Home`: jump to top of diff
 - `G` / `End`: jump to bottom of diff
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
 - `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
   mode
-- `q` / `Esc`: quit
+- `q` / `Ctrl-c`: quit
 
 Mouse hover changes focus. Click a file to select it, or click a hunk in the
 diff pane to select it. Wheel scrolling moves through files in the sidebar and

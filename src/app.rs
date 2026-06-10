@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile, DiffHunk};
@@ -33,6 +34,24 @@ pub(crate) enum FocusPane {
 enum VerticalDirection {
     Down,
     Up,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchMatch {
+    row: usize,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Default)]
+struct SearchState {
+    prompt_open: bool,
+    input: String,
+    query: String,
+    matches: Vec<SearchMatch>,
+    active_index: Option<usize>,
+    match_file_id: Option<String>,
+    scroll_pending: bool,
 }
 
 #[derive(Debug)]
@@ -61,6 +80,8 @@ pub(crate) struct App {
     viewport: RenderedViewport,
     /// Deferred request for runtime to open an external editor safely.
     editor_request: Option<EditorRequest>,
+    /// Literal search prompt, query, matches, and active match.
+    search: SearchState,
 }
 
 pub(crate) struct DiffPaneRows {
@@ -86,6 +107,7 @@ impl App {
             sidebar_scroll: 0,
             viewport: RenderedViewport::new(file_count),
             editor_request: None,
+            search: SearchState::default(),
         }
     }
 
@@ -149,10 +171,32 @@ impl App {
     ) -> DiffPaneRows {
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+
+        let mut pending_search_scroll = false;
+        if self.search.active_query().is_some() {
+            let available_height = visible_height.saturating_sub(lines.len());
+            self.viewport.begin_diff(area, available_height);
+            self.ensure_scroll_bounds();
+            pending_search_scroll =
+                self.ensure_selected_diff_cache(content_width, available_height, theme);
+        }
+
+        lines.extend(rows::search_status_lines(
+            self.search.status(),
+            content_width,
+            theme,
+        ));
+
         self.diff_status_rows = lines.len();
-        let visible_diff_height = visible_height.saturating_sub(lines.len());
+        let visible_diff_height = visible_height.saturating_sub(self.diff_status_rows);
         self.viewport.begin_diff(area, visible_diff_height);
         self.ensure_scroll_bounds();
+
+        if pending_search_scroll {
+            self.scroll_active_search_match();
+            self.select_hunk_at_scroll();
+            self.ensure_scroll_bounds();
+        }
 
         if visible_diff_height > 0 {
             lines.extend(self.selected_diff_lines(content_width, visible_diff_height, theme));
@@ -243,6 +287,16 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
+        self.ensure_selected_diff_cache(content_width, visible_height, theme);
+        self.visible_selected_diff_lines(content_width, visible_height, theme)
+    }
+
+    fn ensure_selected_diff_cache(
+        &mut self,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> bool {
         self.viewport
             .ensure_diff_lines_cache_len(self.changeset.files.len());
 
@@ -250,13 +304,11 @@ impl App {
         let can_stage = self.can_stage();
         let selected_hunk_index = self.selected_hunk_index;
         if selected_file_index >= self.changeset.files.len() {
-            return rows::no_diff_lines(self.no_diff_message(), content_width, theme);
+            self.search.clear_rendered_matches();
+            return false;
         }
 
-        let target_rows = self
-            .diff_scroll
-            .saturating_add(visible_height)
-            .saturating_add(rows::DIFF_PREFETCH_ROWS);
+        let target_rows = self.diff_render_target_rows(visible_height);
 
         let render_target = {
             let file = &self.changeset.files[selected_file_index];
@@ -298,10 +350,80 @@ impl App {
             );
         }
 
+        let pending_search_scroll = self.refresh_search_matches(selected_file_index);
         self.ensure_scroll_bounds();
 
-        self.viewport
-            .visible_diff_lines(selected_file_index, self.diff_scroll, visible_height)
+        pending_search_scroll
+    }
+
+    fn diff_render_target_rows(&self, visible_height: usize) -> usize {
+        if self.search.active_query().is_some() {
+            return usize::MAX;
+        }
+
+        self.diff_scroll
+            .saturating_add(visible_height)
+            .saturating_add(rows::DIFF_PREFETCH_ROWS)
+    }
+
+    fn refresh_search_matches(&mut self, selected_file_index: usize) -> bool {
+        let Some(file_id) = self
+            .changeset
+            .files
+            .get(selected_file_index)
+            .map(|file| file.id.clone())
+        else {
+            self.search.clear_rendered_matches();
+            return false;
+        };
+
+        let Some(lines) = self
+            .viewport
+            .diff_lines(selected_file_index, file_id.as_str())
+        else {
+            self.search.clear_rendered_matches();
+            return false;
+        };
+
+        self.search.refresh_matches(file_id.as_str(), lines)
+    }
+
+    fn visible_selected_diff_lines(
+        &self,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        if self.selected_file_index >= self.changeset.files.len() {
+            return rows::no_diff_lines(self.no_diff_message(), content_width, theme);
+        }
+
+        let lines = self.viewport.visible_diff_lines(
+            self.selected_file_index,
+            self.diff_scroll,
+            visible_height,
+        );
+        self.highlight_search_matches(lines, theme)
+    }
+
+    fn highlight_search_matches(
+        &self,
+        lines: Vec<Line<'static>>,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        if self.search.active_query().is_none() || self.search.matches.is_empty() {
+            return lines;
+        }
+
+        lines
+            .into_iter()
+            .enumerate()
+            .map(|(visible_index, line)| {
+                let row = self.diff_scroll.saturating_add(visible_index);
+                let matches = self.search.matches_on_row(row);
+                highlight_line_search_matches(line, &matches, self.search.active_index, theme)
+            })
+            .collect()
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
@@ -348,6 +470,7 @@ impl App {
             0
         };
         self.clear_render_caches();
+        self.search.invalidate_matches();
         self.ensure_scroll_bounds();
     }
 
@@ -357,17 +480,36 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if is_ctrl_c(key) {
+            return Ok(false);
+        }
+
+        if self.search.prompt_open {
+            self.search.handle_prompt_key(key);
+            self.ensure_scroll_bounds();
+            return Ok(true);
+        }
+
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(false),
+            KeyCode::Char('q') if accepts_text_input(key) => return Ok(false),
+            KeyCode::Esc => self.search.clear_query(),
 
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Char('f') => self.toggle_files_panel(),
             KeyCode::Left if self.files_panel_visible => self.focus = FocusPane::Sidebar,
             KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
 
+            KeyCode::Char('/') if accepts_text_input(key) => self.open_search_prompt(),
+
             KeyCode::Char('j') => self.move_by(VerticalDirection::Down),
             KeyCode::Char('k') => self.move_by(VerticalDirection::Up),
 
+            KeyCode::Char('n') if self.search.active_query().is_some() => {
+                self.jump_search_match(VerticalDirection::Down)
+            }
+            KeyCode::Char('N') if self.search.active_query().is_some() => {
+                self.jump_search_match(VerticalDirection::Up)
+            }
             KeyCode::Char('n') => self.jump_hunk(VerticalDirection::Down),
             KeyCode::Char('N') => self.jump_hunk(VerticalDirection::Up),
 
@@ -490,6 +632,11 @@ impl App {
         };
     }
 
+    fn open_search_prompt(&mut self) {
+        self.focus = FocusPane::Diff;
+        self.search.open_prompt();
+    }
+
     fn move_by(&mut self, direction: VerticalDirection) {
         match self.focus {
             FocusPane::Sidebar => self.select_file_by(direction, 1),
@@ -522,6 +669,7 @@ impl App {
             .and_then(|file| bounded_hunk_index(file, None));
         self.selected_hunk_index = selected_hunk_index;
         self.diff_scroll = 0;
+        self.search.invalidate_matches();
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
@@ -569,6 +717,23 @@ impl App {
 
         self.selected_hunk_index = Some(target);
         self.center_selected_hunk();
+    }
+
+    fn jump_search_match(&mut self, direction: VerticalDirection) {
+        if self.search.move_active(direction).is_some() {
+            self.scroll_active_search_match();
+            self.select_hunk_at_scroll();
+        }
+    }
+
+    fn scroll_active_search_match(&mut self) {
+        let Some(active_match) = self.search.active_match() else {
+            return;
+        };
+
+        self.diff_scroll = active_match
+            .row
+            .saturating_sub(self.viewport.diff_view_height() / 2);
     }
 
     fn center_selected_hunk(&mut self) {
@@ -690,6 +855,286 @@ impl App {
             Err(error) => self.live_error = Some(format!("edit failed: {error}")),
         }
     }
+}
+
+impl SearchState {
+    fn active_query(&self) -> Option<&str> {
+        (!self.query.is_empty()).then_some(self.query.as_str())
+    }
+
+    fn status(&self) -> Option<rows::SearchStatus<'_>> {
+        if self.prompt_open {
+            return Some(rows::SearchStatus::Prompt { input: &self.input });
+        }
+
+        self.active_query().map(|query| rows::SearchStatus::Active {
+            query,
+            active: self.active_index.map(|index| index + 1),
+            total: self.matches.len(),
+        })
+    }
+
+    fn open_prompt(&mut self) {
+        self.input.clone_from(&self.query);
+        self.prompt_open = true;
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.clear_query(),
+            KeyCode::Enter => self.apply_prompt(),
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Char(value) if accepts_text_input(key) => self.input.push(value),
+            _ => {}
+        }
+    }
+
+    fn apply_prompt(&mut self) {
+        self.prompt_open = false;
+        if self.input.is_empty() {
+            self.clear_query();
+            return;
+        }
+
+        self.query.clone_from(&self.input);
+        self.invalidate_matches();
+    }
+
+    fn clear_query(&mut self) {
+        self.prompt_open = false;
+        self.query.clear();
+        self.input.clear();
+        self.clear_rendered_matches();
+        self.scroll_pending = false;
+    }
+
+    fn clear_rendered_matches(&mut self) {
+        self.matches.clear();
+        self.active_index = None;
+        self.match_file_id = None;
+    }
+
+    fn invalidate_matches(&mut self) {
+        self.clear_rendered_matches();
+        if self.active_query().is_some() {
+            self.scroll_pending = true;
+        }
+    }
+
+    fn refresh_matches(&mut self, file_id: &str, lines: &[Line<'static>]) -> bool {
+        let Some(query) = self.active_query() else {
+            self.clear_rendered_matches();
+            return false;
+        };
+        let same_file = self.match_file_id.as_deref() == Some(file_id);
+        let previous_active_index = same_file.then_some(self.active_index).flatten();
+
+        self.matches = diff_search_matches(lines, query);
+        self.match_file_id = Some(file_id.to_string());
+        self.active_index = if self.matches.is_empty() {
+            None
+        } else {
+            Some(
+                previous_active_index
+                    .unwrap_or(0)
+                    .min(self.matches.len() - 1),
+            )
+        };
+
+        let should_scroll = self.scroll_pending && self.active_index.is_some();
+        self.scroll_pending = false;
+        should_scroll
+    }
+
+    fn move_active(&mut self, direction: VerticalDirection) -> Option<SearchMatch> {
+        if self.matches.is_empty() {
+            self.active_index = None;
+            return None;
+        }
+
+        let current = self.active_index.unwrap_or(0).min(self.matches.len() - 1);
+        self.active_index = Some(match direction {
+            VerticalDirection::Down => (current + 1) % self.matches.len(),
+            VerticalDirection::Up => current.checked_sub(1).unwrap_or(self.matches.len() - 1),
+        });
+
+        self.active_match()
+    }
+
+    fn active_match(&self) -> Option<SearchMatch> {
+        self.active_index
+            .and_then(|index| self.matches.get(index).copied())
+    }
+
+    fn matches_on_row(&self, row: usize) -> Vec<(usize, SearchMatch)> {
+        self.matches
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, search_match)| search_match.row == row)
+            .collect()
+    }
+}
+
+fn accepts_text_input(key: KeyEvent) -> bool {
+    !key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn diff_search_matches(lines: &[Line<'static>], query: &str) -> Vec<SearchMatch> {
+    lines
+        .iter()
+        .enumerate()
+        .flat_map(|(row, line)| {
+            search_matches_in_text(&line_text(line), query)
+                .into_iter()
+                .map(move |(start, end)| SearchMatch { row, start, end })
+        })
+        .collect()
+}
+
+fn search_matches_in_text(text: &str, query: &str) -> Vec<(usize, usize)> {
+    let haystack: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = query.chars().collect();
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return Vec::new();
+    }
+
+    (0..=haystack.len() - needle.len())
+        .filter(|start| {
+            haystack[*start..*start + needle.len()]
+                .iter()
+                .zip(&needle)
+                .all(|(left, right)| search_chars_match(*left, *right))
+        })
+        .map(|start| (start, start + needle.len()))
+        .collect()
+}
+
+fn search_chars_match(left: char, right: char) -> bool {
+    left == right || (left.is_ascii() && right.is_ascii() && left.eq_ignore_ascii_case(&right))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchMatchKind {
+    Active,
+    Inactive,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SearchStyledChar {
+    value: char,
+    style: Style,
+}
+
+fn highlight_line_search_matches(
+    line: Line<'static>,
+    matches: &[(usize, SearchMatch)],
+    active_index: Option<usize>,
+    theme: Theme,
+) -> Line<'static> {
+    if matches.is_empty() {
+        return line;
+    }
+
+    let style = line.style;
+    let alignment = line.alignment;
+    let chars = line_search_chars(line.spans);
+    let spans = chars_to_search_spans(chars.into_iter().enumerate().map(|(index, character)| {
+        SearchStyledChar {
+            value: character.value,
+            style: search_style_for_char(index, character.style, matches, active_index, theme),
+        }
+    }));
+
+    Line {
+        spans,
+        style,
+        alignment,
+    }
+}
+
+fn line_search_chars(spans: Vec<Span<'static>>) -> Vec<SearchStyledChar> {
+    spans
+        .into_iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |value| SearchStyledChar {
+                    value,
+                    style: span.style,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn search_style_for_char(
+    index: usize,
+    base_style: Style,
+    matches: &[(usize, SearchMatch)],
+    active_index: Option<usize>,
+    theme: Theme,
+) -> Style {
+    match search_match_kind_at(index, matches, active_index) {
+        Some(SearchMatchKind::Active) => base_style
+            .fg(theme.background)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+        Some(SearchMatchKind::Inactive) => {
+            base_style.bg(theme.selected).add_modifier(Modifier::BOLD)
+        }
+        None => base_style,
+    }
+}
+
+fn search_match_kind_at(
+    index: usize,
+    matches: &[(usize, SearchMatch)],
+    active_index: Option<usize>,
+) -> Option<SearchMatchKind> {
+    if matches.iter().any(|(match_index, search_match)| {
+        Some(*match_index) == active_index && search_match_contains(*search_match, index)
+    }) {
+        return Some(SearchMatchKind::Active);
+    }
+
+    matches
+        .iter()
+        .any(|(_, search_match)| search_match_contains(*search_match, index))
+        .then_some(SearchMatchKind::Inactive)
+}
+
+fn search_match_contains(search_match: SearchMatch, index: usize) -> bool {
+    index >= search_match.start && index < search_match.end
+}
+
+fn chars_to_search_spans(chars: impl IntoIterator<Item = SearchStyledChar>) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    for character in chars {
+        match spans.last_mut() {
+            Some(span) if span.style == character.style => {
+                span.content.to_mut().push(character.value);
+            }
+            _ => spans.push(Span::styled(character.value.to_string(), character.style)),
+        }
+    }
+
+    spans
+}
+
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 fn file_identity(file: &DiffFile) -> String {
@@ -901,6 +1346,28 @@ mod tests {
     }
 
     #[test]
+    fn esc_does_not_exit_tui() {
+        let mut app = app_with(changeset_with_one_file());
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(keep_running);
+    }
+
+    #[test]
+    fn ctrl_c_exits_tui() {
+        let mut app = app_with(changeset_with_one_file());
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(!keep_running);
+    }
+
+    #[test]
     fn hunk_jump_uses_cached_wrapped_offsets() {
         let mut app = app_with(changeset_with_two_hunk_file());
         let theme = Theme::github_dark();
@@ -1042,8 +1509,148 @@ mod tests {
         assert_eq!(app.live_error.as_deref(), Some("no selected hunk to stage"));
     }
 
+    #[test]
+    fn search_prompt_applies_query_scrolls_to_first_match_and_highlights_it() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_file(diff_file_with_contents([
+            "alpha",
+            "target one",
+            "beta",
+            "target two",
+        ])));
+
+        enter_search_query(&mut app, "target");
+        let pane = render_diff_pane(&mut app, theme);
+
+        assert_eq!(app.search.matches.len(), 2);
+        assert_eq!(app.search.active_index, Some(0));
+        let active_row = app.search.active_match().unwrap().row;
+        assert!(active_row >= app.diff_scroll);
+        assert!(active_row < app.diff_scroll + app.viewport.diff_view_height());
+        assert!(pane.lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.as_ref() == "target" && span.style.bg == Some(theme.accent)
+            })
+        }));
+    }
+
+    #[test]
+    fn search_next_and_previous_cycle_matches() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_file(diff_file_with_contents([
+            "target one",
+            "middle",
+            "target two",
+        ])));
+        enter_search_query(&mut app, "target");
+        render_diff_pane(&mut app, theme);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.search.active_index, Some(1));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.search.active_index, Some(0));
+    }
+
+    #[test]
+    fn esc_clears_active_search_without_exiting() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_file(diff_file_with_contents([
+            "target one",
+            "middle",
+            "target two",
+        ])));
+        enter_search_query(&mut app, "target");
+        render_diff_pane(&mut app, theme);
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(keep_running);
+        assert!(app.search.active_query().is_none());
+        assert!(app.search.matches.is_empty());
+        assert_eq!(app.search.active_index, None);
+    }
+
+    #[test]
+    fn esc_in_search_prompt_clears_previous_search() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_file(diff_file_with_contents(["target"])));
+        enter_search_query(&mut app, "target");
+        render_diff_pane(&mut app, theme);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(keep_running);
+        assert!(!app.search.prompt_open);
+        assert!(app.search.active_query().is_none());
+        assert!(app.search.matches.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_exits_from_search_prompt() {
+        let mut app = app_with(changeset_with_one_file());
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(!keep_running);
+    }
+
+    #[test]
+    fn search_no_match_state_is_rendered() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_file(diff_file_with_contents([
+            "alpha", "beta",
+        ])));
+
+        enter_search_query(&mut app, "missing");
+        let pane = render_diff_pane(&mut app, theme);
+
+        assert!(
+            pane.lines
+                .iter()
+                .any(|line| line_text(line).contains("no matches"))
+        );
+    }
+
     fn app_with(changeset: Changeset) -> App {
         App::new(LoadedReview::worktree(changeset))
+    }
+
+    fn enter_search_query(app: &mut App, query: &str) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for character in query.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {
+        app.diff_pane_rows(Rect::new(0, 0, 80, 8), 80, 6, theme)
+    }
+
+    fn changeset_with_file(file: DiffFile) -> Changeset {
+        Changeset {
+            title: String::new(),
+            source_label: String::new(),
+            files: vec![file],
+        }
     }
 
     fn changeset_with_one_file() -> Changeset {
@@ -1117,6 +1724,43 @@ mod tests {
                         old_line: Some(line_number),
                         new_line: Some(line_number),
                         content: "line".to_string(),
+                    })
+                    .collect(),
+            }],
+            binary: false,
+        }
+    }
+
+    fn diff_file_with_contents<const N: usize>(contents: [&str; N]) -> DiffFile {
+        let line_count = contents.len() as u32;
+        DiffFile {
+            id: "0".to_string(),
+            old_path: "sample.txt".to_string(),
+            path: "sample.txt".to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
+            status: FileStatus::Modified,
+            stage: crate::model::FileStage::Unstaged,
+            additions: 0,
+            deletions: 0,
+            hunks: vec![DiffHunk {
+                header: format!("@@ -1,{line_count} +1,{line_count} @@"),
+                old_start: 1,
+                old_lines: line_count,
+                new_start: 1,
+                new_lines: line_count,
+                stage: crate::model::FileStage::Unstaged,
+                lines: contents
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, content)| {
+                        let line_number = index as u32 + 1;
+                        DiffLine {
+                            kind: DiffLineKind::Context,
+                            old_line: Some(line_number),
+                            new_line: Some(line_number),
+                            content: content.to_string(),
+                        }
                     })
                     .collect(),
             }],
