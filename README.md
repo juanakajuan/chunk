@@ -2,7 +2,7 @@
 
 `chunk` is a compact terminal diff reviewer for Git repositories. It renders a
 file list and a syntax-highlighted unified diff in the terminal, with keyboard
-and mouse navigation, live worktree refresh, and per-file staging.
+and mouse navigation, live worktree refresh, and file/hunk staging.
 
 ## Requirements
 
@@ -46,17 +46,18 @@ It does not live-refresh or stage files.
 - `Right` / `Enter`: focus diff
 - `PageDown` / `Ctrl-d`: scroll diff down one page
 - `PageUp` / `Ctrl-u`: scroll diff up one page
-- `n` / `N`: jump to the next or previous hunk in the selected file
+- `n` / `N`: select and jump to the next or previous hunk in the selected file
 - `g` / `Home`: jump to top of diff
 - `G` / `End`: jump to bottom of diff
-- `Space`: stage or unstage the selected file when the file list is focused in
-  `diff` mode
+- `Space`: in `diff` mode, stage or unstage the selected file when the file list
+  is focused, or the selected hunk when the diff pane is focused
 - `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
   mode
 - `q` / `Esc`: quit
 
-Mouse hover changes focus. Click a file to select it. Wheel scrolling moves
-through files in the sidebar and scrolls the diff in the diff pane.
+Mouse hover changes focus. Click a file to select it, or click a hunk in the
+diff pane to select it. Wheel scrolling moves through files in the sidebar and
+scrolls the diff in the diff pane.
 
 ## Themes
 

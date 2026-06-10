@@ -105,6 +105,17 @@ impl ReviewSource {
         }
     }
 
+    pub(crate) fn toggle_staging_for_hunk(
+        &self,
+        file: &DiffFile,
+        hunk_index: usize,
+    ) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.toggle_staging_for_hunk(file, hunk_index).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn editor_request(&self, file: &DiffFile) -> Result<EditorRequest> {
         match self {
             Self::Worktree(source) => source.editor_request(file),
@@ -148,6 +159,11 @@ impl WorktreeReviewSource {
 
     fn toggle_staging_for_file(self, path: &str) -> Result<Changeset> {
         git::toggle_staging_for_file(path)?;
+        git::load_worktree_diff()
+    }
+
+    fn toggle_staging_for_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
+        git::toggle_staging_for_hunk(file, hunk_index)?;
         git::load_worktree_diff()
     }
 

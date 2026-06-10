@@ -354,6 +354,7 @@ mod tests {
                 old_lines: 1,
                 new_start: 1,
                 new_lines: 1,
+                stage: FileStage::Unstaged,
                 lines: vec![DiffLine {
                     kind: DiffLineKind::Context,
                     old_line: Some(1),

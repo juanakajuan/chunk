@@ -53,7 +53,7 @@ pub(crate) fn live_status_lines(
 
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
-    can_stage: bool,
+    stage_hint: Option<&'static str>,
     theme: Theme,
 ) -> Line<'static> {
     let mut hints = vec![if files_panel_visible {
@@ -64,9 +64,9 @@ pub(crate) fn keybind_bar_line(
 
     if files_panel_visible {
         hints.push("[Tab] switch focus");
-        if can_stage {
-            hints.push("[Space] stage");
-        }
+    }
+    if let Some(stage_hint) = stage_hint {
+        hints.push(stage_hint);
     }
     hints.push("[j/k] move");
     hints.push("[Ctrl-d/u] scroll");

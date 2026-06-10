@@ -68,6 +68,16 @@ impl DiffFile {
     }
 }
 
+impl FileStage {
+    pub fn from_staged_unstaged(staged: bool, unstaged: bool) -> Self {
+        match (staged, unstaged) {
+            (true, true) => Self::Mixed,
+            (true, false) => Self::Staged,
+            (false, _) => Self::Unstaged,
+        }
+    }
+}
+
 fn first_changed_line_in_hunk(hunk: &DiffHunk) -> Option<u32> {
     let mut next_new_line = hunk.new_start.max(1);
 
@@ -158,6 +168,7 @@ pub struct DiffHunk {
     pub old_lines: u32,
     pub new_start: u32,
     pub new_lines: u32,
+    pub stage: FileStage,
     pub lines: Vec<DiffLine>,
 }
 
@@ -234,6 +245,7 @@ mod tests {
                 old_lines: 1,
                 new_start,
                 new_lines: 1,
+                stage: FileStage::Unstaged,
                 lines,
             }],
             binary: false,

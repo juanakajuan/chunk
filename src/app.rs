@@ -13,11 +13,13 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 use crate::editor::EditorRequest;
-use crate::model::{Changeset, DiffFile};
+use crate::model::{Changeset, DiffFile, DiffHunk};
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
 use crate::theme::Theme;
-use crate::viewport::{RenderedDiffLines, RenderedViewport, ViewportScrollInput};
+use crate::viewport::{
+    DiffRenderRequest, RenderedDiffLines, RenderedViewport, ViewportScrollInput,
+};
 
 const MOUSE_WHEEL_STEP: usize = 3;
 
@@ -43,12 +45,16 @@ pub(crate) struct App {
     live_error: Option<String>,
     /// Index into `changeset.files`.
     selected_file_index: usize,
+    /// Index into the selected file's hunks.
+    selected_hunk_index: Option<usize>,
     /// Pane receiving keyboard and mouse wheel actions.
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
     files_panel_visible: bool,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
+    /// Rendered live-status rows above the diff rows in the diff pane.
+    diff_status_rows: usize,
     /// First file index considered for sidebar rendering.
     sidebar_scroll: usize,
     /// Rendered viewport geometry, row mapping, and render caches.
@@ -66,14 +72,17 @@ impl App {
     pub(crate) fn new(review: LoadedReview) -> Self {
         let LoadedReview { source, changeset } = review;
         let file_count = changeset.files.len();
+        let selected_hunk_index = initial_selected_hunk_index(&changeset);
         Self {
             source,
             changeset,
             live_error: None,
             selected_file_index: 0,
+            selected_hunk_index,
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             diff_scroll: 0,
+            diff_status_rows: 0,
             sidebar_scroll: 0,
             viewport: RenderedViewport::new(file_count),
             editor_request: None,
@@ -140,6 +149,7 @@ impl App {
     ) -> DiffPaneRows {
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+        self.diff_status_rows = lines.len();
         let visible_diff_height = visible_height.saturating_sub(lines.len());
         self.viewport.begin_diff(area, visible_diff_height);
         self.ensure_scroll_bounds();
@@ -153,11 +163,23 @@ impl App {
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
-        rows::keybind_bar_line(self.files_panel_visible, self.can_stage(), theme)
+        rows::keybind_bar_line(self.files_panel_visible, self.stage_keybind_hint(), theme)
     }
 
     fn can_stage(&self) -> bool {
         self.source.can_stage()
+    }
+
+    fn stage_keybind_hint(&self) -> Option<&'static str> {
+        if !self.can_stage() {
+            return None;
+        }
+
+        match self.focus {
+            FocusPane::Sidebar if self.files_panel_visible => Some("[Space] stage file"),
+            FocusPane::Diff => Some("[Space] stage hunk"),
+            FocusPane::Sidebar => None,
+        }
     }
 
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
@@ -176,6 +198,10 @@ impl App {
         self.changeset.files.get(self.selected_file_index)
     }
 
+    fn selected_hunk(&self) -> Option<&DiffHunk> {
+        self.selected_file()?.hunks.get(self.selected_hunk_index?)
+    }
+
     fn ensure_selected_file_sources_loaded(&mut self) {
         let source = &self.source;
         if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
@@ -184,9 +210,19 @@ impl App {
     }
 
     fn ensure_scroll_bounds(&mut self) {
+        self.ensure_selected_hunk_bounds();
         let scrolls = self.viewport.clamped_scrolls(self.viewport_scroll_input());
         self.diff_scroll = scrolls.diff_scroll;
         self.sidebar_scroll = scrolls.sidebar_scroll;
+    }
+
+    fn ensure_selected_hunk_bounds(&mut self) {
+        let Some(file) = self.selected_file() else {
+            self.selected_hunk_index = None;
+            return;
+        };
+
+        self.selected_hunk_index = bounded_hunk_index(file, self.selected_hunk_index);
     }
 
     fn viewport_scroll_input(&self) -> ViewportScrollInput<'_> {
@@ -212,6 +248,7 @@ impl App {
 
         let selected_file_index = self.selected_file_index;
         let can_stage = self.can_stage();
+        let selected_hunk_index = self.selected_hunk_index;
         if selected_file_index >= self.changeset.files.len() {
             return rows::no_diff_lines(self.no_diff_message(), content_width, theme);
         }
@@ -223,22 +260,29 @@ impl App {
 
         let render_target = {
             let file = &self.changeset.files[selected_file_index];
-            self.viewport.diff_lines_render_target(
-                selected_file_index,
-                file.id.as_str(),
+            self.viewport.diff_lines_render_target(DiffRenderRequest {
+                file_index: selected_file_index,
+                file_id: file.id.as_str(),
                 content_width,
-                theme.syntax,
+                syntax_palette: theme.syntax,
                 can_stage,
-                target_rows,
-            )
+                selected_hunk_index,
+                requested_rows: target_rows,
+            })
         };
 
         if let Some(render_target) = render_target {
             self.ensure_selected_file_sources_loaded();
             let file = self.changeset.files[selected_file_index].clone();
             let hunk_offsets = rows::hunk_offsets(&file, content_width, theme, can_stage);
-            let rendered_rows =
-                rows::diff_lines_until(&file, content_width, theme, can_stage, render_target);
+            let rendered_rows = rows::diff_lines_until(
+                &file,
+                content_width,
+                theme,
+                can_stage,
+                selected_hunk_index,
+                render_target,
+            );
             self.viewport.cache_diff_lines(
                 selected_file_index,
                 RenderedDiffLines::new(
@@ -246,6 +290,7 @@ impl App {
                     content_width,
                     theme.syntax,
                     can_stage,
+                    selected_hunk_index,
                     rendered_rows.lines,
                     rendered_rows.complete,
                 )
@@ -276,6 +321,8 @@ impl App {
 
     fn apply_reloaded_changeset(&mut self, changeset: Changeset, preserve_scroll: bool) {
         let previous_identity = self.selected_file().map(file_identity);
+        let previous_hunk_identity = self.selected_hunk().map(hunk_identity);
+        let previous_hunk_index = self.selected_hunk_index;
         let previous_index = self.selected_file_index;
         let previous_scroll = self.diff_scroll;
         let reselected_file_index = previous_identity
@@ -288,6 +335,13 @@ impl App {
         self.changeset = changeset;
         self.live_error = None;
         self.selected_file_index = selected_file_index;
+        let selected_hunk_index = reloaded_hunk_index(
+            self.changeset.files.get(selected_file_index),
+            kept_selection,
+            previous_hunk_identity,
+            previous_hunk_index,
+        );
+        self.selected_hunk_index = selected_hunk_index;
         self.diff_scroll = if preserve_scroll && kept_selection {
             previous_scroll
         } else {
@@ -317,10 +371,10 @@ impl App {
             KeyCode::Char('n') => self.jump_hunk(VerticalDirection::Down),
             KeyCode::Char('N') => self.jump_hunk(VerticalDirection::Up),
 
-            KeyCode::Home | KeyCode::Char('g') => self.diff_scroll = 0,
+            KeyCode::Home | KeyCode::Char('g') => self.scroll_diff_to_top(),
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
 
-            KeyCode::Char(' ') => self.toggle_selected_file_staging()?,
+            KeyCode::Char(' ') => self.toggle_selected_staging(),
             KeyCode::Char('e') => self.queue_selected_file_editor_request(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
@@ -362,6 +416,10 @@ impl App {
 
         if self.is_diff_at(column, row) {
             self.focus = FocusPane::Diff;
+            if let Some(index) = self.diff_hunk_index_at(column, row) {
+                self.selected_hunk_index = Some(index);
+                self.center_selected_hunk();
+            }
         }
     }
 
@@ -402,6 +460,13 @@ impl App {
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
         self.viewport.is_diff_at(column, row)
+    }
+
+    fn diff_hunk_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        let visible_row = self.viewport.diff_row_at(column, row)?;
+        let diff_row = visible_row.checked_sub(self.diff_status_rows)?;
+
+        self.hunk_index_at_rendered_row(self.diff_scroll.saturating_add(diff_row))
     }
 
     fn toggle_focus(&mut self) {
@@ -452,6 +517,10 @@ impl App {
         }
 
         self.selected_file_index = index.min(self.changeset.files.len() - 1);
+        let selected_hunk_index = self
+            .selected_file()
+            .and_then(|file| bounded_hunk_index(file, None));
+        self.selected_hunk_index = selected_hunk_index;
         self.diff_scroll = 0;
     }
 
@@ -464,51 +533,146 @@ impl App {
             VerticalDirection::Down => self.diff_scroll.saturating_add(amount),
             VerticalDirection::Up => self.diff_scroll.saturating_sub(amount),
         };
+        self.select_hunk_at_scroll();
+    }
+
+    fn scroll_diff_to_top(&mut self) {
+        self.diff_scroll = 0;
+        self.select_hunk_at_scroll();
     }
 
     fn scroll_diff_to_bottom(&mut self) {
         self.diff_scroll = usize::MAX;
+        self.selected_hunk_index = self
+            .selected_file()
+            .and_then(|file| file.hunks.len().checked_sub(1));
     }
 
     fn jump_hunk(&mut self, direction: VerticalDirection) {
-        let Some(file) = self.selected_file() else {
+        let Some(hunk_count) = self.selected_file().map(|file| file.hunks.len()) else {
             return;
         };
+        if hunk_count == 0 {
+            self.selected_hunk_index = None;
+            return;
+        }
+
+        let current = self
+            .selected_hunk_index
+            .or_else(|| self.hunk_index_at_rendered_row(self.diff_scroll))
+            .unwrap_or(0)
+            .min(hunk_count - 1);
+        let target = match direction {
+            VerticalDirection::Down => current.saturating_add(1).min(hunk_count - 1),
+            VerticalDirection::Up => current.saturating_sub(1),
+        };
+
+        self.selected_hunk_index = Some(target);
+        self.center_selected_hunk();
+    }
+
+    fn center_selected_hunk(&mut self) {
+        let Some(index) = self.selected_hunk_index else {
+            return;
+        };
+        let Some((file_id, hunk_count)) = self
+            .selected_file()
+            .map(|file| (file.id.clone(), file.hunks.len()))
+        else {
+            return;
+        };
+        if index >= hunk_count {
+            return;
+        }
+
         let Some(offsets) = self
             .viewport
-            .diff_hunk_offsets(self.selected_file_index, file.id.as_str())
+            .diff_hunk_offsets(self.selected_file_index, file_id.as_str())
         else {
             return;
         };
 
-        let target = match direction {
-            VerticalDirection::Down => offsets.iter().find(|offset| **offset > self.diff_scroll),
-            VerticalDirection::Up => offsets
-                .iter()
-                .rev()
-                .find(|offset| **offset < self.diff_scroll),
-        };
-
-        if let Some(offset) = target {
-            self.diff_scroll = *offset;
+        if let Some(offset) = offsets.get(index) {
+            self.diff_scroll = offset.saturating_sub(self.viewport.diff_view_height() / 2);
         }
     }
 
-    fn toggle_selected_file_staging(&mut self) -> Result<()> {
-        if self.focus != FocusPane::Sidebar {
-            return Ok(());
+    fn select_hunk_at_scroll(&mut self) {
+        self.selected_hunk_index = self.hunk_index_at_rendered_row(self.diff_scroll);
+    }
+
+    fn hunk_index_at_rendered_row(&self, rendered_row: usize) -> Option<usize> {
+        let file = self.selected_file()?;
+        if file.hunks.is_empty() {
+            return None;
         }
 
+        let Some(offsets) = self
+            .viewport
+            .diff_hunk_offsets(self.selected_file_index, file.id.as_str())
+            .filter(|offsets| !offsets.is_empty())
+        else {
+            return Some(0);
+        };
+
+        Some(
+            offsets
+                .iter()
+                .rposition(|offset| *offset <= rendered_row)
+                .unwrap_or(0)
+                .min(file.hunks.len() - 1),
+        )
+    }
+
+    fn toggle_selected_staging(&mut self) {
+        if !self.can_stage() {
+            return;
+        }
+
+        match self.focus {
+            FocusPane::Sidebar if self.files_panel_visible => self.toggle_selected_file_staging(),
+            FocusPane::Diff => self.toggle_selected_hunk_staging(),
+            FocusPane::Sidebar => {}
+        }
+    }
+
+    fn toggle_selected_file_staging(&mut self) {
         let Some(file) = self.selected_file() else {
-            return Ok(());
+            return;
         };
 
         let path = file.display_path().to_string();
-        if let Some(reloaded_changeset) = self.source.toggle_staging_for_file(&path)? {
-            self.apply_reloaded_changeset(reloaded_changeset, false);
+        match self.source.toggle_staging_for_file(&path) {
+            Ok(Some(reloaded_changeset)) => {
+                self.apply_reloaded_changeset(reloaded_changeset, false)
+            }
+            Ok(None) => {}
+            Err(error) => self.live_error = Some(format!("staging failed: {error}")),
         }
+    }
 
-        Ok(())
+    fn toggle_selected_hunk_staging(&mut self) {
+        let Some(hunk_index) = self.focused_hunk_index() else {
+            self.live_error = Some("no selected hunk to stage".to_string());
+            return;
+        };
+        let Some(file) = self.selected_file().cloned() else {
+            self.live_error = Some("no selected file to stage".to_string());
+            return;
+        };
+
+        match self.source.toggle_staging_for_hunk(&file, hunk_index) {
+            Ok(Some(reloaded_changeset)) => self.apply_reloaded_changeset(reloaded_changeset, true),
+            Ok(None) => {}
+            Err(error) => self.live_error = Some(format!("hunk staging failed: {error}")),
+        }
+    }
+
+    fn focused_hunk_index(&self) -> Option<usize> {
+        let file = self.selected_file()?;
+        let index = self.selected_hunk_index?;
+
+        (index < file.hunks.len()).then_some(index)
     }
 
     fn queue_selected_file_editor_request(&mut self) {
@@ -530,6 +694,69 @@ impl App {
 
 fn file_identity(file: &DiffFile) -> String {
     file.display_path().to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HunkIdentity {
+    old_start: u32,
+    old_lines: u32,
+    new_start: u32,
+    new_lines: u32,
+}
+
+fn initial_selected_hunk_index(changeset: &Changeset) -> Option<usize> {
+    changeset
+        .files
+        .first()
+        .and_then(|file| bounded_hunk_index(file, None))
+}
+
+fn bounded_hunk_index(file: &DiffFile, index: Option<usize>) -> Option<usize> {
+    if file.hunks.is_empty() {
+        None
+    } else {
+        Some(index.unwrap_or(0).min(file.hunks.len() - 1))
+    }
+}
+
+fn hunk_identity(hunk: &DiffHunk) -> HunkIdentity {
+    HunkIdentity {
+        old_start: hunk.old_start,
+        old_lines: hunk.old_lines,
+        new_start: hunk.new_start,
+        new_lines: hunk.new_lines,
+    }
+}
+
+fn reloaded_hunk_index(
+    file: Option<&DiffFile>,
+    kept_file_selection: bool,
+    previous_identity: Option<HunkIdentity>,
+    previous_index: Option<usize>,
+) -> Option<usize> {
+    let file = file?;
+    if file.hunks.is_empty() {
+        return None;
+    }
+
+    if kept_file_selection {
+        if let Some(index) = previous_identity.and_then(|identity| find_hunk_index(file, identity))
+        {
+            return Some(index);
+        }
+
+        if let Some(index) = previous_index {
+            return Some(index.min(file.hunks.len() - 1));
+        }
+    }
+
+    Some(0)
+}
+
+fn find_hunk_index(file: &DiffFile, identity: HunkIdentity) -> Option<usize> {
+    file.hunks
+        .iter()
+        .position(|hunk| hunk_identity(hunk) == identity)
 }
 
 fn find_file_index(changeset: &Changeset, identity: &str) -> Option<usize> {
@@ -560,6 +787,7 @@ mod tests {
                 24,
                 Theme::github_dark().syntax,
                 true,
+                None,
                 vec![Line::raw("row"); 8],
                 true,
             ),
@@ -585,6 +813,16 @@ mod tests {
         );
         assert_eq!(app.selected_file_index, 0);
         assert_eq!(app.diff_scroll, 4);
+    }
+
+    #[test]
+    fn reload_preserves_selected_hunk_by_coordinates() {
+        let mut app = app_with(changeset_with_two_hunk_file());
+        app.selected_hunk_index = Some(1);
+
+        app.apply_reloaded_changeset(changeset_with_two_hunk_file(), true);
+
+        assert_eq!(app.selected_hunk_index, Some(1));
     }
 
     #[test]
@@ -664,7 +902,7 @@ mod tests {
 
     #[test]
     fn hunk_jump_uses_cached_wrapped_offsets() {
-        let mut app = app_with(changeset_with_one_file());
+        let mut app = app_with(changeset_with_two_hunk_file());
         let theme = Theme::github_dark();
         app.viewport.begin_diff(Rect::default(), 3);
         app.viewport.cache_diff_lines(
@@ -674,6 +912,7 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
+                Some(0),
                 vec![Line::raw("row"); 10],
                 false,
             )
@@ -682,15 +921,13 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.diff_scroll, 1);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.diff_scroll, 80);
+        assert_eq!(app.diff_scroll, 79);
+        assert_eq!(app.selected_hunk_index, Some(1));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.diff_scroll, 1);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.selected_hunk_index, Some(0));
     }
 
     #[test]
@@ -705,6 +942,7 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
+                Some(0),
                 vec![Line::raw("row"); 8],
                 true,
             )
@@ -723,6 +961,7 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
+                Some(0),
                 vec![Line::raw("row"); 8],
                 true,
             )
@@ -732,11 +971,75 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.diff_scroll, 5);
+        assert_eq!(app.diff_scroll, 4);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.diff_scroll, 5);
+        assert_eq!(app.diff_scroll, 4);
+    }
+
+    #[test]
+    fn scrolling_diff_selects_hunk_at_top_visible_row() {
+        let mut app = app_with(changeset_with_two_hunk_file());
+        let theme = Theme::github_dark();
+        app.viewport.begin_diff(Rect::default(), 3);
+        app.viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "0".to_string(),
+                24,
+                theme.syntax,
+                true,
+                Some(0),
+                vec![Line::raw("row"); 100],
+                true,
+            )
+            .with_hunk_offsets(vec![1, 80]),
+        );
+
+        app.scroll_diff_by(VerticalDirection::Down, 80);
+
+        assert_eq!(app.selected_hunk_index, Some(1));
+    }
+
+    #[test]
+    fn diff_click_selects_hunk_under_pointer() {
+        let mut app = app_with(changeset_with_two_hunk_file());
+        let theme = Theme::github_dark();
+        app.viewport.begin_diff(Rect::new(0, 0, 80, 10), 8);
+        app.viewport.cache_diff_lines(
+            0,
+            RenderedDiffLines::new(
+                "0".to_string(),
+                80,
+                theme.syntax,
+                true,
+                Some(0),
+                vec![Line::raw("row"); 12],
+                true,
+            )
+            .with_hunk_offsets(vec![1, 5]),
+        );
+
+        app.handle_left_click(1, 6);
+
+        assert_eq!(app.focus, FocusPane::Diff);
+        assert_eq!(app.selected_hunk_index, Some(1));
+        assert_eq!(app.diff_scroll, 1);
+    }
+
+    #[test]
+    fn diff_space_without_hunks_sets_live_error_without_exiting() {
+        let mut app = app_with(changeset_with_one_file());
+        app.focus = FocusPane::Diff;
+        app.changeset.files[0].hunks.clear();
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(keep_running);
+        assert_eq!(app.live_error.as_deref(), Some("no selected hunk to stage"));
     }
 
     fn app_with(changeset: Changeset) -> App {
@@ -745,6 +1048,25 @@ mod tests {
 
     fn changeset_with_one_file() -> Changeset {
         changeset_with_paths(["sample.txt"])
+    }
+
+    fn changeset_with_two_hunk_file() -> Changeset {
+        let mut changeset = changeset_with_one_file();
+        changeset.files[0].hunks.push(DiffHunk {
+            header: "@@ -20 +20 @@".to_string(),
+            old_start: 20,
+            old_lines: 1,
+            new_start: 20,
+            new_lines: 1,
+            stage: crate::model::FileStage::Unstaged,
+            lines: vec![DiffLine {
+                kind: DiffLineKind::Context,
+                old_line: Some(20),
+                new_line: Some(20),
+                content: "line".to_string(),
+            }],
+        });
+        changeset
     }
 
     fn changeset_with_short_file(path: &str) -> Changeset {
@@ -788,6 +1110,7 @@ mod tests {
                 old_lines: line_count,
                 new_start: 1,
                 new_lines: line_count,
+                stage: crate::model::FileStage::Unstaged,
                 lines: (1..=line_count)
                     .map(|line_number| DiffLine {
                         kind: DiffLineKind::Context,

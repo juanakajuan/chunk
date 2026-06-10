@@ -49,11 +49,21 @@ struct DiffSyntaxHighlighter<'a> {
     next_line: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HunkRenderOptions {
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+    selected: bool,
+    target_rows: usize,
+}
+
 pub(crate) fn diff_lines_until(
     file: &DiffFile,
     content_width: usize,
     theme: Theme,
     can_stage: bool,
+    selected_hunk_index: Option<usize>,
     target_rows: usize,
 ) -> RenderedRows {
     let mut lines = wrap_line(
@@ -82,15 +92,20 @@ pub(crate) fn diff_lines_until(
     let mut new_highlighter =
         DiffSyntaxHighlighter::new(diff_new_path(file), &file.new_source, theme);
 
-    for hunk in &file.hunks {
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+        let options = HunkRenderOptions {
+            content_width,
+            theme,
+            can_stage,
+            selected: selected_hunk_index == Some(hunk_index),
+            target_rows,
+        };
         if !push_hunk_lines_until(
             &mut lines,
             hunk,
             &mut old_highlighter,
             &mut new_highlighter,
-            content_width,
-            theme,
-            target_rows,
+            options,
         ) {
             return RenderedRows::partial(lines);
         }
@@ -118,7 +133,7 @@ pub(crate) fn hunk_offsets(
 
     for hunk in &file.hunks {
         offsets.push(offset);
-        offset += hunk_row_count(hunk, content_width, theme);
+        offset += hunk_row_count(hunk, content_width, theme, can_stage);
     }
 
     offsets
@@ -129,18 +144,16 @@ fn push_hunk_lines_until(
     hunk: &DiffHunk,
     old_highlighter: &mut DiffSyntaxHighlighter<'_>,
     new_highlighter: &mut DiffSyntaxHighlighter<'_>,
-    content_width: usize,
-    theme: Theme,
-    target_rows: usize,
+    options: HunkRenderOptions,
 ) -> bool {
     old_highlighter.advance_to(hunk.old_start);
     new_highlighter.advance_to(hunk.new_start);
 
     lines.extend(wrap_line(
-        hunk_header_line(&hunk.header, theme),
-        content_width,
+        hunk_header_line(hunk, options.theme, options.can_stage, options.selected),
+        options.content_width,
     ));
-    if lines.len() >= target_rows {
+    if lines.len() >= options.target_rows {
         return false;
     }
 
@@ -150,10 +163,10 @@ fn push_hunk_lines_until(
             intraline_ranges,
             old_highlighter,
             new_highlighter,
-            content_width,
-            theme,
+            options.content_width,
+            options.theme,
         ));
-        lines.len() < target_rows
+        lines.len() < options.target_rows
     };
 
     let mut line_index = 0;
@@ -197,8 +210,12 @@ fn path_or_display<'a>(path: &'a str, file: &'a DiffFile) -> &'a str {
     }
 }
 
-fn hunk_row_count(hunk: &DiffHunk, content_width: usize, theme: Theme) -> usize {
-    wrap_line(hunk_header_line(&hunk.header, theme), content_width).len()
+fn hunk_row_count(hunk: &DiffHunk, content_width: usize, theme: Theme, can_stage: bool) -> usize {
+    wrap_line(
+        hunk_header_line(hunk, theme, can_stage, false),
+        content_width,
+    )
+    .len()
         + hunk
             .lines
             .iter()
@@ -214,11 +231,28 @@ fn diff_line_row_count(line: &DiffLine, content_width: usize) -> usize {
     .len()
 }
 
-fn hunk_header_line(header: &str, theme: Theme) -> Line<'static> {
-    Line::styled(
-        format!(" {header}"),
-        color_style(theme.muted, theme.background_alt).add_modifier(Modifier::BOLD),
-    )
+fn hunk_header_line(
+    hunk: &DiffHunk,
+    theme: Theme,
+    can_stage: bool,
+    selected: bool,
+) -> Line<'static> {
+    let background = if selected {
+        theme.selected
+    } else {
+        theme.background_alt
+    };
+    let foreground = if selected { theme.accent } else { theme.muted };
+    let style = color_style(foreground, background).add_modifier(Modifier::BOLD);
+    let marker = if selected { ">" } else { " " };
+    let mut spans = vec![Span::styled(format!("{marker} {}", hunk.header), style)];
+
+    if can_stage {
+        let stage = stage_display(hunk.stage, background, theme);
+        spans.push(Span::styled(stage.suffix.to_string(), stage.style));
+    }
+
+    Line::from(spans)
 }
 
 fn diff_line(
@@ -492,9 +526,15 @@ mod tests {
             let file =
                 diff_file_with_line(kind, "alpha beta gamma delta epsilon zeta eta theta iota");
             let content_width = DIFF_GUTTER_WIDTH + 12;
-            let lines =
-                diff_lines_until(&file, content_width, Theme::github_dark(), true, usize::MAX)
-                    .lines;
+            let lines = diff_lines_until(
+                &file,
+                content_width,
+                Theme::github_dark(),
+                true,
+                None,
+                usize::MAX,
+            )
+            .lines;
             let diff_rows: Vec<&Line<'_>> = lines
                 .iter()
                 .filter(|line| line_text(line).starts_with(RAIL_MARKER))
@@ -515,8 +555,15 @@ mod tests {
             "alpha beta gamma delta epsilon zeta eta theta iota",
         );
         let content_width = DIFF_GUTTER_WIDTH + 12;
-        let lines =
-            diff_lines_until(&file, content_width, Theme::github_dark(), true, usize::MAX).lines;
+        let lines = diff_lines_until(
+            &file,
+            content_width,
+            Theme::github_dark(),
+            true,
+            None,
+            usize::MAX,
+        )
+        .lines;
         let diff_rows: Vec<&Line<'_>> = lines
             .iter()
             .filter(|line| line_text(line).starts_with(RAIL_MARKER))
@@ -551,12 +598,28 @@ mod tests {
         let content_width = DIFF_GUTTER_WIDTH + 12;
 
         let offsets = hunk_offsets(&file, content_width, theme, true);
-        let lines = diff_lines_until(&file, content_width, theme, true, usize::MAX).lines;
+        let lines = diff_lines_until(&file, content_width, theme, true, None, usize::MAX).lines;
 
         assert_eq!(offsets.len(), 2);
-        assert_eq!(line_text(&lines[offsets[0]]), " @@ -1 +1 @@");
-        assert_eq!(line_text(&lines[offsets[1]]), " @@ -10 +10 @@");
+        assert!(line_text(&lines[offsets[0]]).starts_with("  @@ -1 +1 @@"));
+        assert!(line_text(&lines[offsets[1]]).starts_with("  @@ -10 +10 @@"));
         assert!(offsets[1] > offsets[0] + 2);
+    }
+
+    #[test]
+    fn selected_hunk_header_gets_marker() {
+        let theme = Theme::github_dark();
+        let file = diff_file_with_hunks(vec![
+            ("@@ -1 +1 @@", vec![added_diff_line("one")]),
+            ("@@ -10 +10 @@", vec![added_diff_line("two")]),
+        ]);
+        let content_width = DIFF_GUTTER_WIDTH + 40;
+
+        let offsets = hunk_offsets(&file, content_width, theme, true);
+        let lines = diff_lines_until(&file, content_width, theme, true, Some(1), usize::MAX).lines;
+
+        assert!(line_text(&lines[offsets[0]]).starts_with("  @@ -1 +1 @@"));
+        assert!(line_text(&lines[offsets[1]]).starts_with("> @@ -10 +10 @@"));
     }
 
     #[test]
@@ -569,6 +632,7 @@ mod tests {
             DIFF_GUTTER_WIDTH + 120,
             Theme::github_dark(),
             true,
+            None,
             usize::MAX,
         )
         .lines;
@@ -588,6 +652,7 @@ mod tests {
             DIFF_GUTTER_WIDTH + 80,
             Theme::github_dark(),
             true,
+            None,
             usize::MAX,
         )
         .lines;
@@ -606,6 +671,7 @@ mod tests {
             DIFF_GUTTER_WIDTH + 80,
             Theme::github_dark(),
             true,
+            None,
             usize::MAX,
         )
         .lines;
@@ -636,6 +702,7 @@ mod tests {
                 old_lines: 0,
                 new_start: 4,
                 new_lines: 1,
+                stage: FileStage::Unstaged,
                 lines: vec![DiffLine {
                     kind: DiffLineKind::Added,
                     old_line: None,
@@ -646,7 +713,8 @@ mod tests {
             binary: false,
         };
 
-        let lines = diff_lines_until(&file, DIFF_GUTTER_WIDTH + 80, theme, true, usize::MAX).lines;
+        let lines =
+            diff_lines_until(&file, DIFF_GUTTER_WIDTH + 80, theme, true, None, usize::MAX).lines;
         let added_line = lines
             .iter()
             .find(|line| line_text(line).contains(changed_line))
@@ -671,6 +739,19 @@ mod tests {
         assert!(!line_text(&header).contains("[unstaged]"));
     }
 
+    #[test]
+    fn review_mode_omits_hunk_staging_affordances() {
+        let file = diff_file_with_line(DiffLineKind::Context, "short");
+        let lines =
+            diff_lines_until(&file, 80, Theme::github_dark(), false, None, usize::MAX).lines;
+
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line_text(line).contains("[unstaged]"))
+        );
+    }
+
     fn diff_file_with_line(kind: DiffLineKind, content: &str) -> DiffFile {
         DiffFile {
             id: "0".to_string(),
@@ -688,6 +769,7 @@ mod tests {
                 old_lines: 1,
                 new_start: 1,
                 new_lines: 1,
+                stage: FileStage::Unstaged,
                 lines: vec![DiffLine {
                     kind,
                     old_line: (!matches!(kind, DiffLineKind::Added)).then_some(1),
@@ -733,6 +815,7 @@ mod tests {
                 old_lines,
                 new_start: 1,
                 new_lines,
+                stage: FileStage::Unstaged,
                 lines,
             }],
             binary: false,
@@ -759,6 +842,7 @@ mod tests {
                 old_lines: 1,
                 new_start: index as u32 + 1,
                 new_lines: 1,
+                stage: FileStage::Unstaged,
                 lines,
             })
             .collect();

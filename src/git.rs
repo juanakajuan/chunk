@@ -4,13 +4,13 @@
 //! values and should not need to know which Git commands produced them.
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::model::{Changeset, DiffFile, FileStage, SourceSnapshot};
+use crate::model::{Changeset, DiffFile, DiffHunk, FileStage, FileStatus, SourceSnapshot};
 use crate::patch::parse_unified_diff;
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 512 * 1024;
@@ -41,6 +41,7 @@ pub(crate) fn load_worktree_diff() -> Result<Changeset> {
     patch.push_str(&load_untracked_patches(&untracked_paths)?);
     let mut changeset = parse_unified_diff(&patch);
     annotate_stage_states(&mut changeset, &untracked_paths)?;
+    annotate_hunk_stage_states(&mut changeset, &untracked_paths)?;
     changeset.title = worktree_title();
     changeset.source_label = "git diff HEAD + untracked".to_string();
     Ok(changeset)
@@ -106,6 +107,23 @@ pub(crate) fn toggle_staging_for_file(path: &str) -> Result<()> {
     }
 }
 
+pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Result<()> {
+    let hunk = file.hunks.get(hunk_index).ok_or_else(|| {
+        eyre!(
+            "hunk {} does not exist in {}",
+            hunk_index + 1,
+            file.display_path()
+        )
+    })?;
+
+    match hunk.stage {
+        FileStage::Unstaged => apply_matching_hunks_to_index(file, hunk, HunkPatchSource::Unstaged),
+        FileStage::Staged | FileStage::Mixed => {
+            apply_matching_hunks_to_index(file, hunk, HunkPatchSource::Staged)
+        }
+    }
+}
+
 pub(crate) fn worktree_root() -> Result<PathBuf> {
     git_stdout(["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
@@ -147,6 +165,41 @@ fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
     Ok(patches)
 }
 
+fn load_staged_diff() -> Result<Changeset> {
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--cached",
+            "--no-color",
+            "--patch",
+            "--find-renames",
+            "--default-prefix",
+            "HEAD",
+        ])
+        .output()?;
+
+    ensure_success(&output, "git diff --cached failed")?;
+    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn load_unstaged_diff(untracked_paths: &[String]) -> Result<Changeset> {
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--no-color",
+            "--patch",
+            "--find-renames",
+            "--default-prefix",
+        ])
+        .output()?;
+
+    ensure_success(&output, "git diff failed")?;
+
+    let mut patch = String::from_utf8_lossy(&output.stdout).to_string();
+    patch.push_str(&load_untracked_patches(untracked_paths)?);
+    Ok(parse_unified_diff(&patch))
+}
+
 fn annotate_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) -> Result<()> {
     for file in &mut changeset.files {
         let path = file.display_path();
@@ -154,14 +207,259 @@ fn annotate_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) 
         let unstaged =
             is_file_unstaged(path)? || untracked_paths.iter().any(|candidate| candidate == path);
 
-        file.stage = match (staged, unstaged) {
-            (true, true) => FileStage::Mixed,
-            (true, false) => FileStage::Staged,
-            (false, _) => FileStage::Unstaged,
-        };
+        file.stage = FileStage::from_staged_unstaged(staged, unstaged);
     }
 
     Ok(())
+}
+
+fn annotate_hunk_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) -> Result<()> {
+    let staged = load_staged_diff()?;
+    let unstaged = load_unstaged_diff(untracked_paths)?;
+    annotate_hunk_stage_states_from_diffs(changeset, &staged, &unstaged, untracked_paths);
+    Ok(())
+}
+
+fn annotate_hunk_stage_states_from_diffs(
+    changeset: &mut Changeset,
+    staged: &Changeset,
+    unstaged: &Changeset,
+    untracked_paths: &[String],
+) {
+    for file in &mut changeset.files {
+        let staged_file = matching_file(&staged.files, file);
+        let unstaged_file = matching_file(&unstaged.files, file);
+        let untracked = untracked_paths
+            .iter()
+            .any(|candidate| candidate == file.display_path());
+
+        for hunk in &mut file.hunks {
+            let staged = staged_file.is_some_and(|candidate| hunk_overlaps_file(hunk, candidate));
+            let unstaged = untracked
+                || unstaged_file.is_some_and(|candidate| hunk_overlaps_file(hunk, candidate));
+
+            hunk.stage = FileStage::from_staged_unstaged(staged, unstaged);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HunkPatchSource {
+    Staged,
+    Unstaged,
+}
+
+impl HunkPatchSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::Unstaged => "unstaged",
+        }
+    }
+
+    fn reverse(self) -> bool {
+        matches!(self, Self::Staged)
+    }
+}
+
+fn apply_matching_hunks_to_index(
+    file: &DiffFile,
+    selected_hunk: &DiffHunk,
+    source: HunkPatchSource,
+) -> Result<()> {
+    let source_changeset = match source {
+        HunkPatchSource::Staged => load_staged_diff()?,
+        HunkPatchSource::Unstaged => {
+            let untracked_paths = untracked_paths()?;
+            load_unstaged_diff(&untracked_paths)?
+        }
+    };
+    let source_file = matching_file(&source_changeset.files, file).ok_or_else(|| {
+        eyre!(
+            "no {} hunk found for {}",
+            source.label(),
+            file.display_path()
+        )
+    })?;
+    let hunk_indices = overlapping_hunk_indices(source_file, selected_hunk);
+    if hunk_indices.is_empty() {
+        return Err(eyre!(
+            "no {} hunk overlaps selected hunk in {}",
+            source.label(),
+            file.display_path()
+        ));
+    }
+
+    let patch = build_hunk_patch(source_file, &hunk_indices);
+    apply_patch_to_index(&patch, source.reverse())
+}
+
+fn matching_file<'a>(files: &'a [DiffFile], target: &DiffFile) -> Option<&'a DiffFile> {
+    files.iter().find(|file| same_file_identity(file, target))
+}
+
+fn same_file_identity(left: &DiffFile, right: &DiffFile) -> bool {
+    left.display_path() == right.display_path()
+        || non_empty_eq(&left.path, &right.path)
+        || non_empty_eq(&left.old_path, &right.old_path)
+}
+
+fn non_empty_eq(left: &str, right: &str) -> bool {
+    !left.is_empty() && left == right
+}
+
+fn hunk_overlaps_file(hunk: &DiffHunk, file: &DiffFile) -> bool {
+    file.hunks
+        .iter()
+        .any(|candidate| hunks_overlap(hunk, candidate))
+}
+
+fn overlapping_hunk_indices(file: &DiffFile, selected_hunk: &DiffHunk) -> Vec<usize> {
+    file.hunks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hunk)| hunks_overlap(selected_hunk, hunk).then_some(index))
+        .collect()
+}
+
+fn hunks_overlap(left: &DiffHunk, right: &DiffHunk) -> bool {
+    ranges_overlap(
+        line_span(left.old_start, left.old_lines),
+        line_span(right.old_start, right.old_lines),
+    ) || ranges_overlap(
+        line_span(left.new_start, left.new_lines),
+        line_span(right.new_start, right.new_lines),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineSpan {
+    start: u32,
+    end: u32,
+}
+
+fn line_span(start: u32, lines: u32) -> LineSpan {
+    LineSpan {
+        start,
+        end: start.saturating_add(lines),
+    }
+}
+
+fn ranges_overlap(left: LineSpan, right: LineSpan) -> bool {
+    left.start < left.end
+        && right.start < right.end
+        && left.start < right.end
+        && right.start < left.end
+}
+
+fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
+    let mut patch = String::new();
+    let old_path = patch_old_path(file);
+    let new_path = patch_new_path(file);
+
+    patch.push_str(&format!(
+        "diff --git {} {}\n",
+        prefixed_patch_path("a", old_path),
+        prefixed_patch_path("b", new_path)
+    ));
+    if file.status == FileStatus::Added {
+        patch.push_str("new file mode 100644\n");
+    } else if file.status == FileStatus::Deleted {
+        patch.push_str("deleted file mode 100644\n");
+    }
+    patch.push_str(&format!("--- {}\n", old_patch_header_path(file, old_path)));
+    patch.push_str(&format!("+++ {}\n", new_patch_header_path(file, new_path)));
+
+    for index in hunk_indices {
+        if let Some(hunk) = file.hunks.get(*index) {
+            push_hunk_patch(&mut patch, hunk);
+        }
+    }
+
+    patch
+}
+
+fn patch_old_path(file: &DiffFile) -> &str {
+    if file.old_path.is_empty() {
+        file.display_path()
+    } else {
+        &file.old_path
+    }
+}
+
+fn patch_new_path(file: &DiffFile) -> &str {
+    if file.path.is_empty() {
+        file.display_path()
+    } else {
+        &file.path
+    }
+}
+
+fn old_patch_header_path(file: &DiffFile, path: &str) -> String {
+    if file.status == FileStatus::Added {
+        "/dev/null".to_string()
+    } else {
+        prefixed_patch_path("a", path)
+    }
+}
+
+fn new_patch_header_path(file: &DiffFile, path: &str) -> String {
+    if file.status == FileStatus::Deleted {
+        "/dev/null".to_string()
+    } else {
+        prefixed_patch_path("b", path)
+    }
+}
+
+fn prefixed_patch_path(prefix: &str, path: &str) -> String {
+    format!("{prefix}/{path}")
+}
+
+fn push_hunk_patch(patch: &mut String, hunk: &DiffHunk) {
+    patch.push_str(&hunk.header);
+    patch.push('\n');
+
+    for line in &hunk.lines {
+        let marker = match line.kind {
+            crate::model::DiffLineKind::Context => Some(' '),
+            crate::model::DiffLineKind::Added => Some('+'),
+            crate::model::DiffLineKind::Removed => Some('-'),
+            crate::model::DiffLineKind::Meta => None,
+        };
+
+        if let Some(marker) = marker {
+            patch.push(marker);
+        }
+        patch.push_str(&line.content);
+        patch.push('\n');
+    }
+}
+
+fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {
+    let mut command = Command::new("git");
+    command.args(["apply", "--cached", "--whitespace=nowarn"]);
+    if reverse {
+        command.arg("--reverse");
+    }
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command.spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| eyre!("failed to open git apply stdin"))?;
+    stdin.write_all(patch.as_bytes())?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    let context = if reverse {
+        "git apply --cached --reverse failed"
+    } else {
+        "git apply --cached failed"
+    };
+    ensure_success(&output, context)
 }
 
 fn resolve_base_ref(base: Option<&str>) -> Result<String> {
@@ -460,10 +758,13 @@ fn has_file_diff(path: &str, cached: bool) -> Result<bool> {
 mod tests {
     use std::fs;
     use std::io::Cursor;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use crate::model::{DiffHunk, FileStatus};
+
+    static GIT_CWD_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn source_snapshots_load_only_pre_hunk_prefix() {
@@ -493,6 +794,7 @@ mod tests {
                 old_lines: 0,
                 new_start: 4,
                 new_lines: 1,
+                stage: FileStage::Unstaged,
                 lines: Vec::new(),
             }],
             binary: false,
@@ -515,6 +817,107 @@ mod tests {
         let mut reader = Cursor::new(source);
 
         assert!(read_source_prefix(&mut reader, 1).is_err());
+    }
+
+    #[test]
+    fn toggle_hunk_staging_moves_only_selected_hunk() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::write("sample.txt", numbered_lines()).unwrap();
+        run_git(["add", "sample.txt"]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("sample.txt", changed_numbered_lines()).unwrap();
+
+        let changeset = load_worktree_diff().unwrap();
+        let file = &changeset.files[0];
+        assert_eq!(file.hunks.len(), 2);
+        assert_eq!(file.hunks[0].stage, FileStage::Unstaged);
+        assert_eq!(file.hunks[1].stage, FileStage::Unstaged);
+
+        toggle_staging_for_hunk(file, 0).unwrap();
+
+        let cached = git_output(["diff", "--cached", "--", "sample.txt"]);
+        assert!(cached.contains("line two"));
+        assert!(!cached.contains("line eighteen"));
+        let unstaged = git_output(["diff", "--", "sample.txt"]);
+        assert!(!unstaged.contains("line two"));
+        assert!(unstaged.contains("line eighteen"));
+
+        let changeset = load_worktree_diff().unwrap();
+        let file = &changeset.files[0];
+        assert_eq!(file.stage, FileStage::Mixed);
+        assert_eq!(file.hunks[0].stage, FileStage::Staged);
+        assert_eq!(file.hunks[1].stage, FileStage::Unstaged);
+
+        toggle_staging_for_hunk(file, 0).unwrap();
+
+        let cached = git_output(["diff", "--cached", "--", "sample.txt"]);
+        assert!(!cached.contains("line two"));
+        assert!(!cached.contains("line eighteen"));
+        let unstaged = git_output(["diff", "--", "sample.txt"]);
+        assert!(unstaged.contains("line two"));
+        assert!(unstaged.contains("line eighteen"));
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn enter(path: &Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).unwrap();
+        }
+    }
+
+    fn run_git<const N: usize>(args: [&str; N]) {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_output<const N: usize>(args: [&str; N]) -> String {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    fn numbered_lines() -> String {
+        (1..=20)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>()
+    }
+
+    fn changed_numbered_lines() -> String {
+        let mut lines = (1..=20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        lines[1] = "line two".to_string();
+        lines[17] = "line eighteen".to_string();
+        format!("{}\n", lines.join("\n"))
     }
 
     fn temp_root() -> PathBuf {

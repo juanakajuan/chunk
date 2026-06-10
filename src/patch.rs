@@ -176,6 +176,7 @@ impl HunkBuilder {
             old_lines: self.old_lines,
             new_start: self.new_start,
             new_lines: self.new_lines,
+            stage: FileStage::Unstaged,
             lines: self.lines,
         }
     }

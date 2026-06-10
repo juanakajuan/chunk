@@ -42,6 +42,17 @@ pub struct ViewportScrollState {
     pub sidebar_scroll: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffRenderRequest<'a> {
+    pub file_index: usize,
+    pub file_id: &'a str,
+    pub content_width: usize,
+    pub syntax_palette: SyntaxPalette,
+    pub can_stage: bool,
+    pub selected_hunk_index: Option<usize>,
+    pub requested_rows: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct RenderedDiffLines {
     /// `DiffFile::id` for the cached file.
@@ -52,6 +63,8 @@ pub struct RenderedDiffLines {
     syntax_palette: SyntaxPalette,
     /// Whether staging controls were rendered in the cached header.
     can_stage: bool,
+    /// Hunk rendered as selected in this cache.
+    selected_hunk_index: Option<usize>,
     /// Rendered, wrapped lines for the selected file.
     lines: Vec<Line<'static>>,
     /// Rendered row offsets for each hunk header under this cache layout.
@@ -141,6 +154,15 @@ impl RenderedViewport {
             .is_some_and(|area| rect_contains(area, column, row))
     }
 
+    pub fn diff_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.diff_area?;
+        if !rect_inner_contains(area, column, row) {
+            return None;
+        }
+
+        Some(row.saturating_sub(area.y + 1) as usize)
+    }
+
     pub fn clamped_scrolls(&self, input: ViewportScrollInput<'_>) -> ViewportScrollState {
         let selected_file_index = input
             .selected_file_index
@@ -220,24 +242,10 @@ impl RenderedViewport {
         }
     }
 
-    pub fn diff_lines_render_target(
-        &self,
-        file_index: usize,
-        file_id: &str,
-        content_width: usize,
-        syntax_palette: SyntaxPalette,
-        can_stage: bool,
-        requested_rows: usize,
-    ) -> Option<usize> {
-        self.diff_lines_cache(file_index)
-            .map_or(Some(requested_rows), |cache| {
-                cache.render_target_if_needed(
-                    file_id,
-                    content_width,
-                    syntax_palette,
-                    can_stage,
-                    requested_rows,
-                )
+    pub fn diff_lines_render_target(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
+        self.diff_lines_cache(request.file_index)
+            .map_or(Some(request.requested_rows), |cache| {
+                cache.render_target_if_needed(request)
             })
     }
 
@@ -313,6 +321,7 @@ impl RenderedDiffLines {
         content_width: usize,
         syntax_palette: SyntaxPalette,
         can_stage: bool,
+        selected_hunk_index: Option<usize>,
         lines: Vec<Line<'static>>,
         complete: bool,
     ) -> Self {
@@ -321,6 +330,7 @@ impl RenderedDiffLines {
             content_width,
             syntax_palette,
             can_stage,
+            selected_hunk_index,
             lines,
             hunk_offsets: Vec::new(),
             complete,
@@ -336,27 +346,24 @@ impl RenderedDiffLines {
         self.file_id == file_id
     }
 
-    fn render_target_if_needed(
-        &self,
-        file_id: &str,
-        content_width: usize,
-        syntax_palette: SyntaxPalette,
-        can_stage: bool,
-        requested_rows: usize,
-    ) -> Option<usize> {
-        if !self.matches_file(file_id)
-            || self.content_width != content_width
-            || self.syntax_palette != syntax_palette
-            || self.can_stage != can_stage
+    fn render_target_if_needed(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
+        if !self.matches_file(request.file_id)
+            || self.content_width != request.content_width
+            || self.syntax_palette != request.syntax_palette
+            || self.can_stage != request.can_stage
+            || self.selected_hunk_index != request.selected_hunk_index
         {
-            return Some(requested_rows);
+            return Some(request.requested_rows);
         }
 
-        if self.complete || self.lines.len() >= requested_rows {
+        if self.complete || self.lines.len() >= request.requested_rows {
             return None;
         }
 
-        Some(next_diff_cache_target(self.lines.len(), requested_rows))
+        Some(next_diff_cache_target(
+            self.lines.len(),
+            request.requested_rows,
+        ))
     }
 
     fn len(&self) -> usize {
@@ -417,6 +424,7 @@ mod tests {
                 80,
                 Theme::github_dark().syntax,
                 true,
+                None,
                 vec![Line::raw("row"); 8],
                 true,
             ),
@@ -482,18 +490,47 @@ mod tests {
                 80,
                 theme.syntax,
                 true,
+                None,
                 vec![Line::raw("row"); 100],
                 false,
             ),
         );
 
         assert_eq!(
-            viewport.diff_lines_render_target(0, "file", 80, theme.syntax, true, 101),
+            viewport.diff_lines_render_target(DiffRenderRequest {
+                file_index: 0,
+                file_id: "file",
+                content_width: 80,
+                syntax_palette: theme.syntax,
+                can_stage: true,
+                selected_hunk_index: None,
+                requested_rows: 101,
+            }),
             Some(200)
         );
         assert_eq!(
-            viewport.diff_lines_render_target(0, "file", 80, theme.syntax, true, 250),
+            viewport.diff_lines_render_target(DiffRenderRequest {
+                file_index: 0,
+                file_id: "file",
+                content_width: 80,
+                syntax_palette: theme.syntax,
+                can_stage: true,
+                selected_hunk_index: None,
+                requested_rows: 250,
+            }),
             Some(250)
+        );
+        assert_eq!(
+            viewport.diff_lines_render_target(DiffRenderRequest {
+                file_index: 0,
+                file_id: "file",
+                content_width: 80,
+                syntax_palette: theme.syntax,
+                can_stage: true,
+                selected_hunk_index: Some(0),
+                requested_rows: 101,
+            }),
+            Some(101)
         );
     }
 }
