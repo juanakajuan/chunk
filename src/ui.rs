@@ -6,10 +6,12 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, FocusPane};
 use crate::theme::Theme;
+use crate::viewport::DiffScrollbar;
 
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
@@ -89,6 +91,29 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     let pane = app.diff_pane_rows(area, content_width, inner_height, theme);
     let block = pane_block(pane.title, app.focus(), FocusPane::Diff, theme);
     frame.render_widget(Paragraph::new(pane.lines).block(block), area);
+    if let Some(scrollbar) = pane.scrollbar {
+        render_diff_scrollbar(frame, scrollbar, theme);
+    }
+}
+
+fn render_diff_scrollbar(frame: &mut Frame<'_>, scrollbar: DiffScrollbar, theme: Theme) {
+    let thumb = scrollbar.thumb();
+    let area = scrollbar.area();
+    let track_style = color_style(theme.muted, theme.background);
+    let thumb_style = color_style(theme.accent, theme.background);
+    let lines = (0..area.height as usize)
+        .map(|row| {
+            let in_thumb = row >= thumb.start && row < thumb.start.saturating_add(thumb.len);
+            let (symbol, style) = if in_thumb {
+                ("█", thumb_style)
+            } else {
+                ("│", track_style)
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {

@@ -16,7 +16,7 @@ mod intraline;
 mod sidebar;
 mod text;
 
-pub(crate) use diff::{diff_lines_until, hunk_offsets};
+pub(crate) use diff::{diff_line_count, diff_lines_until, hunk_offsets};
 pub(crate) use sidebar::SidebarRowsInput;
 pub(crate) use sidebar::{sidebar_row_counts, sidebar_rows};
 

@@ -19,7 +19,8 @@ use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
 use crate::theme::Theme;
 use crate::viewport::{
-    DiffRenderRequest, RenderedDiffLines, RenderedViewport, ViewportScrollInput,
+    DiffRenderRequest, DiffScrollbar, DiffScrollbarDrag, RenderedDiffLines, RenderedViewport,
+    ViewportScrollInput,
 };
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -80,6 +81,8 @@ pub(crate) struct App {
     sidebar_scroll: usize,
     /// Rendered viewport geometry, row mapping, and render caches.
     viewport: RenderedViewport,
+    /// Active mouse drag against the rendered diff scrollbar.
+    diff_scrollbar_drag: Option<DiffScrollbarDrag>,
     /// Deferred request for runtime to open an external editor safely.
     editor_request: Option<EditorRequest>,
     /// Literal search prompt, query, matches, and active match.
@@ -89,6 +92,7 @@ pub(crate) struct App {
 pub(crate) struct DiffPaneRows {
     pub(crate) title: String,
     pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) scrollbar: Option<DiffScrollbar>,
 }
 
 impl App {
@@ -109,6 +113,7 @@ impl App {
             diff_status_rows: 0,
             sidebar_scroll: 0,
             viewport: RenderedViewport::new(file_count),
+            diff_scrollbar_drag: None,
             editor_request: None,
             search: SearchState::default(),
         }
@@ -179,11 +184,22 @@ impl App {
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
 
+        let provisional_search_lines =
+            rows::search_status_lines(self.search.status(), content_width, theme);
+        let provisional_visible_diff_height =
+            visible_height.saturating_sub(lines.len() + provisional_search_lines.len());
+        let mut diff_content_width =
+            self.diff_content_width(content_width, provisional_visible_diff_height, theme);
+
         let pending_search_scroll = if self.search.active_query().is_some() {
-            let available_height = visible_height.saturating_sub(lines.len());
-            self.viewport.begin_diff(area, available_height);
+            self.viewport
+                .begin_diff(area, provisional_visible_diff_height);
             self.ensure_scroll_bounds();
-            self.ensure_selected_diff_cache(content_width, available_height, theme)
+            self.ensure_selected_diff_cache(
+                diff_content_width,
+                provisional_visible_diff_height,
+                theme,
+            )
         } else {
             false
         };
@@ -196,7 +212,15 @@ impl App {
 
         self.diff_status_rows = lines.len();
         let visible_diff_height = visible_height.saturating_sub(self.diff_status_rows);
+        diff_content_width = self.diff_content_width(content_width, visible_diff_height, theme);
+        let total_diff_rows = self.selected_diff_line_count(diff_content_width, theme);
         self.viewport.begin_diff(area, visible_diff_height);
+        self.viewport.set_diff_scrollbar(self.diff_scrollbar(
+            area,
+            content_width,
+            visible_diff_height,
+            total_diff_rows,
+        ));
         self.ensure_scroll_bounds();
 
         if pending_search_scroll {
@@ -206,11 +230,21 @@ impl App {
         }
 
         if visible_diff_height > 0 {
-            lines.extend(self.selected_diff_lines(content_width, visible_diff_height, theme));
+            lines.extend(self.selected_diff_lines(diff_content_width, visible_diff_height, theme));
         }
         lines.truncate(visible_height);
+        self.viewport.set_diff_scrollbar(self.diff_scrollbar(
+            area,
+            content_width,
+            visible_diff_height,
+            total_diff_rows,
+        ));
 
-        DiffPaneRows { title, lines }
+        DiffPaneRows {
+            title,
+            lines,
+            scrollbar: self.viewport.diff_scrollbar().cloned(),
+        }
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
@@ -294,6 +328,61 @@ impl App {
             selected_file_id: selected_file.map(|file| file.id.as_str()),
             selected_file_line_count: selected_file.map_or(0, DiffFile::line_count),
         }
+    }
+
+    fn diff_content_width(
+        &self,
+        content_width: usize,
+        visible_diff_height: usize,
+        theme: Theme,
+    ) -> usize {
+        if content_width > 1
+            && visible_diff_height > 0
+            && self.selected_diff_line_count(content_width, theme) > visible_diff_height
+        {
+            content_width - 1
+        } else {
+            content_width
+        }
+    }
+
+    fn selected_diff_line_count(&self, content_width: usize, theme: Theme) -> usize {
+        self.selected_file()
+            .map(|file| rows::diff_line_count(file, content_width, theme, self.can_stage()))
+            .unwrap_or(0)
+    }
+
+    fn diff_scrollbar(
+        &self,
+        area: Rect,
+        content_width: usize,
+        visible_diff_height: usize,
+        total_diff_rows: usize,
+    ) -> Option<DiffScrollbar> {
+        if content_width <= 1 || visible_diff_height == 0 || total_diff_rows <= visible_diff_height
+        {
+            return None;
+        }
+
+        let file = self.selected_file()?;
+        let scrollbar_area = Rect {
+            x: area.x.saturating_add(area.width.saturating_sub(2)),
+            y: area
+                .y
+                .saturating_add(1)
+                .saturating_add(saturating_u16(self.diff_status_rows)),
+            width: 1,
+            height: saturating_u16(visible_diff_height),
+        };
+
+        Some(DiffScrollbar::new(
+            scrollbar_area,
+            self.selected_file_index,
+            file.id.clone(),
+            total_diff_rows,
+            visible_diff_height,
+            self.diff_scroll,
+        ))
     }
 
     fn selected_diff_lines(
@@ -491,6 +580,7 @@ impl App {
     fn clear_render_caches(&mut self) {
         self.viewport
             .clear_render_caches(self.changeset.files.len());
+        self.diff_scrollbar_drag = None;
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -558,6 +648,8 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(column, row),
+            MouseEventKind::Drag(MouseButton::Left) => self.handle_left_drag(row),
+            MouseEventKind::Up(MouseButton::Left) => self.diff_scrollbar_drag = None,
             MouseEventKind::ScrollDown => self.handle_wheel(column, row, VerticalDirection::Down),
             MouseEventKind::ScrollUp => self.handle_wheel(column, row, VerticalDirection::Up),
             MouseEventKind::Moved => self.handle_hover(column, row),
@@ -584,6 +676,15 @@ impl App {
     }
 
     fn handle_left_click(&mut self, column: u16, row: u16) {
+        self.diff_scrollbar_drag = None;
+
+        if let Some((drag, scroll)) = self.diff_scrollbar_drag_at(column, row) {
+            self.focus = FocusPane::Diff;
+            self.diff_scrollbar_drag = Some(drag);
+            self.scroll_diff_to(scroll);
+            return;
+        }
+
         if let Some(index) = self.sidebar_index_at(column, row) {
             self.focus = FocusPane::Sidebar;
             self.select_file(index);
@@ -597,6 +698,19 @@ impl App {
                 self.center_selected_hunk();
             }
         }
+    }
+
+    fn handle_left_drag(&mut self, row: u16) {
+        let Some(drag) = self.diff_scrollbar_drag else {
+            return;
+        };
+        let Some(scrollbar) = self.viewport.diff_scrollbar() else {
+            self.diff_scrollbar_drag = None;
+            return;
+        };
+
+        self.focus = FocusPane::Diff;
+        self.scroll_diff_to(scrollbar.scroll_for_drag(row, drag));
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) {
@@ -641,6 +755,12 @@ impl App {
         let diff_row = visible_row.checked_sub(self.diff_status_rows)?;
 
         self.hunk_index_at_rendered_row(self.diff_scroll.saturating_add(diff_row))
+    }
+
+    fn diff_scrollbar_drag_at(&self, column: u16, row: u16) -> Option<(DiffScrollbarDrag, usize)> {
+        let scrollbar = self.viewport.diff_scrollbar()?;
+        let drag = scrollbar.drag_at(column, row)?;
+        Some((drag, scrollbar.scroll_for_drag(row, drag)))
     }
 
     fn toggle_focus(&mut self) {
@@ -712,6 +832,11 @@ impl App {
             VerticalDirection::Down => self.diff_scroll.saturating_add(amount),
             VerticalDirection::Up => self.diff_scroll.saturating_sub(amount),
         };
+        self.select_hunk_at_scroll();
+    }
+
+    fn scroll_diff_to(&mut self, scroll: usize) {
+        self.diff_scroll = scroll;
         self.select_hunk_at_scroll();
     }
 
@@ -1027,6 +1152,10 @@ fn accepts_text_input(key: KeyEvent) -> bool {
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn saturating_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
 }
 
 fn diff_search_matches(lines: &[Line<'static>], query: &str) -> Vec<SearchMatch> {
@@ -1568,6 +1697,35 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Diff);
         assert_eq!(app.selected_hunk_index, Some(1));
         assert_eq!(app.diff_scroll, 1);
+    }
+
+    #[test]
+    fn diff_scrollbar_click_and_drag_update_scroll() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_file(diff_file("sample.txt", 40)));
+        let pane = render_diff_pane(&mut app, theme);
+        let scrollbar = pane.scrollbar.expect("large diff should show scrollbar");
+        let area = scrollbar.area();
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y + area.height - 1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        let clicked_scroll = app.diff_scroll;
+        assert_eq!(app.focus, FocusPane::Diff);
+        assert!(clicked_scroll > 0);
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(app.diff_scroll < clicked_scroll);
     }
 
     #[test]

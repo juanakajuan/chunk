@@ -139,6 +139,40 @@ pub(crate) fn hunk_offsets(
     offsets
 }
 
+pub(crate) fn diff_line_count(
+    file: &DiffFile,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+) -> usize {
+    let header_rows = wrap_line(
+        render_file_header(file, content_width, can_stage, theme),
+        content_width,
+    )
+    .len();
+
+    if file.binary {
+        return header_rows
+            + wrap_line(muted_line("Binary file changed", theme), content_width).len();
+    }
+
+    if file.hunks.is_empty() {
+        return header_rows
+            + wrap_line(
+                muted_line("File changed without textual hunks", theme),
+                content_width,
+            )
+            .len();
+    }
+
+    header_rows
+        + file
+            .hunks
+            .iter()
+            .map(|hunk| hunk_row_count(hunk, content_width, theme, can_stage))
+            .sum::<usize>()
+}
+
 fn push_hunk_lines_until(
     lines: &mut Vec<Line<'static>>,
     hunk: &DiffHunk,
@@ -568,6 +602,22 @@ mod tests {
                 "{kind:?} rendered wider than the diff pane"
             );
         }
+    }
+
+    #[test]
+    fn diff_line_count_matches_fully_rendered_rows() {
+        let file = diff_file_with_line(
+            DiffLineKind::Added,
+            "alpha beta gamma delta epsilon zeta eta theta iota",
+        );
+        let content_width = DIFF_GUTTER_WIDTH + 12;
+        let theme = Theme::github_dark();
+        let lines = diff_lines_until(&file, content_width, theme, true, None, usize::MAX).lines;
+
+        assert_eq!(
+            diff_line_count(&file, content_width, theme, true),
+            lines.len()
+        );
     }
 
     #[test]

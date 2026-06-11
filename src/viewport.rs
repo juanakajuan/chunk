@@ -18,6 +18,8 @@ pub struct RenderedViewport {
     sidebar_area: Option<Rect>,
     /// Last diff rectangle, used to map mouse events.
     diff_area: Option<Rect>,
+    /// Last rendered diff scrollbar, used to draw and map mouse events.
+    diff_scrollbar: Option<DiffScrollbar>,
     /// Rendered sidebar row to file index mapping for click handling.
     sidebar_row_indices: Vec<usize>,
     /// Cached sidebar row counts for the current sidebar layout.
@@ -40,6 +42,27 @@ pub struct ViewportScrollInput<'a> {
 pub struct ViewportScrollState {
     pub diff_scroll: usize,
     pub sidebar_scroll: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffScrollbar {
+    area: Rect,
+    file_index: usize,
+    file_id: String,
+    total_rows: usize,
+    visible_rows: usize,
+    scroll: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffScrollbarThumb {
+    pub start: usize,
+    pub len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffScrollbarDrag {
+    thumb_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +113,7 @@ impl RenderedViewport {
             sidebar_view_height: 1,
             sidebar_area: None,
             diff_area: None,
+            diff_scrollbar: None,
             sidebar_row_indices: Vec::new(),
             sidebar_row_counts_cache: None,
             diff_lines_cache: vec![None; file_count],
@@ -99,12 +123,14 @@ impl RenderedViewport {
     pub fn begin_frame(&mut self) {
         self.sidebar_area = None;
         self.diff_area = None;
+        self.diff_scrollbar = None;
         self.sidebar_row_indices.clear();
     }
 
     pub fn clear_render_caches(&mut self, file_count: usize) {
         self.sidebar_row_counts_cache = None;
         self.diff_lines_cache = vec![None; file_count];
+        self.diff_scrollbar = None;
     }
 
     pub fn diff_view_height(&self) -> usize {
@@ -120,6 +146,14 @@ impl RenderedViewport {
     pub fn begin_diff(&mut self, area: Rect, height: usize) {
         self.diff_area = Some(area);
         self.diff_view_height = height.max(1);
+    }
+
+    pub fn set_diff_scrollbar(&mut self, scrollbar: Option<DiffScrollbar>) {
+        self.diff_scrollbar = scrollbar;
+    }
+
+    pub fn diff_scrollbar(&self) -> Option<&DiffScrollbar> {
+        self.diff_scrollbar.as_ref()
     }
 
     pub fn begin_sidebar_rows(&mut self) {
@@ -188,8 +222,17 @@ impl RenderedViewport {
             .saturating_sub(self.diff_view_height);
         let hunk_scroll = self
             .partial_cache_hunk_scroll_target(input.selected_file_index, input.selected_file_id);
+        let scrollbar_scroll = self
+            .diff_scrollbar
+            .as_ref()
+            .filter(|scrollbar| {
+                input.selected_file_id.is_some_and(|file_id| {
+                    scrollbar.matches_file(input.selected_file_index, file_id)
+                })
+            })
+            .map_or(0, DiffScrollbar::max_scroll);
 
-        rendered_scroll.max(hunk_scroll)
+        rendered_scroll.max(hunk_scroll).max(scrollbar_scroll)
     }
 
     fn sidebar_scroll_with_selected_visible(
@@ -321,6 +364,98 @@ impl RenderedViewport {
     }
 }
 
+impl DiffScrollbar {
+    pub fn new(
+        area: Rect,
+        file_index: usize,
+        file_id: String,
+        total_rows: usize,
+        visible_rows: usize,
+        scroll: usize,
+    ) -> Self {
+        Self {
+            area,
+            file_index,
+            file_id,
+            total_rows,
+            visible_rows,
+            scroll,
+        }
+    }
+
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
+    pub fn thumb(&self) -> DiffScrollbarThumb {
+        let track_height = self.track_height();
+        let thumb_len = ratio_ceil(self.visible_rows, track_height, self.total_rows)
+            .max(1)
+            .min(track_height);
+        let track_range = track_height.saturating_sub(thumb_len);
+        let scroll_range = self.max_scroll();
+        let start = if track_range == 0 || scroll_range == 0 {
+            0
+        } else {
+            ratio_round(self.scroll.min(scroll_range), track_range, scroll_range)
+        };
+
+        DiffScrollbarThumb {
+            start,
+            len: thumb_len,
+        }
+    }
+
+    pub fn drag_at(&self, column: u16, row: u16) -> Option<DiffScrollbarDrag> {
+        if !rect_contains(self.area, column, row) {
+            return None;
+        }
+
+        let row_offset = self.row_offset(row);
+        let thumb = self.thumb();
+        let thumb_end = thumb.start.saturating_add(thumb.len);
+        let thumb_offset = if row_offset >= thumb.start && row_offset < thumb_end {
+            row_offset.saturating_sub(thumb.start)
+        } else {
+            thumb.len / 2
+        };
+
+        Some(DiffScrollbarDrag { thumb_offset })
+    }
+
+    pub fn scroll_for_drag(&self, row: u16, drag: DiffScrollbarDrag) -> usize {
+        let thumb = self.thumb();
+        let track_range = self.track_height().saturating_sub(thumb.len);
+        let scroll_range = self.max_scroll();
+        if track_range == 0 || scroll_range == 0 {
+            return 0;
+        }
+
+        let thumb_start = self
+            .row_offset(row)
+            .saturating_sub(drag.thumb_offset)
+            .min(track_range);
+        ratio_round(thumb_start, scroll_range, track_range)
+    }
+
+    fn matches_file(&self, file_index: usize, file_id: &str) -> bool {
+        self.file_index == file_index && self.file_id == file_id
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.total_rows.saturating_sub(self.visible_rows)
+    }
+
+    fn row_offset(&self, row: u16) -> usize {
+        row.saturating_sub(self.area.y)
+            .min(self.area.height.saturating_sub(1)) as usize
+    }
+
+    fn track_height(&self) -> usize {
+        self.area.height.max(1) as usize
+    }
+}
+
 impl RenderedDiffLines {
     pub fn new(
         file_id: String,
@@ -414,6 +549,25 @@ fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height).saturating_sub(1)
 }
 
+fn ratio_ceil(value: usize, numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        return 0;
+    }
+
+    let scaled = (value as u128).saturating_mul(numerator as u128);
+    scaled.div_ceil(denominator as u128).min(usize::MAX as u128) as usize
+}
+
+fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        return 0;
+    }
+
+    let scaled = (value as u128).saturating_mul(numerator as u128);
+    let rounded = scaled.saturating_add((denominator as u128) / 2) / denominator as u128;
+    rounded.min(usize::MAX as u128) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +637,19 @@ mod tests {
         assert_eq!(viewport.sidebar_index_at(1, 1, 4), Some(2));
         assert_eq!(viewport.sidebar_index_at(1, 3, 4), Some(2));
         assert_eq!(viewport.sidebar_index_at(1, 4, 4), None);
+    }
+
+    #[test]
+    fn diff_scrollbar_thumb_reflects_scroll_and_visible_rows() {
+        let scrollbar =
+            DiffScrollbar::new(Rect::new(0, 0, 1, 10), 0, "file".to_string(), 100, 20, 40);
+
+        let thumb = scrollbar.thumb();
+        assert_eq!(thumb.len, 2);
+        assert_eq!(thumb.start, 4);
+
+        let drag = scrollbar.drag_at(0, 9).unwrap();
+        assert_eq!(scrollbar.scroll_for_drag(9, drag), 80);
     }
 
     #[test]
