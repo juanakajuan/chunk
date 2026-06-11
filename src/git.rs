@@ -10,11 +10,19 @@ use std::process::{Child, Command, Output, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::model::{Changeset, DiffFile, DiffHunk, FileStage, FileStatus, SourceSnapshot};
+use crate::model::{
+    Changeset, DiffFile, DiffHunk, DiffLineKind, FileStage, FileStatus, SourceSnapshot,
+};
 use crate::patch::parse_unified_diff;
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 512 * 1024;
 const DEFAULT_BASE_REFS: [&str; 3] = ["origin/HEAD", "main", "master"];
+const GIT_DIFF_PATCH_ARGS: [&str; 4] = [
+    "--no-color",
+    "--patch",
+    "--find-renames",
+    "--default-prefix",
+];
 
 pub(crate) struct LoadedPrDiff {
     pub(crate) changeset: Changeset,
@@ -24,14 +32,9 @@ pub(crate) struct LoadedPrDiff {
 
 pub(crate) fn load_worktree_diff() -> Result<Changeset> {
     let output = Command::new("git")
-        .args([
-            "diff",
-            "--no-color",
-            "--patch",
-            "--find-renames",
-            "--default-prefix",
-            "HEAD",
-        ])
+        .arg("diff")
+        .args(GIT_DIFF_PATCH_ARGS)
+        .arg("HEAD")
         .output()?;
 
     ensure_success(&output, "git diff failed")?;
@@ -64,13 +67,8 @@ pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
 
 pub(crate) fn load_ref_diff(old_ref: &str, new_ref: &str) -> Result<Changeset> {
     let output = Command::new("git")
-        .args([
-            "diff",
-            "--no-color",
-            "--patch",
-            "--find-renames",
-            "--default-prefix",
-        ])
+        .arg("diff")
+        .args(GIT_DIFF_PATCH_ARGS)
         .arg(old_ref)
         .arg(new_ref)
         .output()?;
@@ -167,15 +165,9 @@ fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
 
 fn load_staged_diff() -> Result<Changeset> {
     let output = Command::new("git")
-        .args([
-            "diff",
-            "--cached",
-            "--no-color",
-            "--patch",
-            "--find-renames",
-            "--default-prefix",
-            "HEAD",
-        ])
+        .args(["diff", "--cached"])
+        .args(GIT_DIFF_PATCH_ARGS)
+        .arg("HEAD")
         .output()?;
 
     ensure_success(&output, "git diff --cached failed")?;
@@ -184,13 +176,8 @@ fn load_staged_diff() -> Result<Changeset> {
 
 fn load_unstaged_diff(untracked_paths: &[String]) -> Result<Changeset> {
     let output = Command::new("git")
-        .args([
-            "diff",
-            "--no-color",
-            "--patch",
-            "--find-renames",
-            "--default-prefix",
-        ])
+        .arg("diff")
+        .args(GIT_DIFF_PATCH_ARGS)
         .output()?;
 
     ensure_success(&output, "git diff failed")?;
@@ -204,8 +191,7 @@ fn annotate_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) 
     for file in &mut changeset.files {
         let path = file.display_path();
         let staged = is_file_staged(path)?;
-        let unstaged =
-            is_file_unstaged(path)? || untracked_paths.iter().any(|candidate| candidate == path);
+        let unstaged = is_file_unstaged(path)? || is_untracked_path(untracked_paths, path);
 
         file.stage = FileStage::from_staged_unstaged(staged, unstaged);
     }
@@ -229,9 +215,7 @@ fn annotate_hunk_stage_states_from_diffs(
     for file in &mut changeset.files {
         let staged_file = matching_file(&staged.files, file);
         let unstaged_file = matching_file(&unstaged.files, file);
-        let untracked = untracked_paths
-            .iter()
-            .any(|candidate| candidate == file.display_path());
+        let untracked = is_untracked_path(untracked_paths, file.display_path());
 
         for hunk in &mut file.hunks {
             let staged = staged_file.is_some_and(|candidate| hunk_overlaps_file(hunk, candidate));
@@ -241,6 +225,10 @@ fn annotate_hunk_stage_states_from_diffs(
             hunk.stage = FileStage::from_staged_unstaged(staged, unstaged);
         }
     }
+}
+
+fn is_untracked_path(untracked_paths: &[String], path: &str) -> bool {
+    untracked_paths.iter().any(|candidate| candidate == path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,10 +350,10 @@ fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
         prefixed_patch_path("a", old_path),
         prefixed_patch_path("b", new_path)
     ));
-    if file.status == FileStatus::Added {
-        patch.push_str("new file mode 100644\n");
-    } else if file.status == FileStatus::Deleted {
-        patch.push_str("deleted file mode 100644\n");
+    match file.status {
+        FileStatus::Added => patch.push_str("new file mode 100644\n"),
+        FileStatus::Deleted => patch.push_str("deleted file mode 100644\n"),
+        _ => {}
     }
     patch.push_str(&format!("--- {}\n", old_patch_header_path(file, old_path)));
     patch.push_str(&format!("+++ {}\n", new_patch_header_path(file, new_path)));
@@ -420,15 +408,11 @@ fn push_hunk_patch(patch: &mut String, hunk: &DiffHunk) {
     patch.push('\n');
 
     for line in &hunk.lines {
-        let marker = match line.kind {
-            crate::model::DiffLineKind::Context => Some(' '),
-            crate::model::DiffLineKind::Added => Some('+'),
-            crate::model::DiffLineKind::Removed => Some('-'),
-            crate::model::DiffLineKind::Meta => None,
-        };
-
-        if let Some(marker) = marker {
-            patch.push(marker);
+        match line.kind {
+            DiffLineKind::Context => patch.push(' '),
+            DiffLineKind::Added => patch.push('+'),
+            DiffLineKind::Removed => patch.push('-'),
+            DiffLineKind::Meta => {}
         }
         patch.push_str(&line.content);
         patch.push('\n');
@@ -463,8 +447,8 @@ fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {
 }
 
 fn resolve_base_ref(base: Option<&str>) -> Result<String> {
-    if let Some(base) = base.filter(|base| !base.trim().is_empty()) {
-        return Ok(base.to_string());
+    if let Some(requested_base) = base.filter(|base| !base.trim().is_empty()) {
+        return Ok(requested_base.to_string());
     }
 
     DEFAULT_BASE_REFS
@@ -617,9 +601,10 @@ fn load_source_prefix_from_reader(
     reader: &mut impl BufRead,
     max_context_line: u32,
 ) -> SourceSnapshot {
-    read_source_prefix(reader, max_context_line)
-        .map(|prefix| SourceSnapshot::loaded(prefix.content))
-        .unwrap_or(SourceSnapshot::Unavailable)
+    match read_source_prefix(reader, max_context_line) {
+        Ok(prefix) => SourceSnapshot::loaded(prefix.content),
+        Err(_) => SourceSnapshot::Unavailable,
+    }
 }
 
 fn guarded_source_prefix(path: &str, max_context_line: u32) -> Option<SourceSnapshot> {
@@ -745,12 +730,16 @@ fn has_file_diff(path: &str, cached: bool) -> Result<bool> {
     }
 
     let status = command.args(["--quiet", "--"]).arg(path).status()?;
+    let failure_context = if cached {
+        "git diff --cached failed"
+    } else {
+        "git diff failed"
+    };
 
     match status.code() {
         Some(0) => Ok(false),
         Some(1) => Ok(true),
-        _ if cached => Err(eyre!("git diff --cached failed for {path}")),
-        _ => Err(eyre!("git diff failed for {path}")),
+        _ => Err(eyre!("{failure_context} for {path}")),
     }
 }
 

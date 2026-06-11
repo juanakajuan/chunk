@@ -1,3 +1,4 @@
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::model::DiffFile;
@@ -57,6 +58,11 @@ pub(crate) fn sidebar_rows(input: SidebarRowsInput<'_>) -> RenderedSidebarRows {
     let mut lines = Vec::new();
     let mut row_records = Vec::new();
     for (index, file) in input.files.iter().enumerate().skip(sidebar_scroll) {
+        let remaining_height = input.visible_height.saturating_sub(lines.len());
+        if remaining_height == 0 {
+            break;
+        }
+
         let entry_lines = render_file_entry(
             index,
             file,
@@ -65,12 +71,7 @@ pub(crate) fn sidebar_rows(input: SidebarRowsInput<'_>) -> RenderedSidebarRows {
             input.can_stage,
             input.theme,
         );
-        let visible_rows = entry_lines
-            .len()
-            .min(input.visible_height.saturating_sub(lines.len()));
-        if visible_rows == 0 {
-            break;
-        }
+        let visible_rows = entry_lines.len().min(remaining_height);
 
         row_records.push(SidebarRowRecord {
             index,
@@ -116,14 +117,14 @@ fn visible_sidebar_scroll(
     }
 
     let selected_index = selected_file_index.min(file_count - 1);
-    let scroll = sidebar_scroll.min(file_count - 1);
+    let clamped_scroll = sidebar_scroll.min(file_count - 1);
 
-    if selected_index < scroll {
+    if selected_index < clamped_scroll {
         return selected_index;
     }
 
-    if sidebar_selection_visible(row_counts, scroll, selected_index, visible_height) {
-        scroll
+    if sidebar_selection_visible(row_counts, clamped_scroll, selected_index, visible_height) {
+        clamped_scroll
     } else {
         sidebar_scroll_for_selected(row_counts, selected_index, visible_height)
     }
@@ -135,7 +136,11 @@ fn sidebar_selection_visible(
     selected_index: usize,
     visible_height: usize,
 ) -> bool {
-    if selected_index < scroll || selected_index >= row_counts.len() {
+    let Some(selected_row_count) = row_counts.get(selected_index).copied() else {
+        return false;
+    };
+
+    if selected_index < scroll {
         return false;
     }
 
@@ -145,7 +150,7 @@ fn sidebar_selection_visible(
         return false;
     }
 
-    rows_before_selected == 0 || rows_before_selected + row_counts[selected_index] <= visible_height
+    rows_before_selected == 0 || rows_before_selected + selected_row_count <= visible_height
 }
 
 fn sidebar_scroll_for_selected(
@@ -155,16 +160,16 @@ fn sidebar_scroll_for_selected(
 ) -> usize {
     let visible_height = visible_height.max(1);
     let mut scroll = selected_index;
-    let mut rows = row_counts.get(selected_index).copied().unwrap_or(1);
+    let mut row_total = row_counts.get(selected_index).copied().unwrap_or(1);
 
     while scroll > 0 {
         let previous_rows = row_counts.get(scroll - 1).copied().unwrap_or(1);
-        if rows + previous_rows > visible_height {
+        if row_total + previous_rows > visible_height {
             break;
         }
 
         scroll -= 1;
-        rows += previous_rows;
+        row_total += previous_rows;
     }
 
     scroll
@@ -178,48 +183,54 @@ fn render_file_entry(
     can_stage: bool,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let selected = index == selected_index;
-    let background = if selected {
+    let is_selected = index == selected_index;
+    let row_background = if is_selected {
         theme.selected
     } else {
         theme.background
     };
-    let base = color_style(theme.text, background);
-    let marker_style = if selected {
-        color_style(theme.accent, background)
+    let base_style = color_style(theme.text, row_background);
+    let marker_style = if is_selected {
+        color_style(theme.accent, row_background)
     } else {
-        base
+        base_style
     };
-    let status_style = color_style(status_color(file.status, theme), background);
-    let label = sidebar_file_label(file);
+    let status_style = color_style(status_color(file.status, theme), row_background);
+    let file_label = sidebar_file_label(file);
     let stats = format_file_stats(file);
     let stats_width = stats_width(&stats);
     let gutter_width = sidebar_gutter_width(can_stage);
-    let used_width = gutter_width + display_width(&label) + stats_width;
+    let used_width = gutter_width + display_width(&file_label) + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
-    let rail = if selected { RAIL_MARKER } else { " " };
+    let rail = if is_selected { RAIL_MARKER } else { " " };
 
-    let mut prefix = vec![Span::styled(rail, marker_style), Span::styled(" ", base)];
+    let mut line_prefix = vec![
+        Span::styled(rail, marker_style),
+        Span::styled(" ", base_style),
+    ];
     if can_stage {
-        let stage = stage_display(file.stage, background, theme);
-        prefix.push(Span::styled(stage.checkbox, stage.style));
-        prefix.push(Span::styled(" ", base));
+        let stage_marker = stage_display(file.stage, row_background, theme);
+        line_prefix.push(Span::styled(stage_marker.checkbox, stage_marker.style));
+        line_prefix.push(Span::styled(" ", base_style));
     }
-    prefix.push(Span::styled(file.status.marker().to_string(), status_style));
-    prefix.push(Span::styled(" ", base));
-    let mut content = vec![Span::styled(label, base), Span::styled(padding, base)];
-    push_stat_spans(&mut content, file, background, theme);
+    line_prefix.push(Span::styled(file.status.marker().to_string(), status_style));
+    line_prefix.push(Span::styled(" ", base_style));
+    let mut content_spans = vec![
+        Span::styled(file_label, base_style),
+        Span::styled(padding, base_style),
+    ];
+    push_stat_spans(&mut content_spans, file, row_background, theme);
 
     if content_width <= gutter_width {
-        let mut spans = prefix;
-        spans.extend(content);
+        let mut spans = line_prefix;
+        spans.extend(content_spans);
         return wrap_line(Line::from(spans), content_width);
     }
 
     wrap_sidebar_content(
-        prefix,
-        continuation_prefix(rail, marker_style, base, gutter_width),
-        content,
+        line_prefix,
+        continuation_prefix(rail, marker_style, base_style, gutter_width),
+        content_spans,
         content_width,
         gutter_width,
     )
@@ -228,34 +239,34 @@ fn render_file_entry(
 fn wrap_sidebar_content(
     first_prefix: Vec<Span<'static>>,
     continuation_prefix: Vec<Span<'static>>,
-    content: Vec<Span<'static>>,
+    content_spans: Vec<Span<'static>>,
     content_width: usize,
     gutter_width: usize,
 ) -> Vec<Line<'static>> {
-    wrap_styled_spans(content, content_width.saturating_sub(gutter_width))
+    wrap_styled_spans(content_spans, content_width.saturating_sub(gutter_width))
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut spans = if index == 0 {
+            let mut line_spans = if index == 0 {
                 first_prefix.clone()
             } else {
                 continuation_prefix.clone()
             };
-            spans.extend(row);
-            Line::from(spans)
+            line_spans.extend(row);
+            Line::from(line_spans)
         })
         .collect()
 }
 
 fn continuation_prefix(
     rail: &str,
-    marker_style: ratatui::style::Style,
-    base: ratatui::style::Style,
+    marker_style: Style,
+    base_style: Style,
     gutter_width: usize,
 ) -> Vec<Span<'static>> {
     vec![
         Span::styled(rail.to_string(), marker_style),
-        Span::styled(" ".repeat(gutter_width.saturating_sub(1)), base),
+        Span::styled(" ".repeat(gutter_width.saturating_sub(1)), base_style),
     ]
 }
 

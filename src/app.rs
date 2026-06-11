@@ -172,14 +172,14 @@ impl App {
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
 
-        let mut pending_search_scroll = false;
-        if self.search.active_query().is_some() {
+        let pending_search_scroll = if self.search.active_query().is_some() {
             let available_height = visible_height.saturating_sub(lines.len());
             self.viewport.begin_diff(area, available_height);
             self.ensure_scroll_bounds();
-            pending_search_scroll =
-                self.ensure_selected_diff_cache(content_width, available_height, theme);
-        }
+            self.ensure_selected_diff_cache(content_width, available_height, theme)
+        } else {
+            false
+        };
 
         lines.extend(rows::search_status_lines(
             self.search.status(),
@@ -457,13 +457,12 @@ impl App {
         self.changeset = changeset;
         self.live_error = None;
         self.selected_file_index = selected_file_index;
-        let selected_hunk_index = reloaded_hunk_index(
+        self.selected_hunk_index = reloaded_hunk_index(
             self.changeset.files.get(selected_file_index),
             kept_selection,
             previous_hunk_identity,
             previous_hunk_index,
         );
-        self.selected_hunk_index = selected_hunk_index;
         self.diff_scroll = if preserve_scroll && kept_selection {
             previous_scroll
         } else {
@@ -504,14 +503,8 @@ impl App {
             KeyCode::Char('j') => self.move_by(VerticalDirection::Down),
             KeyCode::Char('k') => self.move_by(VerticalDirection::Up),
 
-            KeyCode::Char('n') if self.search.active_query().is_some() => {
-                self.jump_search_match(VerticalDirection::Down)
-            }
-            KeyCode::Char('N') if self.search.active_query().is_some() => {
-                self.jump_search_match(VerticalDirection::Up)
-            }
-            KeyCode::Char('n') => self.jump_hunk(VerticalDirection::Down),
-            KeyCode::Char('N') => self.jump_hunk(VerticalDirection::Up),
+            KeyCode::Char('n') => self.jump_by(VerticalDirection::Down),
+            KeyCode::Char('N') => self.jump_by(VerticalDirection::Up),
 
             KeyCode::Home | KeyCode::Char('g') => self.scroll_diff_to_top(),
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
@@ -583,12 +576,10 @@ impl App {
 
     fn pane_at(&self, column: u16, row: u16) -> Option<FocusPane> {
         if self.is_sidebar_at(column, row) {
-            Some(FocusPane::Sidebar)
-        } else if self.is_diff_at(column, row) {
-            Some(FocusPane::Diff)
-        } else {
-            None
+            return Some(FocusPane::Sidebar);
         }
+
+        self.is_diff_at(column, row).then_some(FocusPane::Diff)
     }
 
     fn sidebar_index_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -664,10 +655,9 @@ impl App {
         }
 
         self.selected_file_index = index.min(self.changeset.files.len() - 1);
-        let selected_hunk_index = self
+        self.selected_hunk_index = self
             .selected_file()
             .and_then(|file| bounded_hunk_index(file, None));
-        self.selected_hunk_index = selected_hunk_index;
         self.diff_scroll = 0;
         self.search.invalidate_matches();
     }
@@ -717,6 +707,14 @@ impl App {
 
         self.selected_hunk_index = Some(target);
         self.center_selected_hunk();
+    }
+
+    fn jump_by(&mut self, direction: VerticalDirection) {
+        if self.search.active_query().is_some() {
+            self.jump_search_match(direction);
+        } else {
+            self.jump_hunk(direction);
+        }
     }
 
     fn jump_search_match(&mut self, direction: VerticalDirection) {
@@ -928,8 +926,11 @@ impl SearchState {
             self.clear_rendered_matches();
             return false;
         };
-        let same_file = self.match_file_id.as_deref() == Some(file_id);
-        let previous_active_index = same_file.then_some(self.active_index).flatten();
+        let previous_active_index = if self.match_file_id.as_deref() == Some(file_id) {
+            self.active_index
+        } else {
+            None
+        };
 
         self.matches = diff_search_matches(lines, query);
         self.match_file_id = Some(file_id.to_string());
@@ -1061,18 +1062,16 @@ fn highlight_line_search_matches(
 }
 
 fn line_search_chars(spans: Vec<Span<'static>>) -> Vec<SearchStyledChar> {
-    spans
-        .into_iter()
-        .flat_map(|span| {
-            span.content
-                .chars()
-                .map(move |value| SearchStyledChar {
-                    value,
-                    style: span.style,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut chars = Vec::new();
+
+    for span in spans {
+        let style = span.style;
+        for value in span.content.chars() {
+            chars.push(SearchStyledChar { value, style });
+        }
+    }
+
+    chars
 }
 
 fn search_style_for_char(
@@ -1184,15 +1183,16 @@ fn reloaded_hunk_index(
         return None;
     }
 
-    if kept_file_selection {
-        if let Some(index) = previous_identity.and_then(|identity| find_hunk_index(file, identity))
-        {
-            return Some(index);
-        }
+    if !kept_file_selection {
+        return Some(0);
+    }
 
-        if let Some(index) = previous_index {
-            return Some(index.min(file.hunks.len() - 1));
-        }
+    if let Some(index) = previous_identity.and_then(|identity| find_hunk_index(file, identity)) {
+        return Some(index);
+    }
+
+    if let Some(index) = previous_index {
+        return Some(index.min(file.hunks.len() - 1));
     }
 
     Some(0)
@@ -1677,11 +1677,7 @@ mod tests {
     }
 
     fn changeset_with_short_file(path: &str) -> Changeset {
-        Changeset {
-            title: String::new(),
-            source_label: String::new(),
-            files: vec![diff_file(path, 1)],
-        }
+        changeset_with_file(diff_file(path, 1))
     }
 
     fn changeset_with_paths<const N: usize>(paths: [&str; N]) -> Changeset {

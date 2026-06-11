@@ -63,14 +63,14 @@ struct IntralinePairRanges {
 }
 
 fn intraline_pair_ranges(removed: &str, added: &str) -> Option<IntralinePairRanges> {
-    let removed = expand_tabs(removed);
-    let added = expand_tabs(added);
-    if removed == added {
+    let removed_text = expand_tabs(removed);
+    let added_text = expand_tabs(added);
+    if removed_text == added_text {
         return None;
     }
 
-    let removed_tokens = intraline_tokens(&removed);
-    let added_tokens = intraline_tokens(&added);
+    let removed_tokens = intraline_tokens(&removed_text);
+    let added_tokens = intraline_tokens(&added_text);
     if removed_tokens.is_empty()
         || added_tokens.is_empty()
         || removed_tokens.len() > INTRALINE_MAX_TOKENS
@@ -89,13 +89,16 @@ fn intraline_pair_ranges(removed: &str, added: &str) -> Option<IntralinePairRang
         return None;
     }
 
-    let removed = changed_intraline_ranges(&removed_tokens, &common.removed);
-    let added = changed_intraline_ranges(&added_tokens, &common.added);
-    if removed.is_empty() && added.is_empty() {
+    let removed_ranges = changed_intraline_ranges(&removed_tokens, &common.removed);
+    let added_ranges = changed_intraline_ranges(&added_tokens, &common.added);
+    if removed_ranges.is_empty() && added_ranges.is_empty() {
         return None;
     }
 
-    Some(IntralinePairRanges { removed, added })
+    Some(IntralinePairRanges {
+        removed: removed_ranges,
+        added: added_ranges,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,18 +126,18 @@ fn intraline_tokens(text: &str) -> Vec<IntralineToken<'_>> {
     let mut chars = text.char_indices().peekable();
     let mut char_start = 0;
 
-    while let Some((byte_start, value)) = chars.next() {
-        let kind = intraline_token_kind(value);
-        let mut byte_end = byte_start + value.len_utf8();
+    while let Some((byte_start, character)) = chars.next() {
+        let kind = intraline_token_kind(character);
+        let mut byte_end = byte_start + character.len_utf8();
         let mut char_end = char_start + 1;
 
         if kind != IntralineTokenKind::Punctuation {
-            while let Some((next_byte, next_value)) = chars.peek().copied() {
-                if intraline_token_kind(next_value) != kind {
+            while let Some((next_byte, next_character)) = chars.peek().copied() {
+                if intraline_token_kind(next_character) != kind {
                     break;
                 }
                 chars.next();
-                byte_end = next_byte + next_value.len_utf8();
+                byte_end = next_byte + next_character.len_utf8();
                 char_end += 1;
             }
         }
@@ -151,10 +154,10 @@ fn intraline_tokens(text: &str) -> Vec<IntralineToken<'_>> {
     tokens
 }
 
-fn intraline_token_kind(value: char) -> IntralineTokenKind {
-    if value.is_alphanumeric() || value == '_' {
+fn intraline_token_kind(character: char) -> IntralineTokenKind {
+    if character.is_alphanumeric() || character == '_' {
         IntralineTokenKind::Word
-    } else if value.is_whitespace() {
+    } else if character.is_whitespace() {
         IntralineTokenKind::Whitespace
     } else {
         IntralineTokenKind::Punctuation
@@ -170,12 +173,15 @@ fn common_intraline_tokens(
 
     for removed_index in (0..removed.len()).rev() {
         for added_index in (0..added.len()).rev() {
-            let index = removed_index * width + added_index;
-            lengths[index] = if intraline_tokens_equal(removed[removed_index], added[added_index]) {
-                lengths[(removed_index + 1) * width + added_index + 1] + 1
+            let current = removed_index * width + added_index;
+            let skip_removed_index = (removed_index + 1) * width + added_index;
+            let skip_added_index = current + 1;
+            let skip_both_index = skip_removed_index + 1;
+            let tokens_match = intraline_tokens_equal(removed[removed_index], added[added_index]);
+            lengths[current] = if tokens_match {
+                lengths[skip_both_index] + 1
             } else {
-                lengths[(removed_index + 1) * width + added_index]
-                    .max(lengths[removed_index * width + added_index + 1])
+                lengths[skip_removed_index].max(lengths[skip_added_index])
             };
         }
     }
@@ -190,9 +196,12 @@ fn common_intraline_tokens(
             added_common[added_index] = true;
             removed_index += 1;
             added_index += 1;
-        } else if lengths[(removed_index + 1) * width + added_index]
-            >= lengths[removed_index * width + added_index + 1]
-        {
+            continue;
+        }
+
+        let skip_removed_len = lengths[(removed_index + 1) * width + added_index];
+        let skip_added_len = lengths[removed_index * width + added_index + 1];
+        if skip_removed_len >= skip_added_len {
             removed_index += 1;
         } else {
             added_index += 1;
@@ -215,28 +224,49 @@ fn intraline_lines_are_related(
     removed_common: &[bool],
     added_common: &[bool],
 ) -> bool {
-    let removed_words = intraline_char_count(removed, None, is_word_token);
-    let added_words = intraline_char_count(added, None, is_word_token);
-    let word_denominator = removed_words.max(added_words);
-    if word_denominator > 0 {
-        let common_words = intraline_char_count(removed, Some(removed_common), is_word_token).min(
-            intraline_char_count(added, Some(added_common), is_word_token),
-        );
-        return common_words * 100 >= word_denominator * INTRALINE_MIN_WORD_SIMILARITY_PERCENT;
+    if let Some(related) = intraline_similarity_meets_threshold(
+        removed,
+        added,
+        removed_common,
+        added_common,
+        is_word_token,
+        INTRALINE_MIN_WORD_SIMILARITY_PERCENT,
+    ) {
+        return related;
     }
 
-    let removed_non_whitespace = intraline_char_count(removed, None, is_non_whitespace_token);
-    let added_non_whitespace = intraline_char_count(added, None, is_non_whitespace_token);
-    let fallback_denominator = removed_non_whitespace.max(added_non_whitespace);
-    if fallback_denominator == 0 {
-        return false;
+    intraline_similarity_meets_threshold(
+        removed,
+        added,
+        removed_common,
+        added_common,
+        is_non_whitespace_token,
+        INTRALINE_MIN_FALLBACK_SIMILARITY_PERCENT,
+    )
+    .unwrap_or(false)
+}
+
+fn intraline_similarity_meets_threshold(
+    removed: &[IntralineToken<'_>],
+    added: &[IntralineToken<'_>],
+    removed_common: &[bool],
+    added_common: &[bool],
+    include_token: fn(IntralineTokenKind) -> bool,
+    min_similarity_percent: usize,
+) -> Option<bool> {
+    let denominator = intraline_char_count(removed, None, include_token).max(intraline_char_count(
+        added,
+        None,
+        include_token,
+    ));
+    if denominator == 0 {
+        return None;
     }
 
-    let common_non_whitespace =
-        intraline_char_count(removed, Some(removed_common), is_non_whitespace_token).min(
-            intraline_char_count(added, Some(added_common), is_non_whitespace_token),
-        );
-    common_non_whitespace * 100 >= fallback_denominator * INTRALINE_MIN_FALLBACK_SIMILARITY_PERCENT
+    let common = intraline_char_count(removed, Some(removed_common), include_token).min(
+        intraline_char_count(added, Some(added_common), include_token),
+    );
+    Some(common * 100 >= denominator * min_similarity_percent)
 }
 
 fn intraline_char_count(
@@ -302,8 +332,8 @@ pub(super) fn emphasize_spans(
     for range in ranges {
         let start = range.start.min(chars.len());
         let end = range.end.min(chars.len());
-        for character in &mut chars[start..end] {
-            character.style = character.style.add_modifier(Modifier::BOLD);
+        for styled_char in &mut chars[start..end] {
+            styled_char.style = styled_char.style.add_modifier(Modifier::BOLD);
         }
     }
 

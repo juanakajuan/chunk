@@ -47,16 +47,17 @@ impl SyntaxHighlighter {
     }
 
     pub fn highlight_line(&mut self, content: &str, base_style: Style) -> Vec<Span<'static>> {
-        self.engine
-            .as_mut()
-            .and_then(|engine| engine.highlight_line(content))
-            .map(|ranges| {
-                ranges
-                    .into_iter()
-                    .map(|(style, text)| styled_token(text, style, base_style))
-                    .collect()
-            })
-            .unwrap_or_else(|| plain_line(content, base_style))
+        let Some(engine) = self.engine.as_mut() else {
+            return plain_line(content, base_style);
+        };
+        let Some(ranges) = engine.highlight_line(content) else {
+            return plain_line(content, base_style);
+        };
+
+        ranges
+            .into_iter()
+            .map(|(style, text)| styled_token(text, style, base_style))
+            .collect()
     }
 
     pub fn advance_line(&mut self, content: &str) {
@@ -123,27 +124,28 @@ fn syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
 
 fn syntax_for_path_parts(path: &str) -> Option<&'static SyntaxReference> {
     let path = Path::new(path);
-    let file_name = path.file_name().and_then(|value| value.to_str())?;
-    let extension = path.extension().and_then(|value| value.to_str());
+    let file_name = path.file_name().and_then(|component| component.to_str())?;
+    if let Some(syntax) = SYNTAX_SET.find_syntax_by_extension(file_name) {
+        return Some(syntax);
+    }
 
-    SYNTAX_SET
-        .find_syntax_by_extension(file_name)
-        .or_else(|| extension.and_then(|extension| SYNTAX_SET.find_syntax_by_extension(extension)))
+    let extension = path.extension().and_then(|component| component.to_str())?;
+    SYNTAX_SET.find_syntax_by_extension(extension)
 }
 
 fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
     let path = Path::new(path_text);
-    let file_name = path
+    let file_name_lowercase = path
         .file_name()
-        .and_then(|value| value.to_str())
+        .and_then(|component| component.to_str())
         .unwrap_or(path_text)
         .to_ascii_lowercase();
     let extension = path
         .extension()
-        .and_then(|value| value.to_str())
+        .and_then(|component| component.to_str())
         .map(str::to_ascii_lowercase);
 
-    let file_name = file_name.as_str();
+    let file_name = file_name_lowercase.as_str();
 
     let is_container_build_file = matches_known_file(file_name, "dockerfile")
         || matches_known_file(file_name, "containerfile");
@@ -172,10 +174,11 @@ fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
 }
 
 fn matches_known_file(file_name: &str, known_file_name: &str) -> bool {
-    file_name == known_file_name
-        || file_name
-            .strip_prefix(known_file_name)
-            .is_some_and(|suffix| suffix.starts_with('.'))
+    match file_name.strip_prefix(known_file_name) {
+        Some("") => true,
+        Some(suffix) => suffix.starts_with('.'),
+        None => false,
+    }
 }
 
 fn syntax_for_known_extension(extension: Option<&str>) -> Option<&'static SyntaxReference> {
@@ -245,7 +248,7 @@ fn find_toml_syntax() -> Option<&'static SyntaxReference> {
 fn find_first_syntax(candidates: &[(&str, &str)]) -> Option<&'static SyntaxReference> {
     candidates
         .iter()
-        .find_map(|(extension, name)| find_by_extension_or_name(extension, name))
+        .find_map(|&(extension, name)| find_by_extension_or_name(extension, name))
 }
 
 fn find_by_extension_or_name(extension: &str, name: &str) -> Option<&'static SyntaxReference> {
@@ -255,17 +258,17 @@ fn find_by_extension_or_name(extension: &str, name: &str) -> Option<&'static Syn
 }
 
 fn syntax_theme(palette: SyntaxPalette) -> SyntectTheme {
-    let color = |color| Some(syntect_color(color));
+    let theme_color = |color| Some(syntect_color(color));
 
     SyntectTheme {
         name: Some("chunk".to_string()),
         author: Some("chunk".to_string()),
         settings: ThemeSettings {
-            foreground: color(palette.foreground),
-            background: color(palette.background),
-            caret: color(palette.foreground),
-            accent: color(palette.support),
-            selection: color(palette.selection),
+            foreground: theme_color(palette.foreground),
+            background: theme_color(palette.background),
+            caret: theme_color(palette.foreground),
+            accent: theme_color(palette.support),
+            selection: theme_color(palette.selection),
             ..ThemeSettings::default()
         },
         scopes: vec![
@@ -441,12 +444,12 @@ fn xterm_level(value: u8) -> u8 {
 }
 
 fn token_style(style: SyntectStyle, base_style: Style) -> Style {
-    let mut token_style = base_style.fg(ratatui_color(style.foreground));
+    let mut result_style = base_style.fg(ratatui_color(style.foreground));
     if style.font_style.contains(FontStyle::BOLD) {
-        token_style = token_style.add_modifier(Modifier::BOLD);
+        result_style = result_style.add_modifier(Modifier::BOLD);
     }
 
-    token_style
+    result_style
 }
 
 fn ratatui_color(color: SyntectColor) -> Color {

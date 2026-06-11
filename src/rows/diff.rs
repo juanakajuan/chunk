@@ -54,7 +54,7 @@ struct HunkRenderOptions {
     content_width: usize,
     theme: Theme,
     can_stage: bool,
-    selected: bool,
+    is_selected: bool,
     target_rows: usize,
 }
 
@@ -97,7 +97,7 @@ pub(crate) fn diff_lines_until(
             content_width,
             theme,
             can_stage,
-            selected: selected_hunk_index == Some(hunk_index),
+            is_selected: selected_hunk_index == Some(hunk_index),
             target_rows,
         };
         if !push_hunk_lines_until(
@@ -150,30 +150,18 @@ fn push_hunk_lines_until(
     new_highlighter.advance_to(hunk.new_start);
 
     lines.extend(wrap_line(
-        hunk_header_line(hunk, options.theme, options.can_stage, options.selected),
+        hunk_header_line(hunk, options.theme, options.can_stage, options.is_selected),
         options.content_width,
     ));
     if lines.len() >= options.target_rows {
         return false;
     }
 
-    let mut push_diff_line = |line: &DiffLine, intraline_ranges: &[Range<usize>]| {
-        lines.extend(diff_line(
-            line,
-            intraline_ranges,
-            old_highlighter,
-            new_highlighter,
-            options.content_width,
-            options.theme,
-        ));
-        lines.len() < options.target_rows
-    };
-
     let mut line_index = 0;
     while line_index < hunk.lines.len() {
         let line = &hunk.lines[line_index];
         if !is_intraline_candidate(line.kind) {
-            if !push_diff_line(line, &[]) {
+            if !push_diff_line_until(lines, line, &[], old_highlighter, new_highlighter, options) {
                 return false;
             }
             line_index += 1;
@@ -184,7 +172,14 @@ fn push_hunk_lines_until(
         let block = &hunk.lines[line_index..block_end];
         let intraline_ranges = intraline_ranges_for_block(block);
         for (line, ranges) in block.iter().zip(&intraline_ranges) {
-            if !push_diff_line(line, ranges) {
+            if !push_diff_line_until(
+                lines,
+                line,
+                ranges,
+                old_highlighter,
+                new_highlighter,
+                options,
+            ) {
                 return false;
             }
         }
@@ -192,6 +187,25 @@ fn push_hunk_lines_until(
     }
 
     true
+}
+
+fn push_diff_line_until(
+    lines: &mut Vec<Line<'static>>,
+    line: &DiffLine,
+    intraline_ranges: &[Range<usize>],
+    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
+    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
+    options: HunkRenderOptions,
+) -> bool {
+    lines.extend(diff_line(
+        line,
+        intraline_ranges,
+        old_highlighter,
+        new_highlighter,
+        options.content_width,
+        options.theme,
+    ));
+    lines.len() < options.target_rows
 }
 
 fn diff_old_path(file: &DiffFile) -> &str {
@@ -211,16 +225,18 @@ fn path_or_display<'a>(path: &'a str, file: &'a DiffFile) -> &'a str {
 }
 
 fn hunk_row_count(hunk: &DiffHunk, content_width: usize, theme: Theme, can_stage: bool) -> usize {
-    wrap_line(
+    let header_rows = wrap_line(
         hunk_header_line(hunk, theme, can_stage, false),
         content_width,
     )
-    .len()
-        + hunk
-            .lines
-            .iter()
-            .map(|line| diff_line_row_count(line, content_width))
-            .sum::<usize>()
+    .len();
+    let content_rows = hunk
+        .lines
+        .iter()
+        .map(|line| diff_line_row_count(line, content_width))
+        .sum::<usize>();
+
+    header_rows + content_rows
 }
 
 fn diff_line_row_count(line: &DiffLine, content_width: usize) -> usize {
@@ -297,13 +313,13 @@ fn wrap_diff_line(
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut spans = if index == 0 {
+            let mut gutter_spans = if index == 0 {
                 diff_gutter_spans(old_line, new_line, style, number_style)
             } else {
                 continuation_gutter_spans(style, number_style)
             };
-            spans.extend(row);
-            Line::from(spans)
+            gutter_spans.extend(row);
+            Line::from(gutter_spans)
         })
         .collect()
 }
@@ -345,20 +361,21 @@ fn highlight_diff_content(
     old_highlighter: &mut DiffSyntaxHighlighter<'_>,
     new_highlighter: &mut DiffSyntaxHighlighter<'_>,
 ) -> Vec<Span<'static>> {
-    match kind {
-        DiffLineKind::Added => emphasize_spans(
-            new_highlighter.highlight_line(content, content_style),
-            intraline_ranges,
-        ),
-        DiffLineKind::Removed => emphasize_spans(
-            old_highlighter.highlight_line(content, content_style),
-            intraline_ranges,
-        ),
+    let spans = match kind {
+        DiffLineKind::Added => new_highlighter.highlight_line(content, content_style),
+        DiffLineKind::Removed => old_highlighter.highlight_line(content, content_style),
         DiffLineKind::Context => {
-            highlight_context_content(content, content_style, old_highlighter, new_highlighter)
+            return highlight_context_content(
+                content,
+                content_style,
+                old_highlighter,
+                new_highlighter,
+            );
         }
-        DiffLineKind::Meta => vec![Span::styled(expand_tabs(content), content_style)],
-    }
+        DiffLineKind::Meta => return vec![Span::styled(expand_tabs(content), content_style)],
+    };
+
+    emphasize_spans(spans, intraline_ranges)
 }
 
 fn highlight_context_content(
@@ -399,10 +416,11 @@ impl<'a> DiffSyntaxHighlighter<'a> {
     }
 
     fn advance_to(&mut self, target_line: u32) {
-        while self.next_line < target_line && self.advance_source_line() {}
-
-        if self.next_line < target_line {
-            self.next_line = target_line;
+        while self.next_line < target_line {
+            if !self.advance_source_line() {
+                self.next_line = target_line;
+                break;
+            }
         }
     }
 
@@ -483,13 +501,14 @@ fn render_file_header(
 ) -> Line<'static> {
     let label = file_header_label(file);
     let suffix = file_status_suffix(file.status);
-    let stage = can_stage.then(|| stage_display(file.stage, theme.background, theme));
+    let stage_affordance = can_stage.then(|| stage_display(file.stage, theme.background, theme));
     let stats = format_file_stats(file);
     let stats_width = stats_width(&stats);
-    let stage_width = stage
+    let stage_affordance_width = stage_affordance
         .as_ref()
-        .map_or(0, |stage| display_width(stage.suffix));
-    let used_width = display_width(&label) + display_width(suffix) + stage_width + stats_width;
+        .map_or(0, |stage_affordance| display_width(stage_affordance.suffix));
+    let used_width =
+        display_width(&label) + display_width(suffix) + stage_affordance_width + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let style = color_style(theme.text, theme.background);
     let muted_style = color_style(theme.muted, theme.background);
@@ -498,8 +517,11 @@ fn render_file_header(
         Span::styled(label, style),
         Span::styled(suffix.to_string(), muted_style),
     ];
-    if let Some(stage) = stage {
-        spans.push(Span::styled(stage.suffix.to_string(), stage.style));
+    if let Some(stage_affordance) = stage_affordance {
+        spans.push(Span::styled(
+            stage_affordance.suffix.to_string(),
+            stage_affordance.style,
+        ));
     }
     spans.push(Span::styled(padding, style));
     push_stat_spans(&mut spans, file, theme.background, theme);
