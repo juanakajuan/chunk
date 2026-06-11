@@ -37,6 +37,19 @@ enum VerticalDirection {
     Up,
 }
 
+impl VerticalDirection {
+    fn shift(self, value: usize, amount: usize) -> usize {
+        match self {
+            Self::Down => value.saturating_add(amount),
+            Self::Up => value.saturating_sub(amount),
+        }
+    }
+
+    fn shift_clamped(self, value: usize, amount: usize, max: usize) -> usize {
+        self.shift(value, amount).min(max)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SearchMatch {
     row: usize,
@@ -475,21 +488,18 @@ impl App {
             .changeset
             .files
             .get(selected_file_index)
-            .map(|file| file.id.clone())
+            .map(|file| file.id.as_str())
         else {
             self.search.clear_rendered_matches();
             return false;
         };
 
-        let Some(lines) = self
-            .viewport
-            .diff_lines(selected_file_index, file_id.as_str())
-        else {
+        let Some(lines) = self.viewport.diff_lines(selected_file_index, file_id) else {
             self.search.clear_rendered_matches();
             return false;
         };
 
-        self.search.refresh_matches(file_id.as_str(), lines)
+        self.search.refresh_matches(file_id, lines)
     }
 
     fn visible_selected_diff_lines(
@@ -660,14 +670,8 @@ impl App {
     }
 
     fn handle_help_overlay_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('?') | KeyCode::Char('q') if accepts_text_input(key) => {
-                self.help_overlay_visible = false;
-            }
-            KeyCode::Esc => {
-                self.help_overlay_visible = false;
-            }
-            _ => {}
+        if closes_help_overlay(key) {
+            self.help_overlay_visible = false;
         }
     }
 
@@ -797,16 +801,8 @@ impl App {
     }
 
     fn select_file_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let index = match direction {
-            VerticalDirection::Down => {
-                let max_index = self.changeset.files.len().saturating_sub(1);
-                self.selected_file_index
-                    .saturating_add(amount)
-                    .min(max_index)
-            }
-            VerticalDirection::Up => self.selected_file_index.saturating_sub(amount),
-        };
-
+        let max_index = self.changeset.files.len().saturating_sub(1);
+        let index = direction.shift_clamped(self.selected_file_index, amount, max_index);
         self.select_file(index);
     }
 
@@ -828,10 +824,7 @@ impl App {
     }
 
     fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
-        self.diff_scroll = match direction {
-            VerticalDirection::Down => self.diff_scroll.saturating_add(amount),
-            VerticalDirection::Up => self.diff_scroll.saturating_sub(amount),
-        };
+        self.diff_scroll = direction.shift(self.diff_scroll, amount);
         self.select_hunk_at_scroll();
     }
 
@@ -866,10 +859,7 @@ impl App {
             .or_else(|| self.hunk_index_at_rendered_row(self.diff_scroll))
             .unwrap_or(0)
             .min(hunk_count - 1);
-        let target = match direction {
-            VerticalDirection::Down => current.saturating_add(1).min(hunk_count - 1),
-            VerticalDirection::Up => current.saturating_sub(1),
-        };
+        let target = direction.shift_clamped(current, 1, hunk_count - 1);
 
         self.selected_hunk_index = Some(target);
         self.center_selected_hunk();
@@ -1100,15 +1090,11 @@ impl SearchState {
 
         self.matches = diff_search_matches(lines, query);
         self.match_file_id = Some(file_id.to_string());
-        self.active_index = if self.matches.is_empty() {
-            None
-        } else {
-            Some(
-                previous_active_index
-                    .unwrap_or(0)
-                    .min(self.matches.len() - 1),
-            )
-        };
+        self.active_index = (!self.matches.is_empty()).then(|| {
+            previous_active_index
+                .unwrap_or(0)
+                .min(self.matches.len() - 1)
+        });
 
         let should_scroll = self.scroll_pending && self.active_index.is_some();
         self.scroll_pending = false;
@@ -1150,6 +1136,11 @@ fn accepts_text_input(key: KeyEvent) -> bool {
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+fn closes_help_overlay(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || matches!(key.code, KeyCode::Char('?') | KeyCode::Char('q') if accepts_text_input(key))
+}
+
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
@@ -1173,18 +1164,19 @@ fn diff_search_matches(lines: &[Line<'static>], query: &str) -> Vec<SearchMatch>
 fn search_matches_in_text(text: &str, query: &str) -> Vec<(usize, usize)> {
     let haystack: Vec<char> = text.chars().collect();
     let needle: Vec<char> = query.chars().collect();
-    if needle.is_empty() || haystack.len() < needle.len() {
+    let needle_len = needle.len();
+    if needle_len == 0 || haystack.len() < needle_len {
         return Vec::new();
     }
 
-    (0..=haystack.len() - needle.len())
+    (0..=haystack.len() - needle_len)
         .filter(|start| {
-            haystack[*start..*start + needle.len()]
+            haystack[*start..*start + needle_len]
                 .iter()
                 .zip(&needle)
                 .all(|(left, right)| search_chars_match(*left, *right))
         })
-        .map(|start| (start, start + needle.len()))
+        .map(|start| (start, start + needle_len))
         .collect()
 }
 
@@ -1268,16 +1260,21 @@ fn search_match_kind_at(
     matches: &[(usize, SearchMatch)],
     active_index: Option<usize>,
 ) -> Option<SearchMatchKind> {
-    if matches.iter().any(|(match_index, search_match)| {
-        Some(*match_index) == active_index && search_match_contains(*search_match, index)
-    }) {
-        return Some(SearchMatchKind::Active);
+    let mut found_inactive_match = false;
+
+    for (match_index, search_match) in matches {
+        if !search_match_contains(*search_match, index) {
+            continue;
+        }
+
+        if Some(*match_index) == active_index {
+            return Some(SearchMatchKind::Active);
+        }
+
+        found_inactive_match = true;
     }
 
-    matches
-        .iter()
-        .any(|(_, search_match)| search_match_contains(*search_match, index))
-        .then_some(SearchMatchKind::Inactive)
+    found_inactive_match.then_some(SearchMatchKind::Inactive)
 }
 
 fn search_match_contains(search_match: SearchMatch, index: usize) -> bool {

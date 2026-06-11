@@ -223,13 +223,7 @@ impl RenderedViewport {
         let hunk_scroll = self
             .partial_cache_hunk_scroll_target(input.selected_file_index, input.selected_file_id);
         let scrollbar_scroll = self
-            .diff_scrollbar
-            .as_ref()
-            .filter(|scrollbar| {
-                input.selected_file_id.is_some_and(|file_id| {
-                    scrollbar.matches_file(input.selected_file_index, file_id)
-                })
-            })
+            .matching_diff_scrollbar(input.selected_file_index, input.selected_file_id)
             .map_or(0, DiffScrollbar::max_scroll);
 
         rendered_scroll.max(hunk_scroll).max(scrollbar_scroll)
@@ -237,18 +231,16 @@ impl RenderedViewport {
 
     fn sidebar_scroll_with_selected_visible(
         &self,
-        mut sidebar_scroll: usize,
+        sidebar_scroll: usize,
         selected_file_index: usize,
     ) -> usize {
         if selected_file_index < sidebar_scroll {
             return selected_file_index;
         }
 
-        let last_visible_sidebar_index =
-            sidebar_scroll + self.sidebar_view_height.saturating_sub(1);
-        if selected_file_index > last_visible_sidebar_index {
-            sidebar_scroll =
-                selected_file_index.saturating_sub(self.sidebar_view_height.saturating_sub(1));
+        let visible_offset = self.sidebar_view_height.saturating_sub(1);
+        if selected_file_index > sidebar_scroll + visible_offset {
+            return selected_file_index.saturating_sub(visible_offset);
         }
 
         sidebar_scroll
@@ -260,17 +252,9 @@ impl RenderedViewport {
         file_id: Option<&str>,
         fallback: usize,
     ) -> usize {
-        let Some(file_id) = file_id else {
+        let Some(cache) = self.matching_diff_lines_cache(file_index, file_id) else {
             return fallback;
         };
-
-        let Some(cache) = self.diff_lines_cache(file_index) else {
-            return fallback;
-        };
-
-        if !cache.matches_file(file_id) {
-            return fallback;
-        }
 
         if cache.complete {
             cache.len()
@@ -286,10 +270,11 @@ impl RenderedViewport {
     }
 
     pub fn diff_lines_render_target(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
-        self.diff_lines_cache(request.file_index)
-            .map_or(Some(request.requested_rows), |cache| {
-                cache.render_target_if_needed(request)
-            })
+        let Some(cache) = self.diff_lines_cache(request.file_index) else {
+            return Some(request.requested_rows);
+        };
+
+        cache.render_target_if_needed(request)
     }
 
     pub fn cache_diff_lines(&mut self, file_index: usize, lines: RenderedDiffLines) {
@@ -310,14 +295,12 @@ impl RenderedViewport {
     }
 
     pub fn diff_lines(&self, file_index: usize, file_id: &str) -> Option<&[Line<'static>]> {
-        self.diff_lines_cache(file_index)
-            .filter(|cache| cache.matches_file(file_id))
+        self.matching_diff_lines_cache(file_index, Some(file_id))
             .map(|cache| cache.lines.as_slice())
     }
 
     pub fn diff_hunk_offsets(&self, file_index: usize, file_id: &str) -> Option<&[usize]> {
-        self.diff_lines_cache(file_index)
-            .filter(|cache| cache.matches_file(file_id))
+        self.matching_diff_lines_cache(file_index, Some(file_id))
             .map(|cache| cache.hunk_offsets.as_slice())
     }
 
@@ -352,13 +335,30 @@ impl RenderedViewport {
             .and_then(Option::as_ref)
     }
 
-    fn partial_cache_hunk_scroll_target(&self, file_index: usize, file_id: Option<&str>) -> usize {
-        let Some(file_id) = file_id else {
-            return 0;
-        };
-
+    fn matching_diff_lines_cache(
+        &self,
+        file_index: usize,
+        file_id: Option<&str>,
+    ) -> Option<&RenderedDiffLines> {
+        let file_id = file_id?;
         self.diff_lines_cache(file_index)
-            .filter(|cache| cache.matches_file(file_id) && !cache.complete)
+            .filter(|cache| cache.matches_file(file_id))
+    }
+
+    fn matching_diff_scrollbar(
+        &self,
+        file_index: usize,
+        file_id: Option<&str>,
+    ) -> Option<&DiffScrollbar> {
+        let file_id = file_id?;
+        self.diff_scrollbar
+            .as_ref()
+            .filter(|scrollbar| scrollbar.matches_file(file_index, file_id))
+    }
+
+    fn partial_cache_hunk_scroll_target(&self, file_index: usize, file_id: Option<&str>) -> usize {
+        self.matching_diff_lines_cache(file_index, file_id)
+            .filter(|cache| !cache.complete)
             .and_then(|cache| cache.hunk_offsets.last().copied())
             .unwrap_or(0)
     }
@@ -488,12 +488,7 @@ impl RenderedDiffLines {
     }
 
     fn render_target_if_needed(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
-        if !self.matches_file(request.file_id)
-            || self.content_width != request.content_width
-            || self.syntax_palette != request.syntax_palette
-            || self.can_stage != request.can_stage
-            || self.selected_hunk_index != request.selected_hunk_index
-        {
+        if !self.matches_render_request(request) {
             return Some(request.requested_rows);
         }
 
@@ -505,6 +500,14 @@ impl RenderedDiffLines {
             self.lines.len(),
             request.requested_rows,
         ))
+    }
+
+    fn matches_render_request(&self, request: DiffRenderRequest<'_>) -> bool {
+        self.matches_file(request.file_id)
+            && self.content_width == request.content_width
+            && self.syntax_palette == request.syntax_palette
+            && self.can_stage == request.can_stage
+            && self.selected_hunk_index == request.selected_hunk_index
     }
 
     fn len(&self) -> usize {
@@ -554,8 +557,9 @@ fn ratio_ceil(value: usize, numerator: usize, denominator: usize) -> usize {
         return 0;
     }
 
+    let denominator = denominator as u128;
     let scaled = (value as u128).saturating_mul(numerator as u128);
-    scaled.div_ceil(denominator as u128).min(usize::MAX as u128) as usize
+    scaled.div_ceil(denominator).min(usize::MAX as u128) as usize
 }
 
 fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
@@ -563,8 +567,9 @@ fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
         return 0;
     }
 
+    let denominator = denominator as u128;
     let scaled = (value as u128).saturating_mul(numerator as u128);
-    let rounded = scaled.saturating_add((denominator as u128) / 2) / denominator as u128;
+    let rounded = scaled.saturating_add(denominator / 2) / denominator;
     rounded.min(usize::MAX as u128) as usize
 }
 

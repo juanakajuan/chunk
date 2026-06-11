@@ -21,6 +21,8 @@ use super::text::{
 };
 
 const DIFF_GUTTER_WIDTH: usize = 11;
+const BINARY_FILE_CHANGED_MESSAGE: &str = "Binary file changed";
+const FILE_CHANGED_WITHOUT_TEXTUAL_HUNKS_MESSAGE: &str = "File changed without textual hunks";
 
 pub(crate) struct RenderedRows {
     pub(crate) lines: Vec<Line<'static>>,
@@ -66,24 +68,10 @@ pub(crate) fn diff_lines_until(
     selected_hunk_index: Option<usize>,
     target_rows: usize,
 ) -> RenderedRows {
-    let mut lines = wrap_line(
-        render_file_header(file, content_width, can_stage, theme),
-        content_width,
-    );
+    let mut lines = render_file_header_rows(file, content_width, can_stage, theme);
 
-    if file.binary {
-        lines.extend(wrap_line(
-            muted_line("Binary file changed", theme),
-            content_width,
-        ));
-        return RenderedRows::complete(lines);
-    }
-
-    if file.hunks.is_empty() {
-        lines.extend(wrap_line(
-            muted_line("File changed without textual hunks", theme),
-            content_width,
-        ));
+    if let Some(message) = file_body_message(file) {
+        lines.extend(muted_body_rows(message, content_width, theme));
         return RenderedRows::complete(lines);
     }
 
@@ -120,15 +108,11 @@ pub(crate) fn hunk_offsets(
     theme: Theme,
     can_stage: bool,
 ) -> Vec<usize> {
-    if file.binary || file.hunks.is_empty() {
+    if file_body_message(file).is_some() {
         return Vec::new();
     }
 
-    let mut offset = wrap_line(
-        render_file_header(file, content_width, can_stage, theme),
-        content_width,
-    )
-    .len();
+    let mut offset = render_file_header_rows(file, content_width, can_stage, theme).len();
     let mut offsets = Vec::with_capacity(file.hunks.len());
 
     for hunk in &file.hunks {
@@ -145,24 +129,10 @@ pub(crate) fn diff_line_count(
     theme: Theme,
     can_stage: bool,
 ) -> usize {
-    let header_rows = wrap_line(
-        render_file_header(file, content_width, can_stage, theme),
-        content_width,
-    )
-    .len();
+    let header_rows = render_file_header_rows(file, content_width, can_stage, theme).len();
 
-    if file.binary {
-        return header_rows
-            + wrap_line(muted_line("Binary file changed", theme), content_width).len();
-    }
-
-    if file.hunks.is_empty() {
-        return header_rows
-            + wrap_line(
-                muted_line("File changed without textual hunks", theme),
-                content_width,
-            )
-            .len();
+    if let Some(message) = file_body_message(file) {
+        return header_rows + muted_body_rows(message, content_width, theme).len();
     }
 
     header_rows
@@ -418,14 +388,19 @@ fn highlight_context_content(
     old_highlighter: &mut DiffSyntaxHighlighter<'_>,
     new_highlighter: &mut DiffSyntaxHighlighter<'_>,
 ) -> Vec<Span<'static>> {
-    if new_highlighter.is_enabled() {
-        let spans = new_highlighter.highlight_line(content, content_style);
+    let use_new_highlighter = new_highlighter.is_enabled();
+    let spans = if use_new_highlighter {
+        new_highlighter.highlight_line(content, content_style)
+    } else {
+        old_highlighter.highlight_line(content, content_style)
+    };
+
+    if use_new_highlighter {
         old_highlighter.advance_line(content);
-        return spans;
+    } else {
+        new_highlighter.advance_line(content);
     }
 
-    let spans = old_highlighter.highlight_line(content, content_style);
-    new_highlighter.advance_line(content);
     spans
 }
 
@@ -525,6 +500,36 @@ fn diff_content_width(content_width: usize) -> usize {
 
 fn format_line_number(line: Option<u32>) -> String {
     line.map_or_else(|| "   ".to_string(), |line| format!("{line:<3}"))
+}
+
+fn file_body_message(file: &DiffFile) -> Option<&'static str> {
+    if file.binary {
+        Some(BINARY_FILE_CHANGED_MESSAGE)
+    } else if file.hunks.is_empty() {
+        Some(FILE_CHANGED_WITHOUT_TEXTUAL_HUNKS_MESSAGE)
+    } else {
+        None
+    }
+}
+
+fn muted_body_rows(
+    message: &'static str,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    wrap_line(muted_line(message, theme), content_width)
+}
+
+fn render_file_header_rows(
+    file: &DiffFile,
+    content_width: usize,
+    can_stage: bool,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    wrap_line(
+        render_file_header(file, content_width, can_stage, theme),
+        content_width,
+    )
 }
 
 fn render_file_header(

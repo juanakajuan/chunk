@@ -31,16 +31,8 @@ pub(crate) struct LoadedPrDiff {
 }
 
 pub(crate) fn load_worktree_diff() -> Result<Changeset> {
-    let output = Command::new("git")
-        .arg("diff")
-        .args(GIT_DIFF_PATCH_ARGS)
-        .arg("HEAD")
-        .output()?;
-
-    ensure_success(&output, "git diff failed")?;
-
+    let mut patch = git_diff_patch(&[], &["HEAD"], "git diff failed")?;
     let untracked_paths = untracked_paths()?;
-    let mut patch = String::from_utf8_lossy(&output.stdout).to_string();
     patch.push_str(&load_untracked_patches(&untracked_paths)?);
     let mut changeset = parse_unified_diff(&patch);
     annotate_stage_states(&mut changeset, &untracked_paths)?;
@@ -66,16 +58,7 @@ pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
 }
 
 pub(crate) fn load_ref_diff(old_ref: &str, new_ref: &str) -> Result<Changeset> {
-    let output = Command::new("git")
-        .arg("diff")
-        .args(GIT_DIFF_PATCH_ARGS)
-        .arg(old_ref)
-        .arg(new_ref)
-        .output()?;
-
-    ensure_success(&output, "git diff failed")?;
-
-    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+    load_git_diff(&[], &[old_ref, new_ref], "git diff failed")
 }
 
 pub(crate) fn load_worktree_source_snapshots(file: &mut DiffFile) {
@@ -128,6 +111,23 @@ pub(crate) fn worktree_root() -> Result<PathBuf> {
         .ok_or_else(|| eyre!("could not determine Git worktree root"))
 }
 
+fn load_git_diff(pre_args: &[&str], post_args: &[&str], context: &str) -> Result<Changeset> {
+    let patch = git_diff_patch(pre_args, post_args, context)?;
+    Ok(parse_unified_diff(&patch))
+}
+
+fn git_diff_patch(pre_args: &[&str], post_args: &[&str], context: &str) -> Result<String> {
+    let output = checked_output(
+        Command::new("git")
+            .arg("diff")
+            .args(pre_args)
+            .args(GIT_DIFF_PATCH_ARGS)
+            .args(post_args),
+        context,
+    )?;
+    Ok(stdout_text(&output))
+}
+
 fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
     let mut patches = String::new();
 
@@ -157,32 +157,18 @@ fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
         if !patches.is_empty() && !patches.ends_with('\n') {
             patches.push('\n');
         }
-        patches.push_str(&String::from_utf8_lossy(&output.stdout));
+        patches.push_str(&stdout_text(&output));
     }
 
     Ok(patches)
 }
 
 fn load_staged_diff() -> Result<Changeset> {
-    let output = Command::new("git")
-        .args(["diff", "--cached"])
-        .args(GIT_DIFF_PATCH_ARGS)
-        .arg("HEAD")
-        .output()?;
-
-    ensure_success(&output, "git diff --cached failed")?;
-    Ok(parse_unified_diff(&String::from_utf8_lossy(&output.stdout)))
+    load_git_diff(&["--cached"], &["HEAD"], "git diff --cached failed")
 }
 
 fn load_unstaged_diff(untracked_paths: &[String]) -> Result<Changeset> {
-    let output = Command::new("git")
-        .arg("diff")
-        .args(GIT_DIFF_PATCH_ARGS)
-        .output()?;
-
-    ensure_success(&output, "git diff failed")?;
-
-    let mut patch = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut patch = git_diff_patch(&[], &[], "git diff failed")?;
     patch.push_str(&load_untracked_patches(untracked_paths)?);
     Ok(parse_unified_diff(&patch))
 }
@@ -368,34 +354,39 @@ fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
 }
 
 fn patch_old_path(file: &DiffFile) -> &str {
-    if file.old_path.is_empty() {
-        file.display_path()
-    } else {
-        &file.old_path
-    }
+    patch_side_path(file, &file.old_path)
 }
 
 fn patch_new_path(file: &DiffFile) -> &str {
-    if file.path.is_empty() {
+    patch_side_path(file, &file.path)
+}
+
+fn patch_side_path<'a>(file: &'a DiffFile, path: &'a str) -> &'a str {
+    if path.is_empty() {
         file.display_path()
     } else {
-        &file.path
+        path
     }
 }
 
 fn old_patch_header_path(file: &DiffFile, path: &str) -> String {
-    if file.status == FileStatus::Added {
-        "/dev/null".to_string()
-    } else {
-        prefixed_patch_path("a", path)
-    }
+    patch_header_path(file.status, FileStatus::Added, "a", path)
 }
 
 fn new_patch_header_path(file: &DiffFile, path: &str) -> String {
-    if file.status == FileStatus::Deleted {
+    patch_header_path(file.status, FileStatus::Deleted, "b", path)
+}
+
+fn patch_header_path(
+    status: FileStatus,
+    null_status: FileStatus,
+    prefix: &str,
+    path: &str,
+) -> String {
+    if status == null_status {
         "/dev/null".to_string()
     } else {
-        prefixed_patch_path("b", path)
+        prefixed_patch_path(prefix, path)
     }
 }
 
@@ -469,12 +460,12 @@ fn git_commit_exists(rev: &str) -> bool {
 }
 
 fn merge_base(base_ref: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["merge-base", base_ref, "HEAD"])
-        .output()?;
-    ensure_success(&output, &format!("git merge-base failed for {base_ref}"))?;
+    let output = checked_output(
+        Command::new("git").args(["merge-base", base_ref, "HEAD"]),
+        &format!("git merge-base failed for {base_ref}"),
+    )?;
 
-    let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let merge_base = trimmed_stdout_text(&output);
     if merge_base.is_empty() {
         return Err(eyre!("git merge-base returned no commit for {base_ref}"));
     }
@@ -657,13 +648,12 @@ fn stop_child(child: &mut Child) {
 }
 
 fn untracked_paths() -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
-        .output()?;
+    let output = checked_output(
+        Command::new("git").args(["ls-files", "--others", "--exclude-standard", "-z"]),
+        "git ls-files failed",
+    )?;
 
-    ensure_success(&output, "git ls-files failed")?;
-
-    Ok(String::from_utf8_lossy(&output.stdout)
+    Ok(stdout_text(&output)
         .split('\0')
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned)
@@ -689,8 +679,14 @@ fn git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
         return None;
     }
 
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let value = trimmed_stdout_text(&output);
     (!value.is_empty()).then_some(value)
+}
+
+fn checked_output(command: &mut Command, context: &str) -> Result<Output> {
+    let output = command.output()?;
+    ensure_success(&output, context)?;
+    Ok(output)
 }
 
 fn ensure_success(output: &Output, context: &str) -> Result<()> {
@@ -702,16 +698,28 @@ fn ensure_success(output: &Output, context: &str) -> Result<()> {
     Err(eyre!("{}: {}", context, stderr.trim()))
 }
 
+fn stdout_text(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn trimmed_stdout_text(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn stage_file(path: &str) -> Result<()> {
-    let output = Command::new("git").args(["add", "--", path]).output()?;
-    ensure_success(&output, &format!("git add failed for {path}"))
+    checked_output(
+        Command::new("git").args(["add", "--", path]),
+        &format!("git add failed for {path}"),
+    )
+    .map(|_| ())
 }
 
 fn unstage_file(path: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["restore", "--staged", "--", path])
-        .output()?;
-    ensure_success(&output, &format!("git restore --staged failed for {path}"))
+    checked_output(
+        Command::new("git").args(["restore", "--staged", "--", path]),
+        &format!("git restore --staged failed for {path}"),
+    )
+    .map(|_| ())
 }
 
 fn is_file_staged(path: &str) -> Result<bool> {

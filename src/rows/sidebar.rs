@@ -124,10 +124,10 @@ fn visible_sidebar_scroll(
     }
 
     if sidebar_selection_visible(row_counts, clamped_scroll, selected_index, visible_height) {
-        clamped_scroll
-    } else {
-        sidebar_scroll_for_selected(row_counts, selected_index, visible_height)
+        return clamped_scroll;
     }
+
+    sidebar_scroll_for_selected(row_counts, selected_index, visible_height)
 }
 
 fn sidebar_selection_visible(
@@ -136,21 +136,25 @@ fn sidebar_selection_visible(
     selected_index: usize,
     visible_height: usize,
 ) -> bool {
-    let Some(selected_row_count) = row_counts.get(selected_index).copied() else {
-        return false;
-    };
-
     if selected_index < scroll {
         return false;
     }
 
+    let Some(selected_row_count) = row_counts.get(selected_index).copied() else {
+        return false;
+    };
+
     let visible_height = visible_height.max(1);
-    let rows_before_selected: usize = row_counts[scroll..selected_index].iter().sum();
-    if rows_before_selected >= visible_height {
+    let rows_above_selection: usize = row_counts[scroll..selected_index].iter().sum();
+    if rows_above_selection == 0 {
+        return true;
+    }
+
+    if rows_above_selection >= visible_height {
         return false;
     }
 
-    rows_before_selected == 0 || rows_before_selected + selected_row_count <= visible_height
+    rows_above_selection + selected_row_count <= visible_height
 }
 
 fn sidebar_scroll_for_selected(
@@ -227,23 +231,21 @@ fn render_file_entry(
         return wrap_line(Line::from(spans), content_width);
     }
 
-    wrap_sidebar_content(
+    wrap_sidebar_entry_content(
         line_prefix,
-        continuation_prefix(rail, marker_style, base_style, gutter_width),
+        sidebar_entry_continuation_prefix(rail, marker_style, base_style, gutter_width),
         content_spans,
-        content_width,
-        gutter_width,
+        content_width - gutter_width,
     )
 }
 
-fn wrap_sidebar_content(
+fn wrap_sidebar_entry_content(
     first_prefix: Vec<Span<'static>>,
     continuation_prefix: Vec<Span<'static>>,
     content_spans: Vec<Span<'static>>,
-    content_width: usize,
-    gutter_width: usize,
+    content_wrap_width: usize,
 ) -> Vec<Line<'static>> {
-    wrap_styled_spans(content_spans, content_width.saturating_sub(gutter_width))
+    wrap_styled_spans(content_spans, content_wrap_width)
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
@@ -258,7 +260,7 @@ fn wrap_sidebar_content(
         .collect()
 }
 
-fn continuation_prefix(
+fn sidebar_entry_continuation_prefix(
     rail: &str,
     marker_style: Style,
     base_style: Style,
