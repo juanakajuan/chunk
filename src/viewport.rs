@@ -26,6 +26,8 @@ pub struct RenderedViewport {
     sidebar_row_counts_cache: Option<SidebarRowCountsCache>,
     /// Cached wrapped and highlighted diff lines by file index.
     diff_lines_cache: Vec<Option<RenderedDiffLines>>,
+    /// Cached full diff row metrics by file index.
+    diff_layout_cache: Vec<Option<CachedDiffLayoutMetrics>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,8 +74,21 @@ pub struct DiffRenderRequest<'a> {
     pub content_width: usize,
     pub syntax_palette: SyntaxPalette,
     pub can_stage: bool,
-    pub selected_hunk_index: Option<usize>,
     pub requested_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffLayoutRequest<'a> {
+    pub file_index: usize,
+    pub file_id: &'a str,
+    pub content_width: usize,
+    pub can_stage: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLayoutMetrics {
+    pub total_rows: usize,
+    pub hunk_offsets: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,14 +101,20 @@ pub struct RenderedDiffLines {
     syntax_palette: SyntaxPalette,
     /// Whether staging controls were rendered in the cached header.
     can_stage: bool,
-    /// Hunk rendered as selected in this cache.
-    selected_hunk_index: Option<usize>,
     /// Rendered, wrapped lines for the selected file.
     lines: Vec<Line<'static>>,
     /// Rendered row offsets for each hunk header under this cache layout.
     hunk_offsets: Vec<usize>,
     /// Whether `lines` contains every rendered row for the file.
     complete: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CachedDiffLayoutMetrics {
+    file_id: String,
+    content_width: usize,
+    can_stage: bool,
+    metrics: DiffLayoutMetrics,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +138,7 @@ impl RenderedViewport {
             sidebar_row_indices: Vec::new(),
             sidebar_row_counts_cache: None,
             diff_lines_cache: vec![None; file_count],
+            diff_layout_cache: vec![None; file_count],
         }
     }
 
@@ -130,6 +152,7 @@ impl RenderedViewport {
     pub fn clear_render_caches(&mut self, file_count: usize) {
         self.sidebar_row_counts_cache = None;
         self.diff_lines_cache = vec![None; file_count];
+        self.diff_layout_cache = vec![None; file_count];
         self.diff_scrollbar = None;
     }
 
@@ -220,13 +243,25 @@ impl RenderedViewport {
                 input.selected_file_line_count,
             )
             .saturating_sub(self.diff_view_height);
+        let layout_scroll = self
+            .matching_diff_layout_cache(input.selected_file_index, input.selected_file_id)
+            .map(|cache| {
+                cache
+                    .metrics
+                    .total_rows
+                    .saturating_sub(self.diff_view_height)
+            })
+            .unwrap_or(0);
         let hunk_scroll = self
             .partial_cache_hunk_scroll_target(input.selected_file_index, input.selected_file_id);
         let scrollbar_scroll = self
             .matching_diff_scrollbar(input.selected_file_index, input.selected_file_id)
             .map_or(0, DiffScrollbar::max_scroll);
 
-        rendered_scroll.max(hunk_scroll).max(scrollbar_scroll)
+        rendered_scroll
+            .max(layout_scroll)
+            .max(hunk_scroll)
+            .max(scrollbar_scroll)
     }
 
     fn sidebar_scroll_with_selected_visible(
@@ -263,9 +298,31 @@ impl RenderedViewport {
         }
     }
 
-    pub fn ensure_diff_lines_cache_len(&mut self, file_count: usize) {
+    pub fn ensure_diff_cache_len(&mut self, file_count: usize) {
         if self.diff_lines_cache.len() != file_count {
             self.diff_lines_cache = vec![None; file_count];
+        }
+        if self.diff_layout_cache.len() != file_count {
+            self.diff_layout_cache = vec![None; file_count];
+        }
+    }
+
+    pub fn diff_layout_metrics(
+        &self,
+        request: DiffLayoutRequest<'_>,
+    ) -> Option<&DiffLayoutMetrics> {
+        self.diff_layout_cache(request.file_index)
+            .filter(|cache| cache.matches(request))
+            .map(|cache| &cache.metrics)
+    }
+
+    pub fn cache_diff_layout_metrics(
+        &mut self,
+        request: DiffLayoutRequest<'_>,
+        metrics: DiffLayoutMetrics,
+    ) {
+        if let Some(cache_slot) = self.diff_layout_cache.get_mut(request.file_index) {
+            *cache_slot = Some(CachedDiffLayoutMetrics::new(request, metrics));
         }
     }
 
@@ -335,6 +392,12 @@ impl RenderedViewport {
             .and_then(Option::as_ref)
     }
 
+    fn diff_layout_cache(&self, file_index: usize) -> Option<&CachedDiffLayoutMetrics> {
+        self.diff_layout_cache
+            .get(file_index)
+            .and_then(Option::as_ref)
+    }
+
     fn matching_diff_lines_cache(
         &self,
         file_index: usize,
@@ -342,6 +405,16 @@ impl RenderedViewport {
     ) -> Option<&RenderedDiffLines> {
         let file_id = file_id?;
         self.diff_lines_cache(file_index)
+            .filter(|cache| cache.matches_file(file_id))
+    }
+
+    fn matching_diff_layout_cache(
+        &self,
+        file_index: usize,
+        file_id: Option<&str>,
+    ) -> Option<&CachedDiffLayoutMetrics> {
+        let file_id = file_id?;
+        self.diff_layout_cache(file_index)
             .filter(|cache| cache.matches_file(file_id))
     }
 
@@ -462,7 +535,6 @@ impl RenderedDiffLines {
         content_width: usize,
         syntax_palette: SyntaxPalette,
         can_stage: bool,
-        selected_hunk_index: Option<usize>,
         lines: Vec<Line<'static>>,
         complete: bool,
     ) -> Self {
@@ -471,7 +543,6 @@ impl RenderedDiffLines {
             content_width,
             syntax_palette,
             can_stage,
-            selected_hunk_index,
             lines,
             hunk_offsets: Vec::new(),
             complete,
@@ -507,7 +578,6 @@ impl RenderedDiffLines {
             && self.content_width == request.content_width
             && self.syntax_palette == request.syntax_palette
             && self.can_stage == request.can_stage
-            && self.selected_hunk_index == request.selected_hunk_index
     }
 
     fn len(&self) -> usize {
@@ -521,6 +591,36 @@ impl RenderedDiffLines {
             .take(visible_height)
             .cloned()
             .collect()
+    }
+}
+
+impl DiffLayoutMetrics {
+    pub fn new(total_rows: usize, hunk_offsets: Vec<usize>) -> Self {
+        Self {
+            total_rows,
+            hunk_offsets,
+        }
+    }
+}
+
+impl CachedDiffLayoutMetrics {
+    fn new(request: DiffLayoutRequest<'_>, metrics: DiffLayoutMetrics) -> Self {
+        Self {
+            file_id: request.file_id.to_string(),
+            content_width: request.content_width,
+            can_stage: request.can_stage,
+            metrics,
+        }
+    }
+
+    fn matches(&self, request: DiffLayoutRequest<'_>) -> bool {
+        self.file_id == request.file_id
+            && self.content_width == request.content_width
+            && self.can_stage == request.can_stage
+    }
+
+    fn matches_file(&self, file_id: &str) -> bool {
+        self.file_id == file_id
     }
 }
 
@@ -589,7 +689,6 @@ mod tests {
                 80,
                 Theme::github_dark().syntax,
                 true,
-                None,
                 vec![Line::raw("row"); 8],
                 true,
             ),
@@ -668,7 +767,6 @@ mod tests {
                 80,
                 theme.syntax,
                 true,
-                None,
                 vec![Line::raw("row"); 100],
                 false,
             ),
@@ -681,7 +779,6 @@ mod tests {
                 content_width: 80,
                 syntax_palette: theme.syntax,
                 can_stage: true,
-                selected_hunk_index: None,
                 requested_rows: 101,
             }),
             Some(200)
@@ -693,22 +790,9 @@ mod tests {
                 content_width: 80,
                 syntax_palette: theme.syntax,
                 can_stage: true,
-                selected_hunk_index: None,
                 requested_rows: 250,
             }),
             Some(250)
-        );
-        assert_eq!(
-            viewport.diff_lines_render_target(DiffRenderRequest {
-                file_index: 0,
-                file_id: "file",
-                content_width: 80,
-                syntax_palette: theme.syntax,
-                can_stage: true,
-                selected_hunk_index: Some(0),
-                requested_rows: 101,
-            }),
-            Some(101)
         );
     }
 }

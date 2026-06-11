@@ -19,8 +19,8 @@ use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
 use crate::theme::Theme;
 use crate::viewport::{
-    DiffRenderRequest, DiffScrollbar, DiffScrollbarDrag, RenderedDiffLines, RenderedViewport,
-    ViewportScrollInput,
+    DiffLayoutMetrics, DiffLayoutRequest, DiffRenderRequest, DiffScrollbar, DiffScrollbarDrag,
+    RenderedDiffLines, RenderedViewport, ViewportScrollInput,
 };
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -344,7 +344,7 @@ impl App {
     }
 
     fn diff_content_width(
-        &self,
+        &mut self,
         content_width: usize,
         visible_diff_height: usize,
         theme: Theme,
@@ -359,10 +359,38 @@ impl App {
         }
     }
 
-    fn selected_diff_line_count(&self, content_width: usize, theme: Theme) -> usize {
-        self.selected_file()
-            .map(|file| rows::diff_line_count(file, content_width, theme, self.can_stage()))
-            .unwrap_or(0)
+    fn selected_diff_line_count(&mut self, content_width: usize, theme: Theme) -> usize {
+        self.selected_diff_layout_metrics(content_width, theme)
+            .map_or(0, |metrics| metrics.total_rows)
+    }
+
+    fn selected_diff_layout_metrics(
+        &mut self,
+        content_width: usize,
+        theme: Theme,
+    ) -> Option<&DiffLayoutMetrics> {
+        self.viewport
+            .ensure_diff_cache_len(self.changeset.files.len());
+
+        let selected_file_index = self.selected_file_index;
+        let file_id = self.changeset.files.get(selected_file_index)?.id.clone();
+        let request = DiffLayoutRequest {
+            file_index: selected_file_index,
+            file_id: file_id.as_str(),
+            content_width,
+            can_stage: self.can_stage(),
+        };
+
+        if self.viewport.diff_layout_metrics(request).is_none() {
+            let file = &self.changeset.files[selected_file_index];
+            let counts = rows::diff_layout_counts(file, content_width, theme, request.can_stage);
+            self.viewport.cache_diff_layout_metrics(
+                request,
+                DiffLayoutMetrics::new(counts.total_rows, counts.hunk_offsets),
+            );
+        }
+
+        self.viewport.diff_layout_metrics(request)
     }
 
     fn diff_scrollbar(
@@ -415,11 +443,10 @@ impl App {
         theme: Theme,
     ) -> bool {
         self.viewport
-            .ensure_diff_lines_cache_len(self.changeset.files.len());
+            .ensure_diff_cache_len(self.changeset.files.len());
 
         let selected_file_index = self.selected_file_index;
         let can_stage = self.can_stage();
-        let selected_hunk_index = self.selected_hunk_index;
         if selected_file_index >= self.changeset.files.len() {
             self.search.clear_rendered_matches();
             return false;
@@ -435,23 +462,19 @@ impl App {
                 content_width,
                 syntax_palette: theme.syntax,
                 can_stage,
-                selected_hunk_index,
                 requested_rows: target_rows,
             })
         };
 
         if let Some(render_target) = render_target {
+            let hunk_offsets = self
+                .selected_diff_layout_metrics(content_width, theme)
+                .map(|metrics| metrics.hunk_offsets.clone())
+                .unwrap_or_default();
             self.ensure_selected_file_sources_loaded();
             let file = self.changeset.files[selected_file_index].clone();
-            let hunk_offsets = rows::hunk_offsets(&file, content_width, theme, can_stage);
-            let rendered_rows = rows::diff_lines_until(
-                &file,
-                content_width,
-                theme,
-                can_stage,
-                selected_hunk_index,
-                render_target,
-            );
+            let rendered_rows =
+                rows::diff_lines_until(&file, content_width, theme, can_stage, None, render_target);
             self.viewport.cache_diff_lines(
                 selected_file_index,
                 RenderedDiffLines::new(
@@ -459,7 +482,6 @@ impl App {
                     content_width,
                     theme.syntax,
                     can_stage,
-                    selected_hunk_index,
                     rendered_rows.lines,
                     rendered_rows.complete,
                 )
@@ -512,12 +534,51 @@ impl App {
             return rows::no_diff_lines(self.no_diff_message(), content_width, theme);
         }
 
-        let lines = self.viewport.visible_diff_lines(
+        let mut lines = self.viewport.visible_diff_lines(
             self.selected_file_index,
             self.diff_scroll,
             visible_height,
         );
+        self.apply_selected_hunk_style(&mut lines, content_width, theme);
         self.highlight_search_matches(lines, theme)
+    }
+
+    fn apply_selected_hunk_style(
+        &self,
+        lines: &mut [Line<'static>],
+        content_width: usize,
+        theme: Theme,
+    ) {
+        let Some(selected_hunk_index) = self.selected_hunk_index else {
+            return;
+        };
+        let Some(file) = self.selected_file() else {
+            return;
+        };
+        let Some(hunk) = file.hunks.get(selected_hunk_index) else {
+            return;
+        };
+        let Some(hunk_offset) = self
+            .viewport
+            .diff_hunk_offsets(self.selected_file_index, file.id.as_str())
+            .and_then(|offsets| offsets.get(selected_hunk_index))
+            .copied()
+        else {
+            return;
+        };
+
+        let visible_start = self.diff_scroll;
+        let visible_end = visible_start.saturating_add(lines.len());
+        let header_rows =
+            rows::selected_hunk_header_rows(hunk, content_width, theme, self.can_stage());
+        for (header_row_offset, header_row) in header_rows.into_iter().enumerate() {
+            let rendered_row = hunk_offset.saturating_add(header_row_offset);
+            if rendered_row < visible_start || rendered_row >= visible_end {
+                continue;
+            }
+
+            lines[rendered_row - visible_start] = header_row;
+        }
     }
 
     fn highlight_search_matches(
@@ -1399,7 +1460,6 @@ mod tests {
                 24,
                 Theme::github_dark().syntax,
                 true,
-                None,
                 vec![Line::raw("row"); 8],
                 true,
             ),
@@ -1580,7 +1640,6 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
-                Some(0),
                 vec![Line::raw("row"); 10],
                 false,
             )
@@ -1610,7 +1669,6 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
-                Some(0),
                 vec![Line::raw("row"); 8],
                 true,
             )
@@ -1629,7 +1687,6 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
-                Some(0),
                 vec![Line::raw("row"); 8],
                 true,
             )
@@ -1658,7 +1715,6 @@ mod tests {
                 24,
                 theme.syntax,
                 true,
-                Some(0),
                 vec![Line::raw("row"); 100],
                 true,
             )
@@ -1668,6 +1724,22 @@ mod tests {
         app.scroll_diff_by(VerticalDirection::Down, 80);
 
         assert_eq!(app.selected_hunk_index, Some(1));
+    }
+
+    #[test]
+    fn selected_hunk_style_is_applied_to_visible_cached_rows() {
+        let theme = Theme::github_dark();
+        let mut app = app_with(changeset_with_two_hunk_file());
+        app.selected_hunk_index = Some(1);
+        app.diff_scroll = 8;
+
+        let pane = render_diff_pane(&mut app, theme);
+
+        assert!(
+            pane.lines
+                .iter()
+                .any(|line| line_text(line).starts_with("> @@ -20 +20 @@"))
+        );
     }
 
     #[test]
@@ -1682,7 +1754,6 @@ mod tests {
                 80,
                 theme.syntax,
                 true,
-                Some(0),
                 vec![Line::raw("row"); 12],
                 true,
             )

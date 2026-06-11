@@ -29,6 +29,11 @@ pub(crate) struct RenderedRows {
     pub(crate) complete: bool,
 }
 
+pub(crate) struct DiffLayoutCounts {
+    pub(crate) total_rows: usize,
+    pub(crate) hunk_offsets: Vec<usize>,
+}
+
 impl RenderedRows {
     fn complete(lines: Vec<Line<'static>>) -> Self {
         Self {
@@ -102,45 +107,44 @@ pub(crate) fn diff_lines_until(
     RenderedRows::complete(lines)
 }
 
-pub(crate) fn hunk_offsets(
+pub(crate) fn diff_layout_counts(
     file: &DiffFile,
     content_width: usize,
     theme: Theme,
     can_stage: bool,
-) -> Vec<usize> {
-    if file_body_message(file).is_some() {
-        return Vec::new();
-    }
-
-    let mut offset = render_file_header_rows(file, content_width, can_stage, theme).len();
-    let mut offsets = Vec::with_capacity(file.hunks.len());
-
-    for hunk in &file.hunks {
-        offsets.push(offset);
-        offset += hunk_row_count(hunk, content_width, theme, can_stage);
-    }
-
-    offsets
-}
-
-pub(crate) fn diff_line_count(
-    file: &DiffFile,
-    content_width: usize,
-    theme: Theme,
-    can_stage: bool,
-) -> usize {
+) -> DiffLayoutCounts {
     let header_rows = render_file_header_rows(file, content_width, can_stage, theme).len();
 
     if let Some(message) = file_body_message(file) {
-        return header_rows + muted_body_rows(message, content_width, theme).len();
+        return DiffLayoutCounts {
+            total_rows: header_rows + muted_body_rows(message, content_width, theme).len(),
+            hunk_offsets: Vec::new(),
+        };
     }
 
-    header_rows
-        + file
-            .hunks
-            .iter()
-            .map(|hunk| hunk_row_count(hunk, content_width, theme, can_stage))
-            .sum::<usize>()
+    let mut total_rows = header_rows;
+    let mut hunk_offsets = Vec::with_capacity(file.hunks.len());
+    for hunk in &file.hunks {
+        hunk_offsets.push(total_rows);
+        total_rows += hunk_row_count(hunk, content_width, theme, can_stage);
+    }
+
+    DiffLayoutCounts {
+        total_rows,
+        hunk_offsets,
+    }
+}
+
+pub(crate) fn selected_hunk_header_rows(
+    hunk: &DiffHunk,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+) -> Vec<Line<'static>> {
+    wrap_line(
+        hunk_header_line(hunk, theme, can_stage, true),
+        content_width,
+    )
 }
 
 fn push_hunk_lines_until(
@@ -620,7 +624,7 @@ mod tests {
         let lines = diff_lines_until(&file, content_width, theme, true, None, usize::MAX).lines;
 
         assert_eq!(
-            diff_line_count(&file, content_width, theme, true),
+            diff_layout_counts(&file, content_width, theme, true).total_rows,
             lines.len()
         );
     }
@@ -674,7 +678,7 @@ mod tests {
         ]);
         let content_width = DIFF_GUTTER_WIDTH + 12;
 
-        let offsets = hunk_offsets(&file, content_width, theme, true);
+        let offsets = diff_layout_counts(&file, content_width, theme, true).hunk_offsets;
         let lines = diff_lines_until(&file, content_width, theme, true, None, usize::MAX).lines;
 
         assert_eq!(offsets.len(), 2);
@@ -692,7 +696,7 @@ mod tests {
         ]);
         let content_width = DIFF_GUTTER_WIDTH + 40;
 
-        let offsets = hunk_offsets(&file, content_width, theme, true);
+        let offsets = diff_layout_counts(&file, content_width, theme, true).hunk_offsets;
         let lines = diff_lines_until(&file, content_width, theme, true, Some(1), usize::MAX).lines;
 
         assert!(line_text(&lines[offsets[0]]).starts_with("  @@ -1 +1 @@"));
