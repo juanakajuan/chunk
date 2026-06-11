@@ -6,7 +6,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, FocusPane};
 use crate::theme::Theme;
@@ -14,6 +14,8 @@ use crate::theme::Theme;
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
 const PANE_BORDER_WIDTH: u16 = 2;
+const HELP_OVERLAY_WIDTH: u16 = 78;
+const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = active_theme();
@@ -26,6 +28,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     render_body(frame, chunks[0], app, theme);
     render_keybind_bar(frame, chunks[1], app, theme);
+    render_help_overlay(frame, frame.area(), app, theme);
 }
 
 fn active_theme() -> Theme {
@@ -93,6 +96,64 @@ fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme
         Paragraph::new(app.keybind_bar_line(theme)).alignment(Alignment::Center),
         area,
     );
+}
+
+fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    if !app.help_overlay_visible() {
+        return;
+    }
+
+    let width = help_overlay_width(area);
+    let content_width = width.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let lines = app.help_overlay_lines(content_width, theme);
+    let height = help_overlay_height(area, lines.len() as u16);
+    let area = centered_rect(area, width, height);
+    let block = Block::default()
+        .title(" Keymap (?/Esc/q closes) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_active))
+        .style(color_style(theme.text, theme.background_alt));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(color_style(theme.text, theme.background_alt)),
+        area,
+    );
+}
+
+fn help_overlay_width(area: Rect) -> u16 {
+    if area.width <= 4 {
+        return area.width;
+    }
+
+    HELP_OVERLAY_WIDTH.min(area.width - 4)
+}
+
+fn help_overlay_height(area: Rect, content_height: u16) -> u16 {
+    if area.height <= 2 {
+        return area.height;
+    }
+
+    content_height
+        .saturating_add(PANE_BORDER_WIDTH)
+        .min(HELP_OVERLAY_MAX_HEIGHT)
+        .min(area.height - 2)
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let horizontal_margin = area.width.saturating_sub(width) / 2;
+    let vertical_margin = area.height.saturating_sub(height) / 2;
+
+    Rect {
+        x: area.x + horizontal_margin,
+        y: area.y + vertical_margin,
+        width,
+        height,
+    }
 }
 
 fn pane_block(

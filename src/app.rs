@@ -70,6 +70,8 @@ pub(crate) struct App {
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
     files_panel_visible: bool,
+    /// Whether the in-app keymap help overlay is open.
+    help_overlay_visible: bool,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
     /// Rendered live-status rows above the diff rows in the diff pane.
@@ -102,6 +104,7 @@ impl App {
             selected_hunk_index,
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
+            help_overlay_visible: false,
             diff_scroll: 0,
             diff_status_rows: 0,
             sidebar_scroll: 0,
@@ -117,6 +120,10 @@ impl App {
 
     pub(crate) fn files_panel_visible(&self) -> bool {
         self.files_panel_visible
+    }
+
+    pub(crate) fn help_overlay_visible(&self) -> bool {
+        self.help_overlay_visible
     }
 
     pub(crate) fn focus(&self) -> FocusPane {
@@ -208,6 +215,14 @@ impl App {
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
         rows::keybind_bar_line(self.files_panel_visible, self.stage_keybind_hint(), theme)
+    }
+
+    pub(crate) fn help_overlay_lines(
+        &self,
+        content_width: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        rows::help_overlay_lines(self.can_stage(), content_width, theme)
     }
 
     fn can_stage(&self) -> bool {
@@ -483,6 +498,11 @@ impl App {
             return Ok(false);
         }
 
+        if self.help_overlay_visible {
+            self.handle_help_overlay_key(key);
+            return Ok(true);
+        }
+
         if self.search.prompt_open {
             self.search.handle_prompt_key(key);
             self.ensure_scroll_bounds();
@@ -492,6 +512,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') if accepts_text_input(key) => return Ok(false),
             KeyCode::Esc => self.search.clear_query(),
+            KeyCode::Char('?') if accepts_text_input(key) => self.toggle_help_overlay(),
 
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Char('f') => self.toggle_files_panel(),
@@ -528,6 +549,10 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.help_overlay_visible {
+            return;
+        }
+
         let column = mouse.column;
         let row = mouse.row;
 
@@ -540,6 +565,22 @@ impl App {
         }
 
         self.ensure_scroll_bounds();
+    }
+
+    fn handle_help_overlay_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::Char('q') if accepts_text_input(key) => {
+                self.help_overlay_visible = false;
+            }
+            KeyCode::Esc => {
+                self.help_overlay_visible = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_help_overlay(&mut self) {
+        self.help_overlay_visible = !self.help_overlay_visible;
     }
 
     fn handle_left_click(&mut self, column: u16, row: u16) {
@@ -1354,6 +1395,40 @@ mod tests {
             .unwrap();
 
         assert!(keep_running);
+    }
+
+    #[test]
+    fn question_mark_toggles_help_overlay() {
+        let mut app = app_with(changeset_with_one_file());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.help_overlay_visible);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.help_overlay_visible);
+    }
+
+    #[test]
+    fn help_overlay_dismisses_without_exiting() {
+        let mut app = app_with(changeset_with_one_file());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(keep_running);
+        assert!(!app.help_overlay_visible);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(keep_running);
+        assert!(!app.help_overlay_visible);
     }
 
     #[test]

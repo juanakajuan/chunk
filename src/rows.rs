@@ -4,8 +4,8 @@
 //! the implementation: sidebar rows, diff rows, intraline emphasis, and wrapping.
 //! `ui` owns pane layout and Ratatui widget drawing.
 
-use ratatui::style::Style;
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use crate::model::Changeset;
 use crate::theme::Theme;
@@ -115,12 +115,246 @@ pub(crate) fn keybind_bar_line(
     }
     hints.push("[/] search");
     hints.push("[j/k] move");
-    hints.push("[Ctrl-d/u] scroll");
-    hints.push("[n/N] next");
-    hints.push("[e] edit");
+    hints.push("[?] help");
     hints.push("[q/Ctrl-c] quit");
 
     Line::styled(hints.join("  |  "), Style::default().fg(theme.muted))
+}
+
+pub(crate) fn help_overlay_lines(
+    can_stage: bool,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    push_help_section(&mut lines, "Global", theme);
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("?"),
+            HelpSegment::text(" help/dismiss   "),
+            HelpSegment::command("q"),
+            HelpSegment::text(" close help or quit   "),
+            HelpSegment::command("Ctrl-c"),
+            HelpSegment::text(" quit"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("f"),
+            HelpSegment::text(" files   "),
+            HelpSegment::command("Tab"),
+            HelpSegment::text("/"),
+            HelpSegment::command("Left"),
+            HelpSegment::text("/"),
+            HelpSegment::command("Right"),
+            HelpSegment::text("/"),
+            HelpSegment::command("Enter"),
+            HelpSegment::text(" focus panes"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("/"),
+            HelpSegment::text(" search, "),
+            HelpSegment::command("Enter"),
+            HelpSegment::text(" apply, "),
+            HelpSegment::command("Esc"),
+            HelpSegment::text(" cancel or clear"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("n"),
+            HelpSegment::text("/"),
+            HelpSegment::command("N"),
+            HelpSegment::text(" next or previous match/hunk   "),
+            HelpSegment::command("g"),
+            HelpSegment::text("/"),
+            HelpSegment::command("Home"),
+            HelpSegment::text(" top   "),
+            HelpSegment::command("G"),
+            HelpSegment::text("/"),
+            HelpSegment::command("End"),
+            HelpSegment::text(" bottom"),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_section(&mut lines, "Sidebar", theme);
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("j"),
+            HelpSegment::text("/"),
+            HelpSegment::command("k"),
+            HelpSegment::text(" select file"),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_section(&mut lines, "Diff", theme);
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("j"),
+            HelpSegment::text("/"),
+            HelpSegment::command("k"),
+            HelpSegment::text(" scroll row   "),
+            HelpSegment::command("PageDown"),
+            HelpSegment::text("/"),
+            HelpSegment::command("PageUp"),
+            HelpSegment::text(" page"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("Ctrl-d"),
+            HelpSegment::text("/"),
+            HelpSegment::command("Ctrl-u"),
+            HelpSegment::text(" page   "),
+            HelpSegment::command("n"),
+            HelpSegment::text("/"),
+            HelpSegment::command("N"),
+            HelpSegment::text(" next or previous hunk"),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_section(&mut lines, "Mouse", theme);
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("hover"),
+            HelpSegment::text(" focus pane   "),
+            HelpSegment::command("click file"),
+            HelpSegment::text(" select"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("click hunk"),
+            HelpSegment::text(" select   "),
+            HelpSegment::command("wheel"),
+            HelpSegment::text(" scroll pointed pane"),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_section(&mut lines, "Worktree-only", theme);
+    if can_stage {
+        push_help_line(
+            &mut lines,
+            &[
+                HelpSegment::command("Space"),
+                HelpSegment::text(" stage/unstage focused file or hunk"),
+            ],
+            content_width,
+            theme,
+        );
+        push_help_line(
+            &mut lines,
+            &[
+                HelpSegment::command("e"),
+                HelpSegment::text(" open selected file in $EDITOR"),
+            ],
+            content_width,
+            theme,
+        );
+    } else {
+        push_help_line(
+            &mut lines,
+            &[HelpSegment::muted(
+                "Staging and editor actions unavailable in PR mode",
+            )],
+            content_width,
+            theme,
+        );
+    }
+
+    lines
+}
+
+fn push_help_section(lines: &mut Vec<Line<'static>>, title: &'static str, theme: Theme) {
+    if !lines.is_empty() {
+        lines.push(Line::styled("", help_style(theme.text, theme)));
+    }
+
+    lines.push(Line::styled(
+        title,
+        help_style(theme.accent, theme).add_modifier(Modifier::BOLD),
+    ));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpSegment {
+    Command(&'static str),
+    Text(&'static str),
+    Muted(&'static str),
+}
+
+impl HelpSegment {
+    const fn command(text: &'static str) -> Self {
+        Self::Command(text)
+    }
+
+    const fn text(text: &'static str) -> Self {
+        Self::Text(text)
+    }
+
+    const fn muted(text: &'static str) -> Self {
+        Self::Muted(text)
+    }
+}
+
+fn push_help_line(
+    lines: &mut Vec<Line<'static>>,
+    segments: &[HelpSegment],
+    content_width: usize,
+    theme: Theme,
+) {
+    lines.extend(wrap_line(help_line(segments, theme), content_width));
+}
+
+fn help_line(segments: &[HelpSegment], theme: Theme) -> Line<'static> {
+    let spans: Vec<Span<'static>> = segments
+        .iter()
+        .map(|segment| match *segment {
+            HelpSegment::Command(text) => Span::styled(text, help_command_style(theme)),
+            HelpSegment::Text(text) => Span::styled(text, help_style(theme.text, theme)),
+            HelpSegment::Muted(text) => Span::styled(text, help_style(theme.muted, theme)),
+        })
+        .collect();
+
+    Line::from(spans)
+}
+
+fn help_command_style(theme: Theme) -> Style {
+    help_style(theme.accent, theme).add_modifier(Modifier::BOLD)
+}
+
+fn help_style(foreground: Color, theme: Theme) -> Style {
+    color_style(foreground, theme.background_alt)
 }
 
 pub(crate) fn changeset_title(changeset: &Changeset) -> String {
@@ -133,4 +367,66 @@ pub(crate) fn changeset_title(changeset: &Changeset) -> String {
     };
 
     format!("{}  +{}  -{}", title, additions, deletions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_overlay_lists_keymap_sections() {
+        let help = help_text(true);
+
+        for section in ["Global", "Sidebar", "Diff", "Mouse", "Worktree-only"] {
+            assert!(help.contains(section), "missing {section} section: {help}");
+        }
+    }
+
+    #[test]
+    fn help_overlay_reflects_staging_availability() {
+        let worktree_help = help_text(true);
+        let pr_help = help_text(false);
+
+        assert!(worktree_help.contains("Space stage/unstage focused file or hunk"));
+        assert!(worktree_help.contains("e open selected file in $EDITOR"));
+        assert!(pr_help.contains("Staging and editor actions unavailable in PR mode"));
+        assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
+    }
+
+    #[test]
+    fn help_overlay_styles_command_tokens_for_contrast() {
+        let theme = Theme::github_dark();
+        let lines = help_overlay_lines(true, 80, theme);
+
+        let command_span = find_span(&lines, "?").expect("command span should render");
+        assert_eq!(command_span.style.fg, Some(theme.accent));
+        assert!(command_span.style.add_modifier.contains(Modifier::BOLD));
+
+        let description_span =
+            find_span(&lines, " help/dismiss   ").expect("description span should render");
+        assert_eq!(description_span.style.fg, Some(theme.text));
+        assert!(!description_span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    fn help_text(can_stage: bool) -> String {
+        help_overlay_lines(can_stage, 80, Theme::github_dark())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn find_span<'a>(lines: &'a [Line<'_>], text: &str) -> Option<&'a Span<'a>> {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == text)
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 }

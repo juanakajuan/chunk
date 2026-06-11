@@ -4,6 +4,7 @@ use ratatui::style::{Color, Style};
 
 const NIGHT_BLACK: Color = Color::Rgb(0x0b, 0x0b, 0x0a);
 const CHARCOAL: Color = Color::Rgb(0x33, 0x33, 0x33);
+const DARK_CHARCOAL: Color = Color::Rgb(0x24, 0x24, 0x24);
 const SLATE_GRAY: Color = Color::Rgb(0x51, 0x51, 0x51);
 const SAGE: Color = Color::Rgb(0x7d, 0xae, 0xa3);
 const SAND: Color = Color::Rgb(0xe2, 0xd2, 0xab);
@@ -163,7 +164,7 @@ impl Theme {
     pub fn matte_box() -> Self {
         Self {
             background: NIGHT_BLACK,
-            background_alt: CHARCOAL,
+            background_alt: DARK_CHARCOAL,
             border: SLATE_GRAY,
             border_active: SAGE,
             text: SAND,
@@ -188,7 +189,7 @@ impl Theme {
     pub fn github_dark() -> Self {
         Self {
             background: NIGHT_BLACK,
-            background_alt: CHARCOAL,
+            background_alt: DARK_CHARCOAL,
             border: GITHUB_DARK_BORDER,
             border_active: GITHUB_DARK_BLUE,
             text: GITHUB_DARK_FG,

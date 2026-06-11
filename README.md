@@ -52,6 +52,8 @@ It does not live-refresh or stage files.
   select and jump to the next or previous hunk in the selected file
 - `g` / `Home`: jump to top of diff
 - `G` / `End`: jump to bottom of diff
+- `?`: show or hide the in-app keymap help; the overlay also closes with
+  `Esc` or `q`
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
 - `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
