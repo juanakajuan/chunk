@@ -18,6 +18,7 @@ const MIN_SPLIT_WIDTH: u16 = 100;
 const PANE_BORDER_WIDTH: u16 = 2;
 const HELP_OVERLAY_WIDTH: u16 = 78;
 const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
+const HELP_SCROLLBAR_WIDTH: u16 = 1;
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = active_theme();
@@ -113,28 +114,28 @@ fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme
     );
 }
 
-fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     if !app.help_overlay_visible() {
         return;
     }
 
     let width = help_overlay_width(area);
-    let content_width = width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let lines = app.help_overlay_lines(content_width, theme);
+    let mut content_width = width.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let mut lines = app.help_overlay_lines(content_width, theme);
     let height = help_overlay_height(area, lines.len() as u16);
+    let visible_content_height = height.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let mut overflow = help_overlay_overflows(lines.len(), visible_content_height);
+    if overflow {
+        content_width = width.saturating_sub(PANE_BORDER_WIDTH + HELP_SCROLLBAR_WIDTH) as usize;
+        lines = app.help_overlay_lines(content_width, theme);
+        overflow = help_overlay_overflows(lines.len(), visible_content_height);
+    }
+    app.clamp_help_overlay_scroll(lines.len(), visible_content_height);
+    let total_rows = lines.len();
+    let scroll = app.help_overlay_scroll();
     let area = centered_rect(area, width, height);
     let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled("─ ", color_style(theme.border_active, theme.background_alt)),
-            Span::styled(
-                "Keymap",
-                color_style(theme.accent, theme.background_alt).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  ?/Esc/q closes ",
-                color_style(theme.muted, theme.background_alt),
-            ),
-        ]))
+        .title(help_overlay_title(theme, overflow))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(
@@ -147,10 +148,139 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Them
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
+            .scroll((saturating_u16(scroll), 0))
             .block(block)
             .style(color_style(theme.text, theme.background_alt)),
         area,
     );
+    if overflow {
+        render_help_scrollbar(
+            frame,
+            help_scrollbar_area(area),
+            total_rows,
+            visible_content_height,
+            scroll,
+            theme,
+        );
+    }
+}
+
+fn help_overlay_title(theme: Theme, scrollable: bool) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("─ ", color_style(theme.border_active, theme.background_alt)),
+        Span::styled(
+            "Keymap",
+            color_style(theme.accent, theme.background_alt).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  ?/Esc/q closes ",
+            color_style(theme.muted, theme.background_alt),
+        ),
+    ];
+    if scrollable {
+        spans.push(Span::styled(
+            " j/k scroll ",
+            color_style(theme.muted, theme.background_alt),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn render_help_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    total_rows: usize,
+    visible_rows: usize,
+    scroll: usize,
+    theme: Theme,
+) {
+    let thumb = scrollbar_thumb(area.height as usize, total_rows, visible_rows, scroll);
+    let track_style = color_style(theme.muted, theme.background_alt);
+    let thumb_style = color_style(theme.accent, theme.background_alt);
+    let lines = (0..area.height as usize)
+        .map(|row| {
+            let in_thumb = row >= thumb.start && row < thumb.start.saturating_add(thumb.len);
+            let (symbol, style) = if in_thumb {
+                ("█", thumb_style)
+            } else {
+                ("│", track_style)
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn help_scrollbar_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x + area.width.saturating_sub(2),
+        y: area.y + 1,
+        width: HELP_SCROLLBAR_WIDTH,
+        height: area.height.saturating_sub(PANE_BORDER_WIDTH),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScrollbarThumb {
+    start: usize,
+    len: usize,
+}
+
+fn scrollbar_thumb(
+    track_height: usize,
+    total_rows: usize,
+    visible_rows: usize,
+    scroll: usize,
+) -> ScrollbarThumb {
+    let track_height = track_height.max(1);
+    let max_thumb_len = track_height.saturating_sub(1).max(1);
+    let thumb_len = ratio_ceil(visible_rows, track_height, total_rows)
+        .max(1)
+        .min(max_thumb_len);
+    let track_range = track_height.saturating_sub(thumb_len);
+    let scroll_range = total_rows.saturating_sub(visible_rows);
+    let start = if track_range == 0 || scroll_range == 0 {
+        0
+    } else {
+        ratio_round(scroll.min(scroll_range), track_range, scroll_range)
+    };
+
+    ScrollbarThumb {
+        start,
+        len: thumb_len,
+    }
+}
+
+fn ratio_ceil(value: usize, numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        return 0;
+    }
+
+    value
+        .saturating_mul(numerator)
+        .saturating_add(denominator.saturating_sub(1))
+        / denominator
+}
+
+fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        return 0;
+    }
+
+    value
+        .saturating_mul(numerator)
+        .saturating_add(denominator / 2)
+        / denominator
+}
+
+fn help_overlay_overflows(line_count: usize, visible_height: usize) -> bool {
+    line_count > visible_height
+}
+
+fn saturating_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
 }
 
 fn help_overlay_width(area: Rect) -> u16 {
@@ -227,4 +357,85 @@ fn pane_title(title: String, focused: bool, theme: Theme) -> Line<'static> {
 
 fn color_style(foreground: Color, background: Color) -> Style {
     Style::default().fg(foreground).bg(background)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    use crate::config::AppConfig;
+    use crate::custom_command::{CommandKey, CustomCommandBinding};
+    use crate::model::Changeset;
+    use crate::review_source::LoadedReview;
+
+    #[test]
+    fn help_overlay_draws_custom_commands_from_config() {
+        let mut app = app_with_commands(vec![custom_command("P", "publish", "git push")]);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = buffer_text(terminal.backend().buffer());
+
+        assert!(
+            buffer.contains("P publish  git push"),
+            "buffer was {buffer}"
+        );
+    }
+
+    #[test]
+    fn help_overlay_scrolls_long_keymaps() {
+        let mut app = app_with_commands(vec![
+            custom_command("A", "command 1", "true"),
+            custom_command("B", "command 2", "true"),
+            custom_command("C", "command 3", "true"),
+            custom_command("D", "command 4", "true"),
+            custom_command("E", "command 5", "true"),
+            custom_command("F", "command 6", "true"),
+        ]);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .unwrap();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = buffer_text(terminal.backend().buffer());
+
+        assert!(buffer.contains("Worktree-only"), "buffer was {buffer}");
+        assert!(buffer.contains("█"), "buffer was {buffer}");
+    }
+
+    fn app_with_commands(commands: Vec<CustomCommandBinding>) -> App {
+        App::with_config(
+            LoadedReview::worktree(Changeset {
+                title: String::new(),
+                source_label: String::new(),
+                files: Vec::new(),
+            }),
+            AppConfig { commands },
+        )
+    }
+
+    fn custom_command(key: &str, label: &str, command: &str) -> CustomCommandBinding {
+        CustomCommandBinding::new(
+            CommandKey::parse(key).unwrap(),
+            label.to_string(),
+            command.to_string(),
+        )
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        let mut text = String::new();
+        for cell in &buffer.content {
+            text.push_str(cell.symbol());
+        }
+        text
+    }
 }

@@ -7,6 +7,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::model::Changeset;
 use crate::theme::Theme;
 
@@ -169,9 +170,37 @@ pub(crate) fn keybind_bar_line(
     Line::from(spans)
 }
 
+pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'static> {
+    let background = theme.background;
+    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+    let separator_style = color_style(theme.border, background);
+
+    Line::from(vec![
+        Span::styled(
+            " COMMAND ",
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+        Span::styled("  ", label_style),
+        Span::styled("j/k", key_style),
+        Span::styled(" scroll", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("PgUp/PgDn", key_style),
+        Span::styled(" page", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("g/G", key_style),
+        Span::styled(" top/bottom", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("Esc/q", key_style),
+        Span::styled(" close", label_style),
+    ])
+}
+
 pub(crate) fn help_overlay_lines(
     can_stage: bool,
     can_discard: bool,
+    custom_commands: &[CustomCommandBinding],
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
@@ -240,6 +269,8 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+
+    push_custom_commands_section(&mut lines, custom_commands, content_width, theme);
 
     push_help_section(&mut lines, "Sidebar", theme);
     push_help_line(
@@ -361,6 +392,27 @@ pub(crate) fn help_overlay_lines(
     lines
 }
 
+fn push_custom_commands_section(
+    lines: &mut Vec<Line<'static>>,
+    custom_commands: &[CustomCommandBinding],
+    content_width: usize,
+    theme: Theme,
+) {
+    push_help_section(lines, "Custom commands", theme);
+    if custom_commands.is_empty() {
+        push_help_line(
+            lines,
+            &[HelpSegment::muted("No custom commands configured")],
+            content_width,
+            theme,
+        );
+    } else {
+        for command in custom_commands {
+            push_custom_command_help_line(lines, command, content_width, theme);
+        }
+    }
+}
+
 fn push_help_section(lines: &mut Vec<Line<'static>>, title: &'static str, theme: Theme) {
     if !lines.is_empty() {
         lines.push(Line::styled("", help_style(theme.text, theme)));
@@ -402,6 +454,28 @@ fn push_help_line(
     lines.extend(wrap_line(help_line(segments, theme), content_width));
 }
 
+fn push_custom_command_help_line(
+    lines: &mut Vec<Line<'static>>,
+    command: &CustomCommandBinding,
+    content_width: usize,
+    theme: Theme,
+) {
+    lines.extend(wrap_line(
+        Line::from(vec![
+            Span::styled(command.key_display(), help_command_style(theme)),
+            Span::styled(
+                format!(" {}", command.label()),
+                help_style(theme.text, theme),
+            ),
+            Span::styled(
+                format!("  {}", command.command()),
+                help_style(theme.muted, theme),
+            ),
+        ]),
+        content_width,
+    ));
+}
+
 fn help_line(segments: &[HelpSegment], theme: Theme) -> Line<'static> {
     let spans: Vec<Span<'static>> = segments
         .iter()
@@ -421,6 +495,115 @@ fn help_command_style(theme: Theme) -> Style {
 
 fn help_style(foreground: Color, theme: Theme) -> Style {
     color_style(foreground, theme.background_alt)
+}
+
+pub(crate) fn custom_command_output_lines(
+    result: &CustomCommandResult,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let status_color = if result.success() {
+        theme.added
+    } else {
+        theme.removed
+    };
+
+    push_wrapped_output_line(
+        &mut lines,
+        Line::styled(
+            format!(
+                "{}  {}",
+                if result.success() { "OK" } else { "FAIL" },
+                result.status_text()
+            ),
+            color_style(status_color, theme.background),
+        ),
+        content_width,
+    );
+
+    if let Some(cwd) = result.cwd() {
+        push_wrapped_output_line(
+            &mut lines,
+            Line::styled(
+                format!("cwd: {}", cwd.display()),
+                color_style(theme.muted, theme.background),
+            ),
+            content_width,
+        );
+    }
+    push_wrapped_output_line(
+        &mut lines,
+        Line::styled(
+            format!("$ {}", result.command()),
+            color_style(theme.accent, theme.background),
+        ),
+        content_width,
+    );
+    lines.push(Line::raw(""));
+
+    push_output_section(
+        &mut lines,
+        "stdout",
+        result.stdout(),
+        content_width,
+        color_style(theme.text, theme.background),
+        theme,
+    );
+    lines.push(Line::raw(""));
+    push_output_section(
+        &mut lines,
+        "stderr",
+        result.stderr(),
+        content_width,
+        color_style(theme.removed, theme.background),
+        theme,
+    );
+
+    lines
+}
+
+fn push_output_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    output: &str,
+    content_width: usize,
+    output_style: Style,
+    theme: Theme,
+) {
+    push_wrapped_output_line(
+        lines,
+        Line::styled(
+            title,
+            color_style(theme.accent, theme.background).add_modifier(Modifier::BOLD),
+        ),
+        content_width,
+    );
+
+    if output.is_empty() {
+        push_wrapped_output_line(
+            lines,
+            Line::styled("(empty)", color_style(theme.muted, theme.background)),
+            content_width,
+        );
+        return;
+    }
+
+    for row in output.lines() {
+        push_wrapped_output_line(
+            lines,
+            Line::styled(row.to_string(), output_style),
+            content_width,
+        );
+    }
+}
+
+fn push_wrapped_output_line(
+    lines: &mut Vec<Line<'static>>,
+    line: Line<'static>,
+    content_width: usize,
+) {
+    lines.extend(wrap_line(line, content_width));
 }
 
 pub(crate) fn changeset_title(changeset: &Changeset) -> String {
@@ -443,7 +626,14 @@ mod tests {
     fn help_overlay_lists_keymap_sections() {
         let help = help_text(true);
 
-        for section in ["Global", "Sidebar", "Diff", "Mouse", "Worktree-only"] {
+        for section in [
+            "Global",
+            "Sidebar",
+            "Diff",
+            "Mouse",
+            "Worktree-only",
+            "Custom commands",
+        ] {
             assert!(help.contains(section), "missing {section} section: {help}");
         }
     }
@@ -464,7 +654,7 @@ mod tests {
     #[test]
     fn help_overlay_styles_command_tokens_for_contrast() {
         let theme = Theme::github_dark();
-        let lines = help_overlay_lines(true, true, 80, theme);
+        let lines = help_overlay_lines(true, true, &[], 80, theme);
 
         let command_span = find_span(&lines, "?").expect("command span should render");
         assert_eq!(command_span.style.fg, Some(theme.accent));
@@ -477,7 +667,7 @@ mod tests {
     }
 
     fn help_text(can_stage: bool) -> String {
-        help_overlay_lines(can_stage, can_stage, 80, Theme::github_dark())
+        help_overlay_lines(can_stage, can_stage, &[], 80, Theme::github_dark())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()

@@ -13,6 +13,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::config::AppConfig;
+use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile, DiffHunk};
 use crate::review_source::{LoadedReview, ReviewSource};
@@ -24,6 +26,7 @@ use crate::viewport::{
 };
 
 const MOUSE_WHEEL_STEP: usize = 3;
+const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FocusPane {
@@ -66,6 +69,14 @@ struct SearchState {
     active_index: Option<usize>,
     match_file_id: Option<String>,
     scroll_pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandOutputState {
+    result: CustomCommandResult,
+    scroll: usize,
+    rendered_row_count: usize,
+    visible_height: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +128,14 @@ pub(crate) struct App {
     files_panel_visible: bool,
     /// Whether the in-app keymap help overlay is open.
     help_overlay_visible: bool,
+    /// First help overlay row visible when help content exceeds the modal height.
+    help_overlay_scroll: usize,
+    /// User-configured shell command bindings.
+    custom_commands: Vec<CustomCommandBinding>,
+    /// Deferred request for runtime to execute a configured shell command safely.
+    custom_command_request: Option<CustomCommandBinding>,
+    /// Completed custom command output currently shown in the diff pane.
+    command_output: Option<CommandOutputState>,
     /// Pending destructive worktree discard request.
     discard_confirmation: Option<DiscardConfirmation>,
     /// First rendered diff row visible in the diff pane.
@@ -142,7 +161,12 @@ pub(crate) struct DiffPaneRows {
 }
 
 impl App {
+    #[cfg(test)]
     pub(crate) fn new(review: LoadedReview) -> Self {
+        Self::with_config(review, AppConfig::default())
+    }
+
+    pub(crate) fn with_config(review: LoadedReview, config: AppConfig) -> Self {
         let LoadedReview { source, changeset } = review;
         let file_count = changeset.files.len();
         let selected_hunk_index = initial_selected_hunk_index(&changeset);
@@ -155,6 +179,10 @@ impl App {
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             help_overlay_visible: false,
+            help_overlay_scroll: 0,
+            custom_commands: config.commands,
+            custom_command_request: None,
+            command_output: None,
             discard_confirmation: None,
             diff_scroll: 0,
             diff_status_rows: 0,
@@ -176,6 +204,16 @@ impl App {
 
     pub(crate) fn help_overlay_visible(&self) -> bool {
         self.help_overlay_visible
+    }
+
+    pub(crate) fn help_overlay_scroll(&self) -> usize {
+        self.help_overlay_scroll
+    }
+
+    pub(crate) fn clamp_help_overlay_scroll(&mut self, line_count: usize, visible_height: usize) {
+        self.help_overlay_scroll = self
+            .help_overlay_scroll
+            .min(line_count.saturating_sub(visible_height));
     }
 
     pub(crate) fn focus(&self) -> FocusPane {
@@ -228,6 +266,10 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> DiffPaneRows {
+        if self.command_output.is_some() {
+            return self.command_output_pane_rows(area, content_width, visible_height, theme);
+        }
+
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
         lines.extend(self.discard_status_lines(content_width, theme));
@@ -296,6 +338,10 @@ impl App {
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
+        if self.command_output.is_some() {
+            return rows::custom_command_output_keybind_bar_line(theme);
+        }
+
         rows::keybind_bar_line(
             self.files_panel_visible,
             self.can_stage(),
@@ -310,7 +356,13 @@ impl App {
         content_width: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        rows::help_overlay_lines(self.can_stage(), self.can_discard(), content_width, theme)
+        rows::help_overlay_lines(
+            self.can_stage(),
+            self.can_discard(),
+            &self.custom_commands,
+            content_width,
+            theme,
+        )
     }
 
     fn can_stage(&self) -> bool {
@@ -608,6 +660,37 @@ impl App {
         self.highlight_search_matches(lines, theme)
     }
 
+    fn command_output_pane_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> DiffPaneRows {
+        self.viewport.begin_diff(area, visible_height);
+        self.diff_status_rows = 0;
+
+        let output = self
+            .command_output
+            .as_mut()
+            .expect("command output pane requires command output state");
+        let title = format!(" Command: {} ", output.result.label());
+        let all_lines = rows::custom_command_output_lines(&output.result, content_width, theme);
+        output.rendered_row_count = all_lines.len();
+        output.visible_height = visible_height;
+        clamp_command_output_scroll(output);
+
+        DiffPaneRows {
+            title,
+            lines: all_lines
+                .into_iter()
+                .skip(output.scroll)
+                .take(visible_height)
+                .collect(),
+            scrollbar: None,
+        }
+    }
+
     fn apply_selected_hunk_style(
         &self,
         lines: &mut [Line<'static>],
@@ -674,6 +757,21 @@ impl App {
         self.editor_request.take()
     }
 
+    pub(crate) fn take_custom_command_request(&mut self) -> Option<CustomCommandBinding> {
+        self.custom_command_request.take()
+    }
+
+    pub(crate) fn set_custom_command_result(&mut self, result: CustomCommandResult) {
+        self.live_error = None;
+        self.focus = FocusPane::Diff;
+        self.command_output = Some(CommandOutputState {
+            result,
+            scroll: 0,
+            rendered_row_count: 0,
+            visible_height: 0,
+        });
+    }
+
     pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
         match self.source.reload() {
             Ok(changeset) => self.apply_reloaded_changeset(changeset, preserve_scroll),
@@ -725,6 +823,11 @@ impl App {
             return Ok(false);
         }
 
+        if self.command_output.is_some() {
+            self.handle_command_output_key(key);
+            return Ok(true);
+        }
+
         if self.discard_confirmation.is_some() {
             self.handle_discard_confirmation_key(key);
             return Ok(true);
@@ -738,6 +841,10 @@ impl App {
         if self.search.prompt_open {
             self.search.handle_prompt_key(key);
             self.ensure_scroll_bounds();
+            return Ok(true);
+        }
+
+        if self.queue_custom_command_for_key(key) {
             return Ok(true);
         }
 
@@ -782,7 +889,17 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.help_overlay_visible || self.discard_confirmation.is_some() {
+        if self.help_overlay_visible {
+            self.handle_help_overlay_mouse(mouse);
+            return;
+        }
+
+        if self.discard_confirmation.is_some() {
+            return;
+        }
+
+        if self.command_output.is_some() {
+            self.handle_command_output_mouse(mouse);
             return;
         }
 
@@ -805,6 +922,39 @@ impl App {
     fn handle_help_overlay_key(&mut self, key: KeyEvent) {
         if closes_help_overlay(key) {
             self.help_overlay_visible = false;
+            return;
+        }
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_help_overlay_by(VerticalDirection::Down, 1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll_help_overlay_by(VerticalDirection::Up, 1)
+            }
+            KeyCode::PageDown => {
+                self.scroll_help_overlay_by(VerticalDirection::Down, HELP_OVERLAY_SCROLL_PAGE)
+            }
+            KeyCode::PageUp => {
+                self.scroll_help_overlay_by(VerticalDirection::Up, HELP_OVERLAY_SCROLL_PAGE)
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_help_overlay_by(VerticalDirection::Down, HELP_OVERLAY_SCROLL_PAGE)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_help_overlay_by(VerticalDirection::Up, HELP_OVERLAY_SCROLL_PAGE)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.help_overlay_scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => self.help_overlay_scroll = usize::MAX,
+            _ => {}
+        }
+    }
+
+    fn handle_help_overlay_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll_help_overlay_by(VerticalDirection::Down, 3),
+            MouseEventKind::ScrollUp => self.scroll_help_overlay_by(VerticalDirection::Up, 3),
+            _ => {}
         }
     }
 
@@ -818,8 +968,47 @@ impl App {
         }
     }
 
+    fn handle_command_output_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.command_output = None,
+            KeyCode::Char('q') if accepts_text_input(key) => self.command_output = None,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_command_output_by(VerticalDirection::Down, 1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll_command_output_by(VerticalDirection::Up, 1)
+            }
+            KeyCode::PageDown => {
+                self.scroll_command_output_by(VerticalDirection::Down, self.command_output_page())
+            }
+            KeyCode::PageUp => {
+                self.scroll_command_output_by(VerticalDirection::Up, self.command_output_page())
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_command_output_by(VerticalDirection::Down, self.command_output_page())
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_command_output_by(VerticalDirection::Up, self.command_output_page())
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.scroll_command_output_to_top(),
+            KeyCode::End | KeyCode::Char('G') => self.scroll_command_output_to_bottom(),
+            _ => {}
+        }
+    }
+
+    fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll_command_output_by(VerticalDirection::Down, 3),
+            MouseEventKind::ScrollUp => self.scroll_command_output_by(VerticalDirection::Up, 3),
+            _ => {}
+        }
+    }
+
     fn toggle_help_overlay(&mut self) {
         self.help_overlay_visible = !self.help_overlay_visible;
+        if self.help_overlay_visible {
+            self.help_overlay_scroll = 0;
+        }
     }
 
     fn handle_left_click(&mut self, column: u16, row: u16) {
@@ -934,6 +1123,53 @@ impl App {
     fn open_search_prompt(&mut self) {
         self.focus = FocusPane::Diff;
         self.search.open_prompt();
+    }
+
+    fn queue_custom_command_for_key(&mut self, key: KeyEvent) -> bool {
+        let Some(command) = self
+            .custom_commands
+            .iter()
+            .find(|command| command.key().matches(key))
+            .cloned()
+        else {
+            return false;
+        };
+
+        self.live_error = None;
+        self.custom_command_request = Some(command);
+        true
+    }
+
+    fn scroll_help_overlay_by(&mut self, direction: VerticalDirection, amount: usize) {
+        self.help_overlay_scroll = direction.shift(self.help_overlay_scroll, amount);
+    }
+
+    fn command_output_page(&self) -> usize {
+        self.command_output
+            .as_ref()
+            .map_or(1, |output| output.visible_height.max(1))
+    }
+
+    fn scroll_command_output_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let Some(output) = self.command_output.as_mut() else {
+            return;
+        };
+
+        output.scroll = direction.shift(output.scroll, amount);
+        clamp_command_output_scroll(output);
+    }
+
+    fn scroll_command_output_to_top(&mut self) {
+        if let Some(output) = self.command_output.as_mut() {
+            output.scroll = 0;
+        }
+    }
+
+    fn scroll_command_output_to_bottom(&mut self) {
+        if let Some(output) = self.command_output.as_mut() {
+            output.scroll = usize::MAX;
+            clamp_command_output_scroll(output);
+        }
     }
 
     fn move_by(&mut self, direction: VerticalDirection) {
@@ -1385,6 +1621,14 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 
 fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
+}
+
+fn clamp_command_output_scroll(output: &mut CommandOutputState) {
+    output.scroll = output.scroll.min(
+        output
+            .rendered_row_count
+            .saturating_sub(output.visible_height),
+    );
 }
 
 fn diff_search_matches(lines: &[Line<'static>], query: &str) -> Vec<SearchMatch> {
@@ -2124,8 +2368,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn custom_command_key_queues_command_request() {
+        let mut app = app_with_config(AppConfig {
+            commands: vec![custom_command("C", "commit", "git commit")],
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT))
+            .unwrap();
+
+        let request = app
+            .take_custom_command_request()
+            .expect("custom command should be queued");
+        assert_eq!(request.label(), "commit");
+        assert_eq!(request.command(), "git commit");
+    }
+
+    #[test]
+    fn custom_commands_are_help_only_not_footer_hints() {
+        let app = app_with_config(AppConfig {
+            commands: vec![custom_command("P", "publish", "git push")],
+        });
+        let theme = Theme::github_dark();
+
+        let footer = line_text(&app.keybind_bar_line(theme));
+        let help = app
+            .help_overlay_lines(80, theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!footer.contains("publish"), "footer was {footer:?}");
+        assert!(help.contains("Custom commands"));
+        assert!(help.contains("P publish  git push"));
+    }
+
+    #[test]
+    fn command_output_pane_scrolls_and_closes() {
+        let mut app = app_with(changeset_with_one_file());
+        let command = custom_command("C", "long output", "false");
+        app.set_custom_command_result(CustomCommandResult::not_started(
+            &command,
+            None,
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+        ));
+
+        let pane = render_diff_pane(&mut app, Theme::github_dark());
+        assert!(pane.title.contains("Command: long output"));
+        assert_eq!(
+            app.command_output.as_ref().map(|output| output.scroll),
+            Some(0)
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.command_output.as_ref().map(|output| output.scroll),
+            Some(1)
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.command_output.is_none());
+    }
+
     fn app_with(changeset: Changeset) -> App {
         App::new(LoadedReview::worktree(changeset))
+    }
+
+    fn app_with_config(config: AppConfig) -> App {
+        App::with_config(LoadedReview::worktree(changeset_with_one_file()), config)
+    }
+
+    fn custom_command(key: &str, label: &str, command: &str) -> CustomCommandBinding {
+        CustomCommandBinding::new(
+            crate::custom_command::CommandKey::parse(key).unwrap(),
+            label.to_string(),
+            command.to_string(),
+        )
     }
 
     fn enter_search_query(app: &mut App, query: &str) {

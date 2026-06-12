@@ -63,11 +63,33 @@ It does not live-refresh, stage files, or discard worktree changes.
   or hunk after confirmation; untracked files can be discarded from the file list
 - `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
   mode
+- Custom command keys from config: run the configured shell command from the Git
+  root, then show stdout, stderr, and exit status in a command pane
 - `q` / `Ctrl-c`: quit
 
 Mouse hover changes focus. Click a file to select it, or click a hunk in the
 diff pane to select it. Wheel scrolling moves through files in the sidebar and
 scrolls the diff in the diff pane.
+
+In the command output pane, use `j` / `k` or the mouse wheel to scroll,
+`PageDown` / `PageUp` to page, `g` / `G` to jump, and `Esc` / `q` to return to
+the diff.
+
+## Configuration
+
+`chunk` reads `${XDG_CONFIG_HOME:-$HOME/.config}/chunk/config.toml` when it
+exists.
+
+```toml
+[[commands]]
+key = "C"
+label = "commit and push"
+command = "ga . && com && gP"
+```
+
+Custom command keys are single characters. Built-in key conflicts and duplicate
+custom keys are rejected at startup. Commands run from the Git repository root
+through the user shell, and `chunk` reloads the review source after completion.
 
 ## Themes
 
@@ -89,6 +111,8 @@ cargo clippy --all-targets -- -D warnings
 Code map:
 
 - `src/main.rs`: CLI parsing and review source selection
+- `src/config.rs`: user config loading and validation
+- `src/custom_command.rs`: configured shell command bindings and execution
 - `src/editor.rs`: external editor command resolution
 - `src/review_source.rs`: worktree vs PR behavior, reloads, mutation capability
 - `src/git.rs`: Git command boundary and source snapshot loading

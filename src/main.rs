@@ -4,6 +4,8 @@
 //! diff source, then hand the resulting changeset to the terminal app.
 
 mod app;
+mod config;
+mod custom_command;
 mod editor;
 mod git;
 mod model;
@@ -42,10 +44,15 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     let cli = Cli::parse();
+    let config = config::load()?;
     match cli.command.unwrap_or(Command::Diff) {
-        Command::Diff => runtime::run(app::App::new(review_source::ReviewSource::load_worktree()?)),
-        Command::Pr { base } => runtime::run(app::App::new(
+        Command::Diff => runtime::run(app::App::with_config(
+            review_source::ReviewSource::load_worktree()?,
+            config,
+        )),
+        Command::Pr { base } => runtime::run(app::App::with_config(
             review_source::ReviewSource::load_pull_request(base.as_deref())?,
+            config,
         )),
     }
 }

@@ -9,5 +9,7 @@ color-eyre = "0.6"
 crossterm = "0.29"
 notify = "8.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1.0", features = ["derive"] }
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-onig"] }
+toml = "1.1"
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-onig"] }

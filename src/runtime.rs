@@ -19,7 +19,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::App;
+use crate::custom_command::{self, CustomCommandBinding, CustomCommandResult};
 use crate::editor::{EditorCommand, EditorRequest};
+use crate::git;
 use crate::ui;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -129,6 +131,10 @@ fn handle_key_event(terminal: &mut TuiTerminal, app: &mut App, key: KeyEvent) ->
         open_requested_editor(terminal, app, &request)?;
     }
 
+    if let Some(command) = app.take_custom_command_request() {
+        run_requested_custom_command(terminal, app, &command)?;
+    }
+
     Ok(true)
 }
 
@@ -164,6 +170,41 @@ fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<Op
             editor.display_name()
         ))),
     }
+}
+
+fn run_requested_custom_command(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    command: &CustomCommandBinding,
+) -> Result<()> {
+    let result = run_custom_command(terminal, command)?;
+    app.set_custom_command_result(result);
+    app.reload_review_source(true);
+    Ok(())
+}
+
+fn run_custom_command(
+    terminal: &mut TuiTerminal,
+    command: &CustomCommandBinding,
+) -> Result<CustomCommandResult> {
+    let cwd = match git::worktree_root() {
+        Ok(root) => root,
+        Err(error) => {
+            return Ok(CustomCommandResult::not_started(
+                command,
+                None,
+                format!("could not determine Git worktree root: {error}"),
+            ));
+        }
+    };
+
+    suspend_terminal(terminal)?;
+    let result = custom_command::run(command, cwd.clone()).unwrap_or_else(|error| {
+        CustomCommandResult::not_started(command, Some(cwd), error.to_string())
+    });
+    resume_terminal(terminal)?;
+    terminal.clear()?;
+    Ok(result)
 }
 
 fn suspend_terminal(terminal: &mut TuiTerminal) -> Result<()> {
