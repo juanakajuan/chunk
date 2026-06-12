@@ -70,6 +70,24 @@ pub(crate) fn discard_status_lines(
     )
 }
 
+pub(crate) fn custom_command_running_lines(
+    command: Option<&CustomCommandBinding>,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Some(command) = command else {
+        return Vec::new();
+    };
+
+    wrap_line(
+        Line::styled(
+            format!("Running command: {}", command.label()),
+            color_style(theme.accent, theme.background),
+        ),
+        content_width,
+    )
+}
+
 pub(crate) enum SearchStatus<'a> {
     Prompt {
         input: &'a str,

@@ -134,6 +134,8 @@ pub(crate) struct App {
     custom_commands: Vec<CustomCommandBinding>,
     /// Deferred request for runtime to execute a configured shell command safely.
     custom_command_request: Option<CustomCommandBinding>,
+    /// Custom command currently running while runtime waits for captured output.
+    custom_command_running: Option<CustomCommandBinding>,
     /// Completed custom command output currently shown in the diff pane.
     command_output: Option<CommandOutputState>,
     /// Pending destructive worktree discard request.
@@ -182,6 +184,7 @@ impl App {
             help_overlay_scroll: 0,
             custom_commands: config.commands,
             custom_command_request: None,
+            custom_command_running: None,
             command_output: None,
             discard_confirmation: None,
             diff_scroll: 0,
@@ -272,6 +275,11 @@ impl App {
 
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+        lines.extend(rows::custom_command_running_lines(
+            self.custom_command_running.as_ref(),
+            content_width,
+            theme,
+        ));
         lines.extend(self.discard_status_lines(content_width, theme));
 
         let provisional_search_lines =
@@ -761,9 +769,16 @@ impl App {
         self.custom_command_request.take()
     }
 
+    pub(crate) fn set_custom_command_running(&mut self, command: &CustomCommandBinding) {
+        self.live_error = None;
+        self.focus = FocusPane::Diff;
+        self.custom_command_running = Some(command.clone());
+    }
+
     pub(crate) fn set_custom_command_result(&mut self, result: CustomCommandResult) {
         self.live_error = None;
         self.focus = FocusPane::Diff;
+        self.custom_command_running = None;
         self.command_output = Some(CommandOutputState {
             result,
             scroll: 0,
@@ -2405,6 +2420,26 @@ mod tests {
     }
 
     #[test]
+    fn custom_command_running_indicator_is_replaced_by_output() {
+        let mut app = app_with(changeset_with_one_file());
+        let command = custom_command("C", "commit and push", "git commit && git push");
+
+        app.set_custom_command_running(&command);
+        let running_pane = render_diff_pane(&mut app, Theme::github_dark());
+        let running_text = pane_text(&running_pane);
+
+        assert!(running_text.contains("Running command: commit and push"));
+
+        app.set_custom_command_result(CustomCommandResult::not_started(&command, None, "failed"));
+        let output_pane = render_diff_pane(&mut app, Theme::github_dark());
+        let output_text = pane_text(&output_pane);
+
+        assert!(app.custom_command_running.is_none());
+        assert!(output_pane.title.contains("Command: commit and push"));
+        assert!(!output_text.contains("Running command: commit and push"));
+    }
+
+    #[test]
     fn command_output_pane_scrolls_and_closes() {
         let mut app = app_with(changeset_with_one_file());
         let command = custom_command("C", "long output", "false");
@@ -2462,6 +2497,14 @@ mod tests {
 
     fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {
         app.diff_pane_rows(Rect::new(0, 0, 80, 8), 80, 6, theme)
+    }
+
+    fn pane_text(pane: &DiffPaneRows) -> String {
+        pane.lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn changeset_with_file(file: DiffFile) -> Changeset {

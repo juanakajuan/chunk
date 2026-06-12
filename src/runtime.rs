@@ -132,6 +132,8 @@ fn handle_key_event(terminal: &mut TuiTerminal, app: &mut App, key: KeyEvent) ->
     }
 
     if let Some(command) = app.take_custom_command_request() {
+        app.set_custom_command_running(&command);
+        terminal.draw(|frame| ui::draw(frame, app))?;
         run_requested_custom_command(app, &command);
     }
 
