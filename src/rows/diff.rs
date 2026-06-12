@@ -10,7 +10,7 @@ use crate::theme::Theme;
 
 use super::RAIL_MARKER;
 use super::file_summary::{
-    file_header_label, file_status_suffix, format_file_stats, padding_before_stats,
+    file_header_label, file_icon, file_status_suffix, format_file_stats, padding_before_stats,
     push_stat_spans, stage_display, stats_width,
 };
 use super::intraline::{
@@ -542,7 +542,11 @@ fn render_file_header(
     can_stage: bool,
     theme: Theme,
 ) -> Line<'static> {
-    let label = file_header_label(file);
+    let label = format!(
+        "{} {}",
+        file_icon(file.display_path()),
+        file_header_label(file)
+    );
     let suffix = file_status_suffix(file.status);
     let stage_affordance = can_stage.then(|| stage_display(file.stage, theme.background, theme));
     let stats = format_file_stats(file);

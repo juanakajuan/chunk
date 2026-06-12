@@ -5,16 +5,6 @@ use ratatui::style::{Color, Style};
 const NIGHT_BLACK: Color = Color::Rgb(0x0b, 0x0b, 0x0a);
 const CHARCOAL: Color = Color::Rgb(0x33, 0x33, 0x33);
 const DARK_CHARCOAL: Color = Color::Rgb(0x24, 0x24, 0x24);
-const SLATE_GRAY: Color = Color::Rgb(0x51, 0x51, 0x51);
-const SAGE: Color = Color::Rgb(0x7d, 0xae, 0xa3);
-const SAND: Color = Color::Rgb(0xe2, 0xd2, 0xab);
-const MIST_BLUE: Color = Color::Rgb(0x8b, 0x9b, 0xaa);
-const MINT_GREEN: Color = Color::Rgb(0x6a, 0xd1, 0x8f);
-const DARK_OLIVE: Color = Color::Rgb(0x24, 0x22, 0x12);
-const DUSTY_RED: Color = Color::Rgb(0xd3, 0x5f, 0x5f);
-const DARK_MAROON: Color = Color::Rgb(0x26, 0x13, 0x13);
-const AMBER: Color = Color::Rgb(0xf5, 0x9e, 0x0b);
-const COOL_GRAY: Color = Color::Rgb(0x8a, 0x8a, 0x8d);
 const DEEP_CHARCOAL: Color = Color::Rgb(0x16, 0x16, 0x14);
 const GITHUB_DARK_ADDED_BG: Color = Color::Rgb(0x0f, 0x2a, 0x1a);
 const GITHUB_DARK_REMOVED_BG: Color = Color::Rgb(0x2a, 0x12, 0x16);
@@ -30,7 +20,13 @@ const GITHUB_DARK_KEYWORD: Color = Color::Rgb(0xff, 0x7b, 0x72);
 const GITHUB_DARK_ORANGE: Color = Color::Rgb(0xd2, 0x99, 0x22);
 const GITHUB_DARK_BRIGHT_ORANGE: Color = Color::Rgb(0xff, 0xa6, 0x57);
 const GITHUB_DARK_PURPLE: Color = Color::Rgb(0xd2, 0xa8, 0xff);
+const GRUVBOX_HARD_BG: Color = Color::Rgb(0x1d, 0x20, 0x21);
+const GRUVBOX_PANEL_BG: Color = Color::Rgb(0x1f, 0x1f, 0x1f);
 const GRUVBOX_DARK_BG: Color = Color::Rgb(0x28, 0x28, 0x28);
+const GRUVBOX_BG3: Color = Color::Rgb(0x66, 0x5c, 0x54);
+const GRUVBOX_BG4: Color = Color::Rgb(0x7c, 0x6f, 0x64);
+const GRUVBOX_ADDED_BG: Color = Color::Rgb(0x26, 0x33, 0x1d);
+const GRUVBOX_REMOVED_BG: Color = Color::Rgb(0x3a, 0x21, 0x22);
 const GRUVBOX_LIGHT_FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
 const GRUVBOX_GRAY: Color = Color::Rgb(0x92, 0x83, 0x74);
 const GRUVBOX_RED: Color = Color::Rgb(0xfb, 0x49, 0x34);
@@ -51,6 +47,8 @@ pub struct Theme {
     pub text: Color,
     pub muted: Color,
     pub accent: Color,
+    /// Dark ink color for text drawn on top of `accent` fills.
+    pub on_accent: Color,
     pub added: Color,
     pub added_bg: Color,
     pub removed: Color,
@@ -99,7 +97,7 @@ pub struct SyntaxPalette {
 impl SyntaxPalette {
     pub fn gruvbox_dark() -> Self {
         Self {
-            background: GRUVBOX_DARK_BG,
+            background: GRUVBOX_HARD_BG,
             foreground: GRUVBOX_LIGHT_FG,
             selection: GRUVBOX_SELECTION,
             comment: GRUVBOX_GRAY,
@@ -161,27 +159,28 @@ impl SyntaxPalette {
 }
 
 impl Theme {
-    pub fn matte_box() -> Self {
+    pub fn gruvbox_dark_hard() -> Self {
         Self {
-            background: NIGHT_BLACK,
-            background_alt: DARK_CHARCOAL,
-            border: SLATE_GRAY,
-            border_active: SAGE,
-            text: SAND,
-            muted: MIST_BLUE,
-            accent: SAGE,
-            added: MINT_GREEN,
-            added_bg: DARK_OLIVE,
-            removed: DUSTY_RED,
-            removed_bg: DARK_MAROON,
-            selected: CHARCOAL,
-            file_new: MINT_GREEN,
-            file_deleted: DUSTY_RED,
-            file_renamed: AMBER,
-            file_modified: SAGE,
-            line_number_fg: COOL_GRAY,
-            line_number_bg: DEEP_CHARCOAL,
-            context_bg: NIGHT_BLACK,
+            background: Color::Reset,
+            background_alt: GRUVBOX_PANEL_BG,
+            border: GRUVBOX_BG3,
+            border_active: GRUVBOX_BLUE,
+            text: GRUVBOX_LIGHT_FG,
+            muted: GRUVBOX_GRAY,
+            accent: GRUVBOX_BLUE,
+            on_accent: GRUVBOX_HARD_BG,
+            added: GRUVBOX_GREEN,
+            added_bg: GRUVBOX_ADDED_BG,
+            removed: GRUVBOX_RED,
+            removed_bg: GRUVBOX_REMOVED_BG,
+            selected: GRUVBOX_SELECTION,
+            file_new: GRUVBOX_GREEN,
+            file_deleted: GRUVBOX_RED,
+            file_renamed: GRUVBOX_YELLOW,
+            file_modified: GRUVBOX_BLUE,
+            line_number_fg: GRUVBOX_BG4,
+            line_number_bg: GRUVBOX_DARK_BG,
+            context_bg: Color::Reset,
             syntax: SyntaxPalette::gruvbox_dark(),
         }
     }
@@ -195,6 +194,7 @@ impl Theme {
             text: GITHUB_DARK_FG,
             muted: GITHUB_DARK_MUTED,
             accent: GITHUB_DARK_BLUE,
+            on_accent: NIGHT_BLACK,
             added: GITHUB_DARK_GREEN,
             added_bg: GITHUB_DARK_ADDED_BG,
             removed: GITHUB_DARK_RED,

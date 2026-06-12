@@ -6,12 +6,12 @@ use crate::theme::Theme;
 
 use super::RAIL_MARKER;
 use super::file_summary::{
-    format_file_stats, padding_before_stats, push_stat_spans, sidebar_file_label, stage_display,
-    stats_width, status_color,
+    file_icon, format_file_stats, padding_before_stats, push_stat_spans, sidebar_file_label,
+    stage_display, stats_width, status_color, status_glyph,
 };
 use super::text::{color_style, display_width, muted_line, wrap_line, wrap_styled_spans};
 
-const SIDEBAR_STAGE_GUTTER_WIDTH: usize = 8;
+const SIDEBAR_STAGE_GUTTER_WIDTH: usize = 6;
 const SIDEBAR_REVIEW_GUTTER_WIDTH: usize = 4;
 
 pub(crate) struct SidebarRowsInput<'a> {
@@ -200,7 +200,11 @@ fn render_file_entry(
         base_style
     };
     let status_style = color_style(status_color(file.status, theme), row_background);
-    let file_label = sidebar_file_label(file);
+    let file_label = format!(
+        "{} {}",
+        file_icon(file.display_path()),
+        sidebar_file_label(file)
+    );
     let stats = format_file_stats(file);
     let stats_width = stats_width(&stats);
     let gutter_width = sidebar_gutter_width(can_stage);
@@ -217,7 +221,7 @@ fn render_file_entry(
         line_prefix.push(Span::styled(stage_marker.checkbox, stage_marker.style));
         line_prefix.push(Span::styled(" ", base_style));
     }
-    line_prefix.push(Span::styled(file.status.marker().to_string(), status_style));
+    line_prefix.push(Span::styled(status_glyph(file.status), status_style));
     line_prefix.push(Span::styled(" ", base_style));
     let mut content_spans = vec![
         Span::styled(file_label, base_style),

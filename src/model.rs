@@ -140,18 +140,6 @@ pub enum FileStatus {
     Copied,
 }
 
-impl FileStatus {
-    pub fn marker(self) -> &'static str {
-        match self {
-            Self::Added => "A",
-            Self::Deleted => "D",
-            Self::Modified => "M",
-            Self::Renamed => "R",
-            Self::Copied => "C",
-        }
-    }
-}
-
 /// Staging state for a worktree file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStage {

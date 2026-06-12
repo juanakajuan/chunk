@@ -8,6 +8,8 @@ and mouse navigation, live worktree refresh, and file/hunk staging.
 
 - Rust 2024 toolchain
 - Git
+- A [Nerd Font](https://www.nerdfonts.com/) for the file-type, status, and
+  staging glyphs in the sidebar and bottom bar
 
 ## Usage
 
@@ -66,8 +68,8 @@ scrolls the diff in the diff pane.
 
 ## Themes
 
-The default theme is `matte_box`. Set `CHUNK_THEME=github-dark` at compile time
-to use the GitHub dark palette:
+The default theme is Gruvbox (dark, hard contrast). Set `CHUNK_THEME=github-dark`
+at compile time to use the GitHub dark palette instead:
 
 ```sh
 CHUNK_THEME=github-dark cargo run

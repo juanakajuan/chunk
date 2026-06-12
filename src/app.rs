@@ -261,7 +261,12 @@ impl App {
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
-        rows::keybind_bar_line(self.files_panel_visible, self.stage_keybind_hint(), theme)
+        rows::keybind_bar_line(
+            self.files_panel_visible,
+            self.can_stage(),
+            self.stage_keybind_hint(),
+            theme,
+        )
     }
 
     pub(crate) fn help_overlay_lines(
@@ -282,8 +287,8 @@ impl App {
         }
 
         match self.focus {
-            FocusPane::Sidebar if self.files_panel_visible => Some("[Space] stage file"),
-            FocusPane::Diff => Some("[Space] stage hunk"),
+            FocusPane::Sidebar if self.files_panel_visible => Some("stage file"),
+            FocusPane::Diff => Some("stage hunk"),
             FocusPane::Sidebar => None,
         }
     }
@@ -1306,7 +1311,7 @@ fn search_style_for_char(
 ) -> Style {
     match search_match_kind_at(index, matches, active_index) {
         Some(SearchMatchKind::Active) => base_style
-            .fg(theme.background)
+            .fg(theme.on_accent)
             .bg(theme.accent)
             .add_modifier(Modifier::BOLD),
         Some(SearchMatchKind::Inactive) => {

@@ -69,21 +69,69 @@ pub(super) fn file_status_suffix(status: FileStatus) -> &'static str {
     }
 }
 
+/// Nerd Font octicon glyph conveying the Git status of a file.
+pub(super) fn status_glyph(status: FileStatus) -> &'static str {
+    match status {
+        FileStatus::Added => "\u{f457}",    // diff-added
+        FileStatus::Deleted => "\u{f458}",  // diff-removed
+        FileStatus::Modified => "\u{f459}", // diff-modified
+        FileStatus::Renamed => "\u{f45a}",  // diff-renamed
+        FileStatus::Copied => "\u{f0c5}",   // copy
+    }
+}
+
+/// Nerd Font glyph hinting at a file's language or type from its path.
+pub(super) fn file_icon(path: &str) -> &'static str {
+    let name = basename(path);
+    let lowercased = name.to_ascii_lowercase();
+    if lowercased.ends_with(".lock") || lowercased == "cargo.lock" {
+        return "\u{f023}"; // lock
+    }
+
+    let extension = lowercased.rsplit_once('.').map(|(_, ext)| ext);
+    match extension {
+        Some("rs") => "\u{e7a8}",
+        Some("ts") => "\u{e628}",
+        Some("tsx" | "jsx") => "\u{e7ba}",
+        Some("js" | "mjs" | "cjs") => "\u{e74e}",
+        Some("json") => "\u{e60b}",
+        Some("py") => "\u{e606}",
+        Some("go") => "\u{e627}",
+        Some("rb") => "\u{e21e}",
+        Some("java") => "\u{e256}",
+        Some("c") => "\u{e61e}",
+        Some("h" | "hpp" | "hh") => "\u{f0fd}",
+        Some("cpp" | "cc" | "cxx") => "\u{e61d}",
+        Some("cs") => "\u{e648}",
+        Some("md" | "markdown") => "\u{e609}",
+        Some("html" | "htm") => "\u{e736}",
+        Some("css") => "\u{e749}",
+        Some("scss" | "sass") => "\u{e603}",
+        Some("vue") => "\u{fd42}",
+        Some("sh" | "bash" | "zsh") => "\u{e795}",
+        Some("toml" | "ini" | "cfg" | "conf") => "\u{f013}",
+        Some("yaml" | "yml") => "\u{e615}",
+        Some("txt") => "\u{f15c}",
+        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") => "\u{f1c5}",
+        _ => "\u{f15b}", // generic file
+    }
+}
+
 pub(super) fn stage_display(stage: FileStage, background: Color, theme: Theme) -> StageDisplay {
     match stage {
         FileStage::Unstaged => StageDisplay {
-            checkbox: "[ ]",
-            suffix: " [unstaged]",
+            checkbox: "\u{f10c}",
+            suffix: "  \u{f10c} unstaged",
             style: color_style(theme.muted, background),
         },
         FileStage::Staged => StageDisplay {
-            checkbox: "[x]",
-            suffix: " [staged]",
+            checkbox: "\u{f058}",
+            suffix: "  \u{f058} staged",
             style: color_style(theme.added, background).add_modifier(Modifier::BOLD),
         },
         FileStage::Mixed => StageDisplay {
-            checkbox: "[-]",
-            suffix: " [mixed]",
+            checkbox: "\u{f056}",
+            suffix: "  \u{f056} mixed",
             style: color_style(theme.accent, background).add_modifier(Modifier::BOLD),
         },
     }

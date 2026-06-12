@@ -98,27 +98,53 @@ pub(crate) fn search_status_lines(
 
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
+    can_stage: bool,
     stage_hint: Option<&'static str>,
     theme: Theme,
 ) -> Line<'static> {
-    let mut hints = vec![if files_panel_visible {
-        "[f] hide files"
-    } else {
-        "[f] show files"
-    }];
+    let background = theme.background;
+    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+    let separator_style = color_style(theme.border, background);
 
+    let mut hints: Vec<(&'static str, &'static str)> = vec![(
+        "f",
+        if files_panel_visible {
+            "hide files"
+        } else {
+            "show files"
+        },
+    )];
     if files_panel_visible {
-        hints.push("[Tab] switch focus");
+        hints.push(("Tab", "focus"));
     }
     if let Some(stage_hint) = stage_hint {
-        hints.push(stage_hint);
+        hints.push(("Space", stage_hint));
     }
-    hints.push("[/] search");
-    hints.push("[j/k] move");
-    hints.push("[?] help");
-    hints.push("[q/Ctrl-c] quit");
+    hints.push(("/", "search"));
+    hints.push(("j/k", "move"));
+    hints.push(("?", "help"));
+    hints.push(("q", "quit"));
 
-    Line::styled(hints.join("  |  "), Style::default().fg(theme.muted))
+    let mode_label = if can_stage { " DIFF " } else { " REVIEW " };
+    let mut spans = vec![
+        Span::styled(
+            mode_label,
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+        Span::styled("  ", label_style),
+    ];
+
+    for (index, (key, label)) in hints.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  \u{b7}  ", separator_style));
+        }
+        spans.push(Span::styled(*key, key_style));
+        spans.push(Span::styled(format!(" {label}"), label_style));
+    }
+
+    Line::from(spans)
 }
 
 pub(crate) fn help_overlay_lines(
