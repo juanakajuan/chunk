@@ -87,22 +87,16 @@ fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
 
 fn render_diff_scrollbar(frame: &mut Frame<'_>, scrollbar: DiffScrollbar, theme: Theme) {
     let thumb = scrollbar.thumb();
-    let area = scrollbar.area();
-    let track_style = color_style(theme.muted, theme.background);
-    let thumb_style = color_style(theme.accent, theme.background);
-    let lines = (0..area.height as usize)
-        .map(|row| {
-            let in_thumb = row >= thumb.start && row < thumb.start.saturating_add(thumb.len);
-            let (symbol, style) = if in_thumb {
-                ("█", thumb_style)
-            } else {
-                ("│", track_style)
-            };
-            Line::from(Span::styled(symbol, style))
-        })
-        .collect::<Vec<_>>();
-
-    frame.render_widget(Paragraph::new(lines), area);
+    render_scrollbar(
+        frame,
+        scrollbar.area(),
+        ScrollbarThumb {
+            start: thumb.start,
+            len: thumb.len,
+        },
+        theme.background,
+        theme,
+    );
 }
 
 fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -196,8 +190,18 @@ fn render_help_scrollbar(
     theme: Theme,
 ) {
     let thumb = scrollbar_thumb(area.height as usize, total_rows, visible_rows, scroll);
-    let track_style = color_style(theme.muted, theme.background_alt);
-    let thumb_style = color_style(theme.accent, theme.background_alt);
+    render_scrollbar(frame, area, thumb, theme.background_alt, theme);
+}
+
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    thumb: ScrollbarThumb,
+    background: Color,
+    theme: Theme,
+) {
+    let track_style = color_style(theme.muted, background);
+    let thumb_style = color_style(theme.accent, background);
     let lines = (0..area.height as usize)
         .map(|row| {
             let in_thumb = row >= thumb.start && row < thumb.start.saturating_add(thumb.len);

@@ -54,6 +54,14 @@ impl VerticalDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollKeyAction {
+    Line(VerticalDirection),
+    Page(VerticalDirection),
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SearchMatch {
     row: usize,
     start: usize,
@@ -960,35 +968,25 @@ impl App {
             return;
         }
 
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_help_overlay_by(VerticalDirection::Down, 1)
+        match scroll_key_action(key) {
+            Some(ScrollKeyAction::Line(direction)) => self.scroll_help_overlay_by(direction, 1),
+            Some(ScrollKeyAction::Page(direction)) => {
+                self.scroll_help_overlay_by(direction, HELP_OVERLAY_SCROLL_PAGE)
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll_help_overlay_by(VerticalDirection::Up, 1)
-            }
-            KeyCode::PageDown => {
-                self.scroll_help_overlay_by(VerticalDirection::Down, HELP_OVERLAY_SCROLL_PAGE)
-            }
-            KeyCode::PageUp => {
-                self.scroll_help_overlay_by(VerticalDirection::Up, HELP_OVERLAY_SCROLL_PAGE)
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_help_overlay_by(VerticalDirection::Down, HELP_OVERLAY_SCROLL_PAGE)
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_help_overlay_by(VerticalDirection::Up, HELP_OVERLAY_SCROLL_PAGE)
-            }
-            KeyCode::Home | KeyCode::Char('g') => self.help_overlay_scroll = 0,
-            KeyCode::End | KeyCode::Char('G') => self.help_overlay_scroll = usize::MAX,
-            _ => {}
+            Some(ScrollKeyAction::Top) => self.help_overlay_scroll = 0,
+            Some(ScrollKeyAction::Bottom) => self.help_overlay_scroll = usize::MAX,
+            None => {}
         }
     }
 
     fn handle_help_overlay_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.scroll_help_overlay_by(VerticalDirection::Down, 3),
-            MouseEventKind::ScrollUp => self.scroll_help_overlay_by(VerticalDirection::Up, 3),
+            MouseEventKind::ScrollDown => {
+                self.scroll_help_overlay_by(VerticalDirection::Down, MOUSE_WHEEL_STEP)
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_help_overlay_by(VerticalDirection::Up, MOUSE_WHEEL_STEP)
+            }
             _ => {}
         }
     }
@@ -1004,37 +1002,30 @@ impl App {
     }
 
     fn handle_command_output_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.command_output = None,
-            KeyCode::Char('q') if accepts_text_input(key) => self.command_output = None,
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_command_output_by(VerticalDirection::Down, 1)
+        if closes_command_output(key) {
+            self.command_output = None;
+            return;
+        }
+
+        match scroll_key_action(key) {
+            Some(ScrollKeyAction::Line(direction)) => self.scroll_command_output_by(direction, 1),
+            Some(ScrollKeyAction::Page(direction)) => {
+                self.scroll_command_output_by(direction, self.command_output_page())
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll_command_output_by(VerticalDirection::Up, 1)
-            }
-            KeyCode::PageDown => {
-                self.scroll_command_output_by(VerticalDirection::Down, self.command_output_page())
-            }
-            KeyCode::PageUp => {
-                self.scroll_command_output_by(VerticalDirection::Up, self.command_output_page())
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_command_output_by(VerticalDirection::Down, self.command_output_page())
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_command_output_by(VerticalDirection::Up, self.command_output_page())
-            }
-            KeyCode::Home | KeyCode::Char('g') => self.scroll_command_output_to_top(),
-            KeyCode::End | KeyCode::Char('G') => self.scroll_command_output_to_bottom(),
-            _ => {}
+            Some(ScrollKeyAction::Top) => self.scroll_command_output_to_top(),
+            Some(ScrollKeyAction::Bottom) => self.scroll_command_output_to_bottom(),
+            None => {}
         }
     }
 
     fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.scroll_command_output_by(VerticalDirection::Down, 3),
-            MouseEventKind::ScrollUp => self.scroll_command_output_by(VerticalDirection::Up, 3),
+            MouseEventKind::ScrollDown => {
+                self.scroll_command_output_by(VerticalDirection::Down, MOUSE_WHEEL_STEP)
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_command_output_by(VerticalDirection::Up, MOUSE_WHEEL_STEP)
+            }
             _ => {}
         }
     }
@@ -1648,6 +1639,28 @@ fn accepts_text_input(key: KeyEvent) -> bool {
 fn closes_help_overlay(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc
         || matches!(key.code, KeyCode::Char('?') | KeyCode::Char('q') if accepts_text_input(key))
+}
+
+fn closes_command_output(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc || matches!(key.code, KeyCode::Char('q') if accepts_text_input(key))
+}
+
+fn scroll_key_action(key: KeyEvent) -> Option<ScrollKeyAction> {
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => Some(ScrollKeyAction::Line(VerticalDirection::Down)),
+        KeyCode::Up | KeyCode::Char('k') => Some(ScrollKeyAction::Line(VerticalDirection::Up)),
+        KeyCode::PageDown => Some(ScrollKeyAction::Page(VerticalDirection::Down)),
+        KeyCode::PageUp => Some(ScrollKeyAction::Page(VerticalDirection::Up)),
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(ScrollKeyAction::Page(VerticalDirection::Down))
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(ScrollKeyAction::Page(VerticalDirection::Up))
+        }
+        KeyCode::Home | KeyCode::Char('g') => Some(ScrollKeyAction::Top),
+        KeyCode::End | KeyCode::Char('G') => Some(ScrollKeyAction::Bottom),
+        _ => None,
+    }
 }
 
 fn is_ctrl_c(key: KeyEvent) -> bool {

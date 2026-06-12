@@ -464,33 +464,45 @@ fn push_hunk_patch(patch: &mut String, hunk: &DiffHunk) {
 }
 
 fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {
-    let mut command = Command::new("git");
-    command.args(["apply", "--cached", "--whitespace=nowarn"]);
-    if reverse {
-        command.arg("--reverse");
-    }
-
-    let context = if reverse {
-        "git apply --cached --reverse failed"
-    } else {
-        "git apply --cached failed"
-    };
-    apply_patch_from_stdin(&mut command, patch, context)
+    apply_patch(patch, GitApplyTarget::Index, reverse)
 }
 
 fn apply_patch_to_worktree(patch: &str, reverse: bool) -> Result<()> {
+    apply_patch(patch, GitApplyTarget::Worktree, reverse)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitApplyTarget {
+    Index,
+    Worktree,
+}
+
+fn apply_patch(patch: &str, target: GitApplyTarget, reverse: bool) -> Result<()> {
+    let mut command = git_apply_command(target, reverse);
+    apply_patch_from_stdin(&mut command, patch, git_apply_context(target, reverse))
+}
+
+fn git_apply_command(target: GitApplyTarget, reverse: bool) -> Command {
     let mut command = Command::new("git");
-    command.args(["apply", "--whitespace=nowarn"]);
+    command.arg("apply");
+    if target == GitApplyTarget::Index {
+        command.arg("--cached");
+    }
+    command.arg("--whitespace=nowarn");
     if reverse {
         command.arg("--reverse");
     }
 
-    let context = if reverse {
-        "git apply --reverse failed"
-    } else {
-        "git apply failed"
-    };
-    apply_patch_from_stdin(&mut command, patch, context)
+    command
+}
+
+fn git_apply_context(target: GitApplyTarget, reverse: bool) -> &'static str {
+    match (target, reverse) {
+        (GitApplyTarget::Index, true) => "git apply --cached --reverse failed",
+        (GitApplyTarget::Index, false) => "git apply --cached failed",
+        (GitApplyTarget::Worktree, true) => "git apply --reverse failed",
+        (GitApplyTarget::Worktree, false) => "git apply failed",
+    }
 }
 
 fn apply_patch_from_stdin(command: &mut Command, patch: &str, context: &str) -> Result<()> {
