@@ -3,7 +3,7 @@
 //! All shelling out to Git lives here. Other modules work with parsed model
 //! values and should not need to know which Git commands produced them.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -103,6 +103,39 @@ pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Res
             apply_matching_hunks_to_index(file, hunk, HunkPatchSource::Staged)
         }
     }
+}
+
+pub(crate) fn discard_worktree_file(path: &str) -> Result<()> {
+    let untracked_paths = untracked_paths()?;
+    if is_untracked_path(&untracked_paths, path) {
+        return remove_untracked_file(path);
+    }
+
+    if !is_file_unstaged(path)? {
+        return Err(eyre!("no unstaged changes to discard in {path}"));
+    }
+
+    restore_worktree_file(path)
+}
+
+pub(crate) fn discard_worktree_hunk(file: &DiffFile, hunk_index: usize) -> Result<()> {
+    let hunk = file.hunks.get(hunk_index).ok_or_else(|| {
+        eyre!(
+            "hunk {} does not exist in {}",
+            hunk_index + 1,
+            file.display_path()
+        )
+    })?;
+    let untracked_paths = untracked_paths()?;
+
+    if is_untracked_path(&untracked_paths, file.display_path()) {
+        return Err(eyre!(
+            "cannot discard a single hunk from untracked file {}; discard the file from the sidebar",
+            file.display_path()
+        ));
+    }
+
+    discard_matching_hunks_from_worktree(file, hunk, &untracked_paths)
 }
 
 pub(crate) fn worktree_root() -> Result<PathBuf> {
@@ -268,6 +301,26 @@ fn apply_matching_hunks_to_index(
     apply_patch_to_index(&patch, source.reverse())
 }
 
+fn discard_matching_hunks_from_worktree(
+    file: &DiffFile,
+    selected_hunk: &DiffHunk,
+    untracked_paths: &[String],
+) -> Result<()> {
+    let source_changeset = load_unstaged_diff(untracked_paths)?;
+    let source_file = matching_file(&source_changeset.files, file)
+        .ok_or_else(|| eyre!("no unstaged hunk found for {}", file.display_path()))?;
+    let hunk_indices = overlapping_hunk_indices(source_file, selected_hunk);
+    if hunk_indices.is_empty() {
+        return Err(eyre!(
+            "no unstaged hunk overlaps selected hunk in {}",
+            file.display_path()
+        ));
+    }
+
+    let patch = build_hunk_patch(source_file, &hunk_indices);
+    apply_patch_to_worktree(&patch, true)
+}
+
 fn matching_file<'a>(files: &'a [DiffFile], target: &DiffFile) -> Option<&'a DiffFile> {
     files.iter().find(|file| same_file_identity(file, target))
 }
@@ -416,6 +469,31 @@ fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {
     if reverse {
         command.arg("--reverse");
     }
+
+    let context = if reverse {
+        "git apply --cached --reverse failed"
+    } else {
+        "git apply --cached failed"
+    };
+    apply_patch_from_stdin(&mut command, patch, context)
+}
+
+fn apply_patch_to_worktree(patch: &str, reverse: bool) -> Result<()> {
+    let mut command = Command::new("git");
+    command.args(["apply", "--whitespace=nowarn"]);
+    if reverse {
+        command.arg("--reverse");
+    }
+
+    let context = if reverse {
+        "git apply --reverse failed"
+    } else {
+        "git apply failed"
+    };
+    apply_patch_from_stdin(&mut command, patch, context)
+}
+
+fn apply_patch_from_stdin(command: &mut Command, patch: &str, context: &str) -> Result<()> {
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -429,11 +507,6 @@ fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {
     drop(stdin);
 
     let output = child.wait_with_output()?;
-    let context = if reverse {
-        "git apply --cached --reverse failed"
-    } else {
-        "git apply --cached failed"
-    };
     ensure_success(&output, context)
 }
 
@@ -694,8 +767,21 @@ fn ensure_success(output: &Output, context: &str) -> Result<()> {
         return Ok(());
     }
 
+    Err(eyre!("{}: {}", context, command_failure_text(output)))
+}
+
+fn command_failure_text(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(eyre!("{}: {}", context, stderr.trim()))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\n{stdout}"),
+        (false, true) => stderr.to_string(),
+        (true, false) => stdout.to_string(),
+        (true, true) => format!("exit status {}", output.status),
+    }
 }
 
 fn stdout_text(output: &Output) -> String {
@@ -720,6 +806,21 @@ fn unstage_file(path: &str) -> Result<()> {
         &format!("git restore --staged failed for {path}"),
     )
     .map(|_| ())
+}
+
+fn restore_worktree_file(path: &str) -> Result<()> {
+    checked_output(
+        Command::new("git").args(["restore", "--worktree", "--", path]),
+        &format!("git restore --worktree failed for {path}"),
+    )
+    .map(|_| ())
+}
+
+fn remove_untracked_file(path: &str) -> Result<()> {
+    let root = worktree_root()?;
+    let full_path = root.join(path);
+    fs::remove_file(&full_path)
+        .map_err(|error| eyre!("failed to remove untracked file {path}: {error}"))
 }
 
 fn is_file_staged(path: &str) -> Result<bool> {
@@ -865,6 +966,93 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn discard_hunk_reverts_only_selected_unstaged_hunk() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::write("sample.txt", numbered_lines()).unwrap();
+        run_git(["add", "sample.txt"]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("sample.txt", changed_numbered_lines()).unwrap();
+        let changeset = load_worktree_diff().unwrap();
+        let file = &changeset.files[0];
+        assert_eq!(file.hunks.len(), 2);
+
+        discard_worktree_hunk(file, 0).unwrap();
+
+        let unstaged = git_output(["diff", "--", "sample.txt"]);
+        assert!(!unstaged.contains("line two"));
+        assert!(unstaged.contains("line eighteen"));
+        let content = fs::read_to_string("sample.txt").unwrap();
+        assert!(content.contains("line 2\n"));
+        assert!(content.contains("line eighteen\n"));
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discard_file_reverts_unstaged_changes_and_preserves_index() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::write("sample.txt", numbered_lines()).unwrap();
+        run_git(["add", "sample.txt"]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("sample.txt", line_two_changed()).unwrap();
+        run_git(["add", "sample.txt"]);
+        fs::write("sample.txt", line_two_and_eighteen_changed()).unwrap();
+
+        discard_worktree_file("sample.txt").unwrap();
+
+        let cached = git_output(["diff", "--cached", "--", "sample.txt"]);
+        assert!(cached.contains("line two"));
+        assert!(!cached.contains("line eighteen"));
+        let unstaged = git_output(["diff", "--", "sample.txt"]);
+        assert!(!unstaged.contains("line two"));
+        assert!(!unstaged.contains("line eighteen"));
+        let content = fs::read_to_string("sample.txt").unwrap();
+        assert!(content.contains("line two\n"));
+        assert!(content.contains("line 18\n"));
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discard_file_removes_untracked_file() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::write("sample.txt", "base\n").unwrap();
+        run_git(["add", "sample.txt"]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("new.txt", "untracked\n").unwrap();
+
+        discard_worktree_file("new.txt").unwrap();
+
+        assert!(!Path::new("new.txt").exists());
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     struct CurrentDirGuard {
         previous: PathBuf,
     }
@@ -915,6 +1103,23 @@ mod tests {
         lines[1] = "line two".to_string();
         lines[17] = "line eighteen".to_string();
         format!("{}\n", lines.join("\n"))
+    }
+
+    fn line_two_changed() -> String {
+        let mut lines = numbered_lines_vec();
+        lines[1] = "line two".to_string();
+        format!("{}\n", lines.join("\n"))
+    }
+
+    fn line_two_and_eighteen_changed() -> String {
+        let mut lines = numbered_lines_vec();
+        lines[1] = "line two".to_string();
+        lines[17] = "line eighteen".to_string();
+        format!("{}\n", lines.join("\n"))
+    }
+
+    fn numbered_lines_vec() -> Vec<String> {
+        (1..=20).map(|line| format!("line {line}")).collect()
     }
 
     fn temp_root() -> PathBuf {

@@ -77,6 +77,10 @@ impl ReviewSource {
         matches!(self, Self::Worktree(_))
     }
 
+    pub(crate) fn can_discard(&self) -> bool {
+        matches!(self, Self::Worktree(_))
+    }
+
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
         match self {
             Self::Worktree(source) => source.live_watch_root().map(Some),
@@ -112,6 +116,24 @@ impl ReviewSource {
     ) -> Result<Option<Changeset>> {
         match self {
             Self::Worktree(source) => source.toggle_staging_for_hunk(file, hunk_index).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn discard_file(&self, path: &str) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.discard_file(path).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn discard_hunk(
+        &self,
+        file: &DiffFile,
+        hunk_index: usize,
+    ) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.discard_hunk(file, hunk_index).map(Some),
             Self::PullRequest(_) => Ok(None),
         }
     }
@@ -164,6 +186,16 @@ impl WorktreeReviewSource {
 
     fn toggle_staging_for_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
         git::toggle_staging_for_hunk(file, hunk_index)?;
+        git::load_worktree_diff()
+    }
+
+    fn discard_file(self, path: &str) -> Result<Changeset> {
+        git::discard_worktree_file(path)?;
+        git::load_worktree_diff()
+    }
+
+    fn discard_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
+        git::discard_worktree_hunk(file, hunk_index)?;
         git::load_worktree_diff()
     }
 

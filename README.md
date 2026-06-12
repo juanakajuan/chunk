@@ -2,7 +2,8 @@
 
 `chunk` is a compact terminal diff reviewer for Git repositories. It renders a
 file list and a syntax-highlighted unified diff in the terminal, with keyboard
-and mouse navigation, live worktree refresh, and file/hunk staging.
+and mouse navigation, live worktree refresh, file/hunk staging, and guarded
+worktree discard actions.
 
 ## Requirements
 
@@ -36,7 +37,7 @@ cargo run -- pr main
 
 When no base is passed, `pr` tries `origin/HEAD`, then `main`, then `master`.
 PR mode compares the merge-base of the base ref and `HEAD` against `HEAD`.
-It does not live-refresh or stage files.
+It does not live-refresh, stage files, or discard worktree changes.
 
 ## Controls
 
@@ -58,6 +59,8 @@ It does not live-refresh or stage files.
   `Esc` or `q`
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
+- `d`: in `diff` mode, discard unstaged worktree changes for the selected file
+  or hunk after confirmation; untracked files can be discarded from the file list
 - `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
   mode
 - `q` / `Ctrl-c`: quit
@@ -87,7 +90,7 @@ Code map:
 
 - `src/main.rs`: CLI parsing and review source selection
 - `src/editor.rs`: external editor command resolution
-- `src/review_source.rs`: worktree vs PR behavior, reloads, staging capability
+- `src/review_source.rs`: worktree vs PR behavior, reloads, mutation capability
 - `src/git.rs`: Git command boundary and source snapshot loading
 - `src/patch.rs`: unified diff parser
 - `src/model.rs`: parsed diff data structures

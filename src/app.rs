@@ -68,6 +68,37 @@ struct SearchState {
     scroll_pending: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscardConfirmation {
+    target: DiscardTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscardTarget {
+    File {
+        file_index: usize,
+        path: String,
+    },
+    Hunk {
+        file_index: usize,
+        hunk_index: usize,
+        path: String,
+    },
+}
+
+impl DiscardConfirmation {
+    fn prompt(&self) -> String {
+        match &self.target {
+            DiscardTarget::File { path, .. } => {
+                format!("Discard worktree changes in {path}?")
+            }
+            DiscardTarget::Hunk {
+                hunk_index, path, ..
+            } => format!("Discard hunk {} in {path}?", hunk_index + 1),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct App {
     /// Review source behavior for this session.
@@ -86,6 +117,8 @@ pub(crate) struct App {
     files_panel_visible: bool,
     /// Whether the in-app keymap help overlay is open.
     help_overlay_visible: bool,
+    /// Pending destructive worktree discard request.
+    discard_confirmation: Option<DiscardConfirmation>,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
     /// Rendered live-status rows above the diff rows in the diff pane.
@@ -122,6 +155,7 @@ impl App {
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             help_overlay_visible: false,
+            discard_confirmation: None,
             diff_scroll: 0,
             diff_status_rows: 0,
             sidebar_scroll: 0,
@@ -196,6 +230,7 @@ impl App {
     ) -> DiffPaneRows {
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+        lines.extend(self.discard_status_lines(content_width, theme));
 
         let provisional_search_lines =
             rows::search_status_lines(self.search.status(), content_width, theme);
@@ -265,6 +300,7 @@ impl App {
             self.files_panel_visible,
             self.can_stage(),
             self.stage_keybind_hint(),
+            self.discard_keybind_hint(),
             theme,
         )
     }
@@ -274,11 +310,15 @@ impl App {
         content_width: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        rows::help_overlay_lines(self.can_stage(), content_width, theme)
+        rows::help_overlay_lines(self.can_stage(), self.can_discard(), content_width, theme)
     }
 
     fn can_stage(&self) -> bool {
         self.source.can_stage()
+    }
+
+    fn can_discard(&self) -> bool {
+        self.source.can_discard()
     }
 
     fn stage_keybind_hint(&self) -> Option<&'static str> {
@@ -291,6 +331,26 @@ impl App {
             FocusPane::Diff => Some("stage hunk"),
             FocusPane::Sidebar => None,
         }
+    }
+
+    fn discard_keybind_hint(&self) -> Option<&'static str> {
+        if !self.can_discard() {
+            return None;
+        }
+
+        match self.focus {
+            FocusPane::Sidebar if self.files_panel_visible => Some("discard file"),
+            FocusPane::Diff => Some("discard hunk"),
+            FocusPane::Sidebar => None,
+        }
+    }
+
+    fn discard_status_lines(&self, content_width: usize, theme: Theme) -> Vec<Line<'static>> {
+        let prompt = self
+            .discard_confirmation
+            .as_ref()
+            .map(DiscardConfirmation::prompt);
+        rows::discard_status_lines(prompt.as_deref(), content_width, theme)
     }
 
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
@@ -636,6 +696,7 @@ impl App {
 
         self.changeset = changeset;
         self.live_error = None;
+        self.discard_confirmation = None;
         self.selected_file_index = selected_file_index;
         self.selected_hunk_index = reloaded_hunk_index(
             self.changeset.files.get(selected_file_index),
@@ -662,6 +723,11 @@ impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         if is_ctrl_c(key) {
             return Ok(false);
+        }
+
+        if self.discard_confirmation.is_some() {
+            self.handle_discard_confirmation_key(key);
+            return Ok(true);
         }
 
         if self.help_overlay_visible {
@@ -697,6 +763,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
 
             KeyCode::Char(' ') => self.toggle_selected_staging(),
+            KeyCode::Char('d') if accepts_text_input(key) => self.request_selected_discard(),
             KeyCode::Char('e') => self.queue_selected_file_editor_request(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
@@ -715,7 +782,7 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.help_overlay_visible {
+        if self.help_overlay_visible || self.discard_confirmation.is_some() {
             return;
         }
 
@@ -738,6 +805,16 @@ impl App {
     fn handle_help_overlay_key(&mut self, key: KeyEvent) {
         if closes_help_overlay(key) {
             self.help_overlay_visible = false;
+        }
+    }
+
+    fn handle_discard_confirmation_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.execute_pending_discard(),
+            KeyCode::Char('y') if accepts_text_input(key) => self.execute_pending_discard(),
+            KeyCode::Esc => self.discard_confirmation = None,
+            KeyCode::Char('n') if accepts_text_input(key) => self.discard_confirmation = None,
+            _ => {}
         }
     }
 
@@ -1058,6 +1135,101 @@ impl App {
         let index = self.selected_hunk_index?;
 
         (index < file.hunks.len()).then_some(index)
+    }
+
+    fn request_selected_discard(&mut self) {
+        if !self.can_discard() {
+            return;
+        }
+
+        match self.focus {
+            FocusPane::Sidebar if self.files_panel_visible => self.request_selected_file_discard(),
+            FocusPane::Diff => self.request_selected_hunk_discard(),
+            FocusPane::Sidebar => {}
+        }
+    }
+
+    fn request_selected_file_discard(&mut self) {
+        let Some(file) = self.selected_file() else {
+            self.live_error = Some("no selected file to discard".to_string());
+            return;
+        };
+        let path = file.display_path().to_string();
+
+        self.live_error = None;
+        self.discard_confirmation = Some(DiscardConfirmation {
+            target: DiscardTarget::File {
+                file_index: self.selected_file_index,
+                path,
+            },
+        });
+    }
+
+    fn request_selected_hunk_discard(&mut self) {
+        let Some(hunk_index) = self.focused_hunk_index() else {
+            self.live_error = Some("no selected hunk to discard".to_string());
+            return;
+        };
+        let Some(file) = self.selected_file() else {
+            self.live_error = Some("no selected file to discard".to_string());
+            return;
+        };
+        let path = file.display_path().to_string();
+
+        self.live_error = None;
+        self.discard_confirmation = Some(DiscardConfirmation {
+            target: DiscardTarget::Hunk {
+                file_index: self.selected_file_index,
+                hunk_index,
+                path,
+            },
+        });
+    }
+
+    fn execute_pending_discard(&mut self) {
+        let Some(confirmation) = self.discard_confirmation.take() else {
+            return;
+        };
+
+        let result = match confirmation.target {
+            DiscardTarget::File { file_index, path } => {
+                if self.confirmed_file(file_index, &path).is_none() {
+                    return;
+                }
+                self.source.discard_file(&path)
+            }
+            DiscardTarget::Hunk {
+                file_index,
+                hunk_index,
+                path,
+            } => {
+                let Some(file) = self.confirmed_file(file_index, &path) else {
+                    return;
+                };
+                self.source.discard_hunk(&file, hunk_index)
+            }
+        };
+
+        match result {
+            Ok(Some(reloaded_changeset)) => self.apply_reloaded_changeset(reloaded_changeset, true),
+            Ok(None) => {}
+            Err(error) => self.live_error = Some(format!("discard failed: {error}")),
+        }
+    }
+
+    fn confirmed_file(&mut self, file_index: usize, path: &str) -> Option<DiffFile> {
+        let Some(file) = self.changeset.files.get(file_index).cloned() else {
+            self.live_error = Some("discard failed: selected file no longer exists".to_string());
+            return None;
+        };
+
+        if file.display_path() != path {
+            self.live_error =
+                Some("discard failed: selected file changed before confirmation".to_string());
+            return None;
+        }
+
+        Some(file)
     }
 
     fn queue_selected_file_editor_request(&mut self) {
@@ -1813,6 +1985,26 @@ mod tests {
 
         assert!(keep_running);
         assert_eq!(app.live_error.as_deref(), Some("no selected hunk to stage"));
+    }
+
+    #[test]
+    fn discard_key_requires_confirmation() {
+        let mut app = app_with(changeset_with_one_file());
+        app.focus = FocusPane::Sidebar;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(
+            app.discard_confirmation.as_ref().map(|confirmation| &confirmation.target),
+            Some(DiscardTarget::File { path, .. }) if path == "sample.txt"
+        ));
+        assert!(app.live_error.is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.discard_confirmation.is_none());
     }
 
     #[test]

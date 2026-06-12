@@ -51,6 +51,24 @@ pub(crate) fn live_status_lines(
     )
 }
 
+pub(crate) fn discard_status_lines(
+    prompt: Option<&str>,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Some(prompt) = prompt else {
+        return Vec::new();
+    };
+
+    wrap_line(
+        Line::styled(
+            format!("! {prompt}  y/Enter confirm  Esc/n cancel"),
+            color_style(theme.removed, theme.background),
+        ),
+        content_width,
+    )
+}
+
 pub(crate) enum SearchStatus<'a> {
     Prompt {
         input: &'a str,
@@ -100,6 +118,7 @@ pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
     can_stage: bool,
     stage_hint: Option<&'static str>,
+    discard_hint: Option<&'static str>,
     theme: Theme,
 ) -> Line<'static> {
     let background = theme.background;
@@ -120,6 +139,9 @@ pub(crate) fn keybind_bar_line(
     }
     if let Some(stage_hint) = stage_hint {
         hints.push(("Space", stage_hint));
+    }
+    if let Some(discard_hint) = discard_hint {
+        hints.push(("d", discard_hint));
     }
     hints.push(("/", "search"));
     hints.push(("j/k", "move"));
@@ -149,6 +171,7 @@ pub(crate) fn keybind_bar_line(
 
 pub(crate) fn help_overlay_lines(
     can_stage: bool,
+    can_discard: bool,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
@@ -288,16 +311,33 @@ pub(crate) fn help_overlay_lines(
     );
 
     push_help_section(&mut lines, "Worktree-only", theme);
-    if can_stage {
-        push_help_line(
-            &mut lines,
-            &[
-                HelpSegment::command("Space"),
-                HelpSegment::text(" stage/unstage focused file or hunk"),
-            ],
-            content_width,
-            theme,
-        );
+    if can_stage || can_discard {
+        if can_stage {
+            push_help_line(
+                &mut lines,
+                &[
+                    HelpSegment::command("Space"),
+                    HelpSegment::text(" stage/unstage focused file or hunk"),
+                ],
+                content_width,
+                theme,
+            );
+        }
+        if can_discard {
+            push_help_line(
+                &mut lines,
+                &[
+                    HelpSegment::command("d"),
+                    HelpSegment::text(" discard focused file or hunk, "),
+                    HelpSegment::command("y"),
+                    HelpSegment::text("/"),
+                    HelpSegment::command("Enter"),
+                    HelpSegment::text(" confirm"),
+                ],
+                content_width,
+                theme,
+            );
+        }
         push_help_line(
             &mut lines,
             &[
@@ -311,7 +351,7 @@ pub(crate) fn help_overlay_lines(
         push_help_line(
             &mut lines,
             &[HelpSegment::muted(
-                "Staging and editor actions unavailable in PR mode",
+                "Worktree actions unavailable in PR mode",
             )],
             content_width,
             theme,
@@ -414,15 +454,17 @@ mod tests {
         let pr_help = help_text(false);
 
         assert!(worktree_help.contains("Space stage/unstage focused file or hunk"));
+        assert!(worktree_help.contains("d discard focused file or hunk"));
         assert!(worktree_help.contains("e open selected file in $EDITOR"));
-        assert!(pr_help.contains("Staging and editor actions unavailable in PR mode"));
+        assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
+        assert!(!pr_help.contains("d discard focused file or hunk"));
     }
 
     #[test]
     fn help_overlay_styles_command_tokens_for_contrast() {
         let theme = Theme::github_dark();
-        let lines = help_overlay_lines(true, 80, theme);
+        let lines = help_overlay_lines(true, true, 80, theme);
 
         let command_span = find_span(&lines, "?").expect("command span should render");
         assert_eq!(command_span.style.fg, Some(theme.accent));
@@ -435,7 +477,7 @@ mod tests {
     }
 
     fn help_text(can_stage: bool) -> String {
-        help_overlay_lines(can_stage, 80, Theme::github_dark())
+        help_overlay_lines(can_stage, can_stage, 80, Theme::github_dark())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
