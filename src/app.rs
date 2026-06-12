@@ -136,6 +136,8 @@ pub(crate) struct App {
     custom_command_request: Option<CustomCommandBinding>,
     /// Custom command currently running while runtime waits for captured output.
     custom_command_running: Option<CustomCommandBinding>,
+    /// Index into the running custom command spinner animation.
+    custom_command_spinner_frame: usize,
     /// Completed custom command output currently shown in the diff pane.
     command_output: Option<CommandOutputState>,
     /// Pending destructive worktree discard request.
@@ -185,6 +187,7 @@ impl App {
             custom_commands: config.commands,
             custom_command_request: None,
             custom_command_running: None,
+            custom_command_spinner_frame: 0,
             command_output: None,
             discard_confirmation: None,
             diff_scroll: 0,
@@ -277,6 +280,7 @@ impl App {
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
         lines.extend(rows::custom_command_running_lines(
             self.custom_command_running.as_ref(),
+            self.custom_command_spinner_frame,
             content_width,
             theme,
         ));
@@ -773,12 +777,20 @@ impl App {
         self.live_error = None;
         self.focus = FocusPane::Diff;
         self.custom_command_running = Some(command.clone());
+        self.custom_command_spinner_frame = 0;
+    }
+
+    pub(crate) fn advance_custom_command_spinner(&mut self) {
+        if self.custom_command_running.is_some() {
+            self.custom_command_spinner_frame = self.custom_command_spinner_frame.wrapping_add(1);
+        }
     }
 
     pub(crate) fn set_custom_command_result(&mut self, result: CustomCommandResult) {
         self.live_error = None;
         self.focus = FocusPane::Diff;
         self.custom_command_running = None;
+        self.custom_command_spinner_frame = 0;
         self.command_output = Some(CommandOutputState {
             result,
             scroll: 0,
@@ -834,6 +846,10 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.custom_command_running.is_some() {
+            return Ok(true);
+        }
+
         if is_ctrl_c(key) {
             return Ok(false);
         }
@@ -904,6 +920,10 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.custom_command_running.is_some() {
+            return;
+        }
+
         if self.help_overlay_visible {
             self.handle_help_overlay_mouse(mouse);
             return;
@@ -2428,7 +2448,20 @@ mod tests {
         let running_pane = render_diff_pane(&mut app, Theme::github_dark());
         let running_text = pane_text(&running_pane);
 
-        assert!(running_text.contains("Running command: commit and push"));
+        assert!(running_text.contains("⠋ Running command: commit and push"));
+
+        app.advance_custom_command_spinner();
+        let next_running_pane = render_diff_pane(&mut app, Theme::github_dark());
+        let next_running_text = pane_text(&next_running_pane);
+
+        assert!(next_running_text.contains("⠙ Running command: commit and push"));
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(keep_running);
+        assert!(app.custom_command_running.is_some());
 
         app.set_custom_command_result(CustomCommandResult::not_started(&command, None, "failed"));
         let output_pane = render_diff_pane(&mut app, Theme::github_dark());

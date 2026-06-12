@@ -5,7 +5,8 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
@@ -38,6 +39,12 @@ struct WorktreeWatcher {
 struct DrainedWorktreeEvents {
     changed: bool,
     error: Option<notify::Error>,
+}
+
+struct CustomCommandTask {
+    command: CustomCommandBinding,
+    result: Receiver<CustomCommandResult>,
+    worker: JoinHandle<()>,
 }
 
 impl WorktreeWatcher {
@@ -98,8 +105,11 @@ pub(crate) fn run(mut app: App) -> Result<()> {
 fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
     let watcher = start_live_worktree_watcher(app);
     let mut pending_reload_at: Option<Instant> = None;
+    let mut custom_command_task: Option<CustomCommandTask> = None;
 
     loop {
+        finish_custom_command_if_ready(app, &mut custom_command_task);
+        app.advance_custom_command_spinner();
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         drain_live_worktree_events(watcher.as_ref(), app, &mut pending_reload_at);
@@ -112,7 +122,9 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
         }
 
         match event::read()? {
-            Event::Key(key) if !handle_key_event(terminal, app, key)? => break,
+            Event::Key(key) if !handle_key_event(terminal, app, key, &mut custom_command_task)? => {
+                break;
+            }
             Event::Key(_) => {}
             Event::Mouse(mouse) => app.handle_mouse(mouse),
             _ => {}
@@ -122,7 +134,12 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn handle_key_event(terminal: &mut TuiTerminal, app: &mut App, key: KeyEvent) -> Result<bool> {
+fn handle_key_event(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    key: KeyEvent,
+    custom_command_task: &mut Option<CustomCommandTask>,
+) -> Result<bool> {
     if !app.handle_key(key)? {
         return Ok(false);
     }
@@ -132,9 +149,7 @@ fn handle_key_event(terminal: &mut TuiTerminal, app: &mut App, key: KeyEvent) ->
     }
 
     if let Some(command) = app.take_custom_command_request() {
-        app.set_custom_command_running(&command);
-        terminal.draw(|frame| ui::draw(frame, app))?;
-        run_requested_custom_command(app, &command);
+        start_requested_custom_command(terminal, app, command, custom_command_task)?;
     }
 
     Ok(true)
@@ -174,8 +189,59 @@ fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<Op
     }
 }
 
-fn run_requested_custom_command(app: &mut App, command: &CustomCommandBinding) {
-    let result = run_custom_command(command);
+fn start_requested_custom_command(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    command: CustomCommandBinding,
+    custom_command_task: &mut Option<CustomCommandTask>,
+) -> Result<()> {
+    if custom_command_task.is_some() {
+        return Ok(());
+    }
+
+    app.set_custom_command_running(&command);
+    terminal.draw(|frame| ui::draw(frame, app))?;
+    *custom_command_task = Some(spawn_custom_command_task(command));
+    Ok(())
+}
+
+fn spawn_custom_command_task(command: CustomCommandBinding) -> CustomCommandTask {
+    let (sender, result) = mpsc::channel();
+    let worker_command = command.clone();
+    let worker = thread::spawn(move || {
+        let command_result = run_custom_command(&worker_command);
+        let _ = sender.send(command_result);
+    });
+
+    CustomCommandTask {
+        command,
+        result,
+        worker,
+    }
+}
+
+fn finish_custom_command_if_ready(
+    app: &mut App,
+    custom_command_task: &mut Option<CustomCommandTask>,
+) {
+    let Some(task) = custom_command_task.as_ref() else {
+        return;
+    };
+
+    let result = match task.result.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Disconnected) => CustomCommandResult::not_started(
+            &task.command,
+            None,
+            "command runner stopped before reporting a result",
+        ),
+    };
+
+    let task = custom_command_task
+        .take()
+        .expect("completed custom command task should still be stored");
+    let _ = task.worker.join();
     app.set_custom_command_result(result);
     app.reload_review_source(true);
 }

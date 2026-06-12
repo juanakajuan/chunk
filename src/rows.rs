@@ -24,6 +24,8 @@ pub(crate) use sidebar::{sidebar_row_counts, sidebar_rows};
 use text::{color_style, muted_line, wrap_line};
 
 pub(crate) const DIFF_PREFETCH_ROWS: usize = 120;
+const CUSTOM_COMMAND_SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const RAIL_MARKER: &str = "▌";
 
 pub(crate) fn no_diff_lines(
@@ -72,6 +74,7 @@ pub(crate) fn discard_status_lines(
 
 pub(crate) fn custom_command_running_lines(
     command: Option<&CustomCommandBinding>,
+    spinner_frame: usize,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
@@ -81,7 +84,11 @@ pub(crate) fn custom_command_running_lines(
 
     wrap_line(
         Line::styled(
-            format!("Running command: {}", command.label()),
+            format!(
+                "{} Running command: {}",
+                CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()],
+                command.label()
+            ),
             color_style(theme.accent, theme.background),
         ),
         content_width,
