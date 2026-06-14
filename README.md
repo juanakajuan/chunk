@@ -69,7 +69,8 @@ It does not live-refresh, stage files, or discard worktree changes.
 
 Mouse hover changes focus. Click a file to select it, or click a hunk in the
 diff pane to select it. Wheel scrolling moves through files in the sidebar and
-scrolls the diff in the diff pane.
+scrolls the diff in the diff pane. Drag visible text to copy the selected text
+to the clipboard.
 
 In the command output pane, use `j` / `k` or the mouse wheel to scroll,
 `PageDown` / `PageUp` to page, `g` / `G` to jump, and `Esc` / `q` to return to

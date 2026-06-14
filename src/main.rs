@@ -4,6 +4,7 @@
 //! diff source, then hand the resulting changeset to the terminal app.
 
 mod app;
+mod clipboard;
 mod config;
 mod custom_command;
 mod editor;
@@ -13,6 +14,7 @@ mod patch;
 mod review_source;
 mod rows;
 mod runtime;
+mod selection;
 mod syntax;
 mod theme;
 mod ui;

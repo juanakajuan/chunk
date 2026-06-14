@@ -20,6 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::App;
+use crate::clipboard;
 use crate::custom_command::{self, CustomCommandBinding, CustomCommandResult};
 use crate::editor::{EditorCommand, EditorRequest};
 use crate::git;
@@ -126,7 +127,10 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
                 break;
             }
             Event::Key(_) => {}
-            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            Event::Mouse(mouse) => {
+                app.handle_mouse(mouse);
+                write_clipboard_request(app);
+            }
             _ => {}
         }
     }
@@ -153,6 +157,16 @@ fn handle_key_event(
     }
 
     Ok(true)
+}
+
+fn write_clipboard_request(app: &mut App) {
+    let Some(text) = app.take_clipboard_request() else {
+        return;
+    };
+
+    if let Err(error) = clipboard::write_text(&text) {
+        app.set_live_error(format!("copy failed: {error}"));
+    }
 }
 
 fn open_requested_editor(

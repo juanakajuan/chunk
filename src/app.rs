@@ -19,6 +19,7 @@ use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile, DiffHunk};
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
+use crate::selection::TextSelection;
 use crate::theme::Theme;
 use crate::viewport::{
     DiffLayoutMetrics, DiffLayoutRequest, DiffRenderRequest, DiffScrollbar, DiffScrollbarDrag,
@@ -59,6 +60,12 @@ enum ScrollKeyAction {
     Page(VerticalDirection),
     Top,
     Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingLeftClick {
+    Sidebar { index: usize },
+    Diff { hunk_index: Option<usize> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +165,10 @@ pub(crate) struct App {
     sidebar_scroll: usize,
     /// Rendered viewport geometry, row mapping, and render caches.
     viewport: RenderedViewport,
+    /// Visible text rows and active drag-to-copy selection.
+    text_selection: TextSelection,
+    /// Deferred plain click target, cancelled if the press becomes a drag.
+    pending_left_click: Option<PendingLeftClick>,
     /// Active mouse drag against the rendered diff scrollbar.
     diff_scrollbar_drag: Option<DiffScrollbarDrag>,
     /// Deferred request for runtime to open an external editor safely.
@@ -202,6 +213,8 @@ impl App {
             diff_status_rows: 0,
             sidebar_scroll: 0,
             viewport: RenderedViewport::new(file_count),
+            text_selection: TextSelection::default(),
+            pending_left_click: None,
             diff_scrollbar_drag: None,
             editor_request: None,
             search: SearchState::default(),
@@ -210,6 +223,7 @@ impl App {
 
     pub(crate) fn begin_render_frame(&mut self) {
         self.viewport.begin_frame();
+        self.text_selection.begin_frame();
     }
 
     pub(crate) fn files_panel_visible(&self) -> bool {
@@ -270,7 +284,13 @@ impl App {
                 .record_sidebar_rows(record.index, record.row_count);
         }
 
-        rendered_rows.lines
+        self.text_selection.decorate_visible_lines(
+            pane_text_area(area, content_width, visible_height),
+            rendered_rows.lines,
+            0,
+            visible_height,
+            theme,
+        )
     }
 
     pub(crate) fn diff_pane_rows(
@@ -350,11 +370,31 @@ impl App {
             total_diff_rows,
         ));
 
+        let lines = self.text_selection.decorate_visible_lines(
+            pane_text_area(area, content_width, visible_height),
+            lines,
+            0,
+            visible_height,
+            theme,
+        );
+
         DiffPaneRows {
             title,
             lines,
             scrollbar: self.viewport.diff_scrollbar().cloned(),
         }
+    }
+
+    pub(crate) fn selectable_lines(
+        &mut self,
+        area: Rect,
+        lines: Vec<Line<'static>>,
+        line_scroll: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        self.text_selection
+            .decorate_visible_lines(area, lines, line_scroll, visible_height, theme)
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
@@ -699,14 +739,23 @@ impl App {
         output.rendered_row_count = all_lines.len();
         output.visible_height = visible_height;
         clamp_command_output_scroll(output);
+        let scroll = output.scroll;
+        let lines = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(visible_height)
+            .collect();
+        let lines = self.text_selection.decorate_visible_lines(
+            pane_text_area(area, content_width, visible_height),
+            lines,
+            0,
+            visible_height,
+            theme,
+        );
 
         DiffPaneRows {
             title,
-            lines: all_lines
-                .into_iter()
-                .skip(output.scroll)
-                .take(visible_height)
-                .collect(),
+            lines,
             scrollbar: None,
         }
     }
@@ -781,9 +830,14 @@ impl App {
         self.custom_command_request.take()
     }
 
+    pub(crate) fn take_clipboard_request(&mut self) -> Option<String> {
+        self.text_selection.take_clipboard_request()
+    }
+
     pub(crate) fn set_custom_command_running(&mut self, command: &CustomCommandBinding) {
         self.live_error = None;
         self.focus = FocusPane::Diff;
+        self.text_selection.clear();
         self.custom_command_running = Some(command.clone());
         self.custom_command_spinner_frame = 0;
     }
@@ -797,6 +851,7 @@ impl App {
     pub(crate) fn set_custom_command_result(&mut self, result: CustomCommandResult) {
         self.live_error = None;
         self.focus = FocusPane::Diff;
+        self.text_selection.clear();
         self.custom_command_running = None;
         self.custom_command_spinner_frame = 0;
         self.command_output = Some(CommandOutputState {
@@ -830,6 +885,7 @@ impl App {
         self.changeset = changeset;
         self.live_error = None;
         self.discard_confirmation = None;
+        self.text_selection.clear();
         self.selected_file_index = selected_file_index;
         self.selected_hunk_index = reloaded_hunk_index(
             self.changeset.files.get(selected_file_index),
@@ -850,6 +906,8 @@ impl App {
     fn clear_render_caches(&mut self) {
         self.viewport
             .clear_render_caches(self.changeset.files.len());
+        self.text_selection.clear();
+        self.pending_left_click = None;
         self.diff_scrollbar_drag = None;
     }
 
@@ -861,6 +919,8 @@ impl App {
         if is_ctrl_c(key) {
             return Ok(false);
         }
+
+        self.text_selection.clear();
 
         if self.command_output.is_some() {
             self.handle_command_output_key(key);
@@ -932,6 +992,9 @@ impl App {
             return;
         }
 
+        let column = mouse.column;
+        let row = mouse.row;
+
         if self.help_overlay_visible {
             self.handle_help_overlay_mouse(mouse);
             return;
@@ -946,15 +1009,16 @@ impl App {
             return;
         }
 
-        let column = mouse.column;
-        let row = mouse.row;
-
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(column, row),
-            MouseEventKind::Drag(MouseButton::Left) => self.handle_left_drag(row),
-            MouseEventKind::Up(MouseButton::Left) => self.diff_scrollbar_drag = None,
-            MouseEventKind::ScrollDown => self.handle_wheel(column, row, VerticalDirection::Down),
-            MouseEventKind::ScrollUp => self.handle_wheel(column, row, VerticalDirection::Up),
+            MouseEventKind::Down(MouseButton::Left) => self.handle_left_down(column, row),
+            MouseEventKind::Drag(MouseButton::Left) => self.handle_left_drag(column, row),
+            MouseEventKind::Up(MouseButton::Left) => self.handle_left_up(column, row),
+            MouseEventKind::ScrollDown => {
+                self.handle_wheel_after_clearing_selection(column, row, VerticalDirection::Down);
+            }
+            MouseEventKind::ScrollUp => {
+                self.handle_wheel_after_clearing_selection(column, row, VerticalDirection::Up);
+            }
             MouseEventKind::Moved => self.handle_hover(column, row),
             _ => {}
         }
@@ -980,15 +1044,9 @@ impl App {
     }
 
     fn handle_help_overlay_mouse(&mut self, mouse: MouseEvent) {
-        match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                self.scroll_help_overlay_by(VerticalDirection::Down, MOUSE_WHEEL_STEP)
-            }
-            MouseEventKind::ScrollUp => {
-                self.scroll_help_overlay_by(VerticalDirection::Up, MOUSE_WHEEL_STEP)
-            }
-            _ => {}
-        }
+        self.handle_selectable_text_mouse(mouse, |app, direction| {
+            app.scroll_help_overlay_by(direction, MOUSE_WHEEL_STEP);
+        });
     }
 
     fn handle_discard_confirmation_key(&mut self, key: KeyEvent) {
@@ -1019,15 +1077,47 @@ impl App {
     }
 
     fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
+        self.handle_selectable_text_mouse(mouse, |app, direction| {
+            app.scroll_command_output_by(direction, MOUSE_WHEEL_STEP);
+        });
+    }
+
+    fn handle_selectable_text_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        mut scroll_by: impl FnMut(&mut Self, VerticalDirection),
+    ) {
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pending_left_click = None;
+                self.text_selection.begin_drag(mouse.column, mouse.row);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.text_selection.update_drag(mouse.column, mouse.row);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.text_selection.finish_drag(mouse.column, mouse.row);
+            }
             MouseEventKind::ScrollDown => {
-                self.scroll_command_output_by(VerticalDirection::Down, MOUSE_WHEEL_STEP)
+                self.text_selection.clear();
+                scroll_by(self, VerticalDirection::Down);
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_command_output_by(VerticalDirection::Up, MOUSE_WHEEL_STEP)
+                self.text_selection.clear();
+                scroll_by(self, VerticalDirection::Up);
             }
             _ => {}
         }
+    }
+
+    fn handle_wheel_after_clearing_selection(
+        &mut self,
+        column: u16,
+        row: u16,
+        direction: VerticalDirection,
+    ) {
+        self.text_selection.clear();
+        self.handle_wheel(column, row, direction);
     }
 
     fn toggle_help_overlay(&mut self) {
@@ -1037,42 +1127,92 @@ impl App {
         }
     }
 
-    fn handle_left_click(&mut self, column: u16, row: u16) {
+    fn handle_left_down(&mut self, column: u16, row: u16) {
         self.diff_scrollbar_drag = None;
+        self.pending_left_click = None;
 
         if let Some((drag, scroll)) = self.diff_scrollbar_drag_at(column, row) {
             self.focus = FocusPane::Diff;
+            self.text_selection.clear();
             self.diff_scrollbar_drag = Some(drag);
             self.scroll_diff_to(scroll);
             return;
         }
 
-        if let Some(index) = self.sidebar_index_at(column, row) {
-            self.focus = FocusPane::Sidebar;
-            self.select_file(index);
+        self.pending_left_click = self.pending_left_click_at(column, row);
+        self.text_selection.begin_drag(column, row);
+    }
+
+    fn handle_left_up(&mut self, column: u16, row: u16) {
+        if self.diff_scrollbar_drag.take().is_some() {
             return;
         }
 
-        if self.is_diff_at(column, row) {
-            self.focus = FocusPane::Diff;
-            if let Some(index) = self.diff_hunk_index_at(column, row) {
-                self.selected_hunk_index = Some(index);
-                self.center_selected_hunk();
+        if let Some(target) = self.finish_pending_left_click(column, row) {
+            self.apply_pending_left_click(target);
+        }
+    }
+
+    fn finish_pending_left_click(&mut self, column: u16, row: u16) -> Option<PendingLeftClick> {
+        if self.text_selection.finish_drag(column, row) {
+            self.pending_left_click = None;
+            return None;
+        }
+
+        self.pending_left_click.take()
+    }
+
+    fn apply_pending_left_click(&mut self, target: PendingLeftClick) {
+        match target {
+            PendingLeftClick::Sidebar { index } => {
+                self.focus = FocusPane::Sidebar;
+                self.select_file(index);
+            }
+            PendingLeftClick::Diff { hunk_index } => {
+                self.focus = FocusPane::Diff;
+                if let Some(index) = hunk_index {
+                    self.selected_hunk_index = Some(index);
+                    self.center_selected_hunk();
+                }
             }
         }
     }
 
-    fn handle_left_drag(&mut self, row: u16) {
-        let Some(drag) = self.diff_scrollbar_drag else {
+    fn handle_left_drag(&mut self, column: u16, row: u16) {
+        if self.drag_diff_scrollbar(row) {
             return;
+        }
+
+        self.pending_left_click = None;
+        self.text_selection.update_drag(column, row);
+    }
+
+    fn pending_left_click_at(&self, column: u16, row: u16) -> Option<PendingLeftClick> {
+        if let Some(index) = self.sidebar_index_at(column, row) {
+            return Some(PendingLeftClick::Sidebar { index });
+        }
+
+        if self.is_diff_at(column, row) {
+            return Some(PendingLeftClick::Diff {
+                hunk_index: self.diff_hunk_index_at(column, row),
+            });
+        }
+
+        None
+    }
+
+    fn drag_diff_scrollbar(&mut self, row: u16) -> bool {
+        let Some(drag) = self.diff_scrollbar_drag else {
+            return false;
         };
         let Some(scrollbar) = self.viewport.diff_scrollbar() else {
             self.diff_scrollbar_drag = None;
-            return;
+            return true;
         };
 
         self.focus = FocusPane::Diff;
         self.scroll_diff_to(scrollbar.scroll_for_drag(row, drag));
+        true
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) {
@@ -1671,6 +1811,15 @@ fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
 }
 
+fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: saturating_u16(content_width),
+        height: saturating_u16(visible_height),
+    }
+}
+
 fn clamp_command_output_scroll(output: &mut CommandOutputState) {
     output.scroll = output.scroll.min(
         output
@@ -2229,11 +2378,46 @@ mod tests {
             .with_hunk_offsets(vec![1, 5]),
         );
 
-        app.handle_left_click(1, 6);
+        app.handle_left_down(1, 6);
+        app.handle_left_up(1, 6);
 
         assert_eq!(app.focus, FocusPane::Diff);
         assert_eq!(app.selected_hunk_index, Some(1));
         assert_eq!(app.diff_scroll, 1);
+    }
+
+    #[test]
+    fn text_drag_requests_clipboard_copy() {
+        let mut app = app_with(changeset_with_one_file());
+        app.begin_render_frame();
+        app.selectable_lines(
+            Rect::new(2, 3, 10, 1),
+            vec![Line::raw("abcdef")],
+            0,
+            1,
+            Theme::github_dark(),
+        );
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 5,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 5,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.take_clipboard_request().as_deref(), Some("bcd"));
     }
 
     #[test]

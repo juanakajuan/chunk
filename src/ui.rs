@@ -99,9 +99,11 @@ fn render_diff_scrollbar(frame: &mut Frame<'_>, scrollbar: DiffScrollbar, theme:
     );
 }
 
-fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+    let line = app.keybind_bar_line(theme);
+    let lines = app.selectable_lines(area, vec![line], 0, 1, theme);
     frame.render_widget(
-        Paragraph::new(app.keybind_bar_line(theme))
+        Paragraph::new(lines)
             .alignment(Alignment::Left)
             .style(color_style(theme.muted, theme.background)),
         area,
@@ -128,6 +130,18 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
     let total_rows = lines.len();
     let scroll = app.help_overlay_scroll();
     let area = centered_rect(area, width, height);
+    let lines = app.selectable_lines(
+        Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: saturating_u16(content_width),
+            height: saturating_u16(visible_content_height),
+        },
+        lines,
+        scroll,
+        visible_content_height,
+        theme,
+    );
     let block = Block::default()
         .title(help_overlay_title(theme, overflow))
         .borders(Borders::ALL)

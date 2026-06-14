@@ -365,6 +365,15 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("drag text"),
+            HelpSegment::text(" copy selection"),
+        ],
+        content_width,
+        theme,
+    );
 
     push_help_section(&mut lines, "Worktree-only", theme);
     if can_stage || can_discard {
