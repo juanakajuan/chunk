@@ -15,6 +15,7 @@ use crate::theme::Theme;
 mod diff;
 mod file_summary;
 mod intraline;
+mod markdown;
 mod sidebar;
 mod text;
 
@@ -785,14 +786,7 @@ pub(crate) fn ask_ai_output_lines(
     );
     lines.push(Line::raw(""));
 
-    push_output_section(
-        &mut lines,
-        "answer",
-        result.stdout(),
-        content_width,
-        color_style(theme.text, theme.background),
-        theme,
-    );
+    push_markdown_output_section(&mut lines, "answer", result.stdout(), content_width, theme);
     if !result.stderr().is_empty() {
         lines.push(Line::raw(""));
         push_output_section(
@@ -806,6 +800,24 @@ pub(crate) fn ask_ai_output_lines(
     }
 
     lines
+}
+
+fn push_markdown_output_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    output: &str,
+    content_width: usize,
+    theme: Theme,
+) {
+    push_wrapped_output_line(
+        lines,
+        Line::styled(
+            title,
+            color_style(theme.accent, theme.background).add_modifier(Modifier::BOLD),
+        ),
+        content_width,
+    );
+    lines.extend(markdown::markdown_lines(output, content_width, theme));
 }
 
 fn push_output_section(

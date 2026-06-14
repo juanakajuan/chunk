@@ -83,6 +83,8 @@ the diff.
 In the Ask AI answer pane, use the same scroll and close keys. The OpenCode
 process receives the Git root, focused file or hunk, selected visible text when
 present, read-only repository permissions, and web fetch/search access.
+Answers render Markdown for common formatting such as headings, lists, links,
+quotes, and code blocks.
 
 ## Configuration
 
