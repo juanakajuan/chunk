@@ -9,6 +9,7 @@ worktree discard actions.
 
 - Rust 2024 toolchain
 - Git
+- [OpenCode](https://opencode.ai/) for the Ask AI action
 - A [Nerd Font](https://www.nerdfonts.com/) for the file-type, status, and
   staging glyphs in the sidebar and bottom bar
 
@@ -57,6 +58,9 @@ It does not live-refresh, stage files, or discard worktree changes.
 - `G` / `End`: jump to bottom of diff
 - `?`: show or hide the in-app keymap help; the overlay also closes with
   `Esc` or `q`
+- `a`: ask OpenCode a read-only question about the selected file from the file
+  list, or the focused hunk from the diff pane; `Enter` submits, `Esc` cancels
+  the prompt or running request
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
 - `d`: in `diff` mode, discard unstaged worktree changes for the selected file
@@ -75,6 +79,10 @@ to the clipboard.
 In the command output pane, use `j` / `k` or the mouse wheel to scroll,
 `PageDown` / `PageUp` to page, `g` / `G` to jump, and `Esc` / `q` to return to
 the diff.
+
+In the Ask AI answer pane, use the same scroll and close keys. The OpenCode
+process receives the Git root, focused file or hunk, selected visible text when
+present, read-only repository permissions, and web fetch/search access.
 
 ## Configuration
 
@@ -113,6 +121,7 @@ Code map:
 
 - `src/main.rs`: CLI parsing and review source selection
 - `src/config.rs`: user config loading and validation
+- `src/ask_ai.rs`: read-only OpenCode request and prompt boundary
 - `src/custom_command.rs`: configured shell command bindings and execution
 - `src/editor.rs`: external editor command resolution
 - `src/review_source.rs`: worktree vs PR behavior, reloads, mutation capability

@@ -118,7 +118,7 @@ impl TextSelection {
 
         let range = SelectionRange::between(drag.surface, drag.anchor, drag.cursor);
         self.selected = Some(range);
-        if let Some(text) = self.selected_text(range) {
+        if let Some(text) = self.text_for_range(range) {
             self.clipboard_request = Some(text);
         }
 
@@ -127,6 +127,10 @@ impl TextSelection {
 
     pub(crate) fn take_clipboard_request(&mut self) -> Option<String> {
         self.clipboard_request.take()
+    }
+
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        self.selected.and_then(|range| self.text_for_range(range))
     }
 
     fn record_visible_lines(
@@ -210,7 +214,7 @@ impl TextSelection {
             })
     }
 
-    fn selected_text(&self, range: SelectionRange) -> Option<String> {
+    fn text_for_range(&self, range: SelectionRange) -> Option<String> {
         let mut text = String::new();
         let mut has_text = false;
 

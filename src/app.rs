@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+use crate::ask_ai::{AskAiContext, AskAiRequest, AskAiResult};
 use crate::config::AppConfig;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::editor::EditorRequest;
@@ -77,6 +78,20 @@ struct CommandOutputState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct AskAiPromptState {
+    context: AskAiContext,
+    input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AskAiOutputState {
+    result: AskAiResult,
+    scroll: usize,
+    rendered_row_count: usize,
+    visible_height: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscardConfirmation {
     target: DiscardTarget,
 }
@@ -128,6 +143,16 @@ enum Overlay {
     },
     /// Completed custom command output shown in the diff pane.
     CommandOutput(CommandOutputState),
+    /// Free-form Ask AI prompt; owns input until submitted.
+    AskAiPrompt(AskAiPromptState),
+    /// Ask AI request is running in the background.
+    AskAiRunning {
+        question: String,
+        spinner_frame: usize,
+        cancelling: bool,
+    },
+    /// Completed Ask AI answer shown in the diff pane.
+    AskAiOutput(AskAiOutputState),
 }
 
 #[derive(Debug)]
@@ -153,6 +178,10 @@ pub(crate) struct App {
     custom_commands: Vec<CustomCommandBinding>,
     /// Deferred request for runtime to execute a configured shell command safely.
     custom_command_request: Option<CustomCommandBinding>,
+    /// Deferred request for runtime to invoke OpenCode in read-only mode.
+    ask_ai_request: Option<AskAiRequest>,
+    /// Deferred request for runtime to cancel the active Ask AI task.
+    ask_ai_cancel_request: bool,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
     /// Rendered live-status rows above the diff rows in the diff pane.
@@ -200,6 +229,8 @@ impl App {
             overlay: None,
             custom_commands: config.commands,
             custom_command_request: None,
+            ask_ai_request: None,
+            ask_ai_cancel_request: false,
             diff_scroll: 0,
             diff_status_rows: 0,
             sidebar_scroll: 0,
@@ -268,6 +299,45 @@ impl App {
         }
     }
 
+    fn ask_ai_prompt(&self) -> Option<&AskAiPromptState> {
+        match &self.overlay {
+            Some(Overlay::AskAiPrompt(prompt)) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    fn ask_ai_prompt_mut(&mut self) -> Option<&mut AskAiPromptState> {
+        match &mut self.overlay {
+            Some(Overlay::AskAiPrompt(prompt)) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    fn ask_ai_running(&self) -> Option<(&str, usize, bool)> {
+        match &self.overlay {
+            Some(Overlay::AskAiRunning {
+                question,
+                spinner_frame,
+                cancelling,
+            }) => Some((question.as_str(), *spinner_frame, *cancelling)),
+            _ => None,
+        }
+    }
+
+    fn ask_ai_output(&self) -> Option<&AskAiOutputState> {
+        match &self.overlay {
+            Some(Overlay::AskAiOutput(output)) => Some(output),
+            _ => None,
+        }
+    }
+
+    fn ask_ai_output_mut(&mut self) -> Option<&mut AskAiOutputState> {
+        match &mut self.overlay {
+            Some(Overlay::AskAiOutput(output)) => Some(output),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     fn discard_target(&self) -> Option<&DiscardTarget> {
         match &self.overlay {
@@ -332,6 +402,9 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> DiffPaneRows {
+        if self.ask_ai_output().is_some() {
+            return self.ask_ai_output_pane_rows(area, content_width, visible_height, theme);
+        }
         if self.command_output().is_some() {
             return self.command_output_pane_rows(area, content_width, visible_height, theme);
         }
@@ -342,6 +415,19 @@ impl App {
         lines.extend(rows::custom_command_running_lines(
             running.map(|(binding, _)| binding),
             running.map_or(0, |(_, frame)| frame),
+            content_width,
+            theme,
+        ));
+        lines.extend(rows::ask_ai_prompt_lines(
+            self.ask_ai_prompt().map(|prompt| prompt.input.as_str()),
+            content_width,
+            theme,
+        ));
+        let ask_ai_running = self.ask_ai_running();
+        lines.extend(rows::ask_ai_running_lines(
+            ask_ai_running.map(|(question, _, _)| question),
+            ask_ai_running.map_or(0, |(_, frame, _)| frame),
+            ask_ai_running.is_some_and(|(_, _, cancelling)| cancelling),
             content_width,
             theme,
         ));
@@ -431,6 +517,15 @@ impl App {
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
+        if self.ask_ai_output().is_some() {
+            return rows::ask_ai_output_keybind_bar_line(theme);
+        }
+        if self.ask_ai_prompt().is_some() {
+            return rows::ask_ai_prompt_keybind_bar_line(theme);
+        }
+        if self.ask_ai_running().is_some() {
+            return rows::ask_ai_running_keybind_bar_line(theme);
+        }
         if self.command_output().is_some() {
             return rows::custom_command_output_keybind_bar_line(theme);
         }
@@ -783,6 +878,45 @@ impl App {
         }
     }
 
+    fn ask_ai_output_pane_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> DiffPaneRows {
+        self.viewport.begin_diff(area, visible_height);
+        self.diff_status_rows = 0;
+
+        let output = self
+            .ask_ai_output_mut()
+            .expect("Ask AI output pane requires output state");
+        let title = format!(" Ask AI: {} ", output.result.context_summary());
+        let all_lines = rows::ask_ai_output_lines(&output.result, content_width, theme);
+        output.rendered_row_count = all_lines.len();
+        output.visible_height = visible_height;
+        clamp_ask_ai_output_scroll(output);
+        let scroll = output.scroll;
+        let lines = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(visible_height)
+            .collect();
+        let lines = self.text_selection.decorate_visible_lines(
+            pane_text_area(area, content_width, visible_height),
+            lines,
+            0,
+            visible_height,
+            theme,
+        );
+
+        DiffPaneRows {
+            title,
+            lines,
+            scrollbar: None,
+        }
+    }
+
     fn apply_selected_hunk_style(
         &self,
         lines: &mut [Line<'static>],
@@ -798,10 +932,11 @@ impl App {
         let Some(hunk) = file.hunks.get(selected_hunk_index) else {
             return;
         };
-        let Some(hunk_offset) =
-            self.viewport
-                .hunk_offset(self.selected_file_index, file.id.as_str(), selected_hunk_index)
-        else {
+        let Some(hunk_offset) = self.viewport.hunk_offset(
+            self.selected_file_index,
+            file.id.as_str(),
+            selected_hunk_index,
+        ) else {
             return;
         };
 
@@ -831,6 +966,16 @@ impl App {
         self.custom_command_request.take()
     }
 
+    pub(crate) fn take_ask_ai_request(&mut self) -> Option<AskAiRequest> {
+        self.ask_ai_request.take()
+    }
+
+    pub(crate) fn take_ask_ai_cancel_request(&mut self) -> bool {
+        let requested = self.ask_ai_cancel_request;
+        self.ask_ai_cancel_request = false;
+        requested
+    }
+
     pub(crate) fn take_clipboard_request(&mut self) -> Option<String> {
         self.text_selection.take_clipboard_request()
     }
@@ -856,6 +1001,35 @@ impl App {
         self.focus = FocusPane::Diff;
         self.text_selection.clear();
         self.overlay = Some(Overlay::CommandOutput(CommandOutputState {
+            result,
+            scroll: 0,
+            rendered_row_count: 0,
+            visible_height: 0,
+        }));
+    }
+
+    pub(crate) fn set_ask_ai_running(&mut self, request: &AskAiRequest) {
+        self.live_error = None;
+        self.focus = FocusPane::Diff;
+        self.text_selection.clear();
+        self.overlay = Some(Overlay::AskAiRunning {
+            question: request.question().to_string(),
+            spinner_frame: 0,
+            cancelling: false,
+        });
+    }
+
+    pub(crate) fn advance_ask_ai_spinner(&mut self) {
+        if let Some(Overlay::AskAiRunning { spinner_frame, .. }) = &mut self.overlay {
+            *spinner_frame = spinner_frame.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn set_ask_ai_result(&mut self, result: AskAiResult) {
+        self.live_error = None;
+        self.focus = FocusPane::Diff;
+        self.text_selection.clear();
+        self.overlay = Some(Overlay::AskAiOutput(AskAiOutputState {
             result,
             scroll: 0,
             rendered_row_count: 0,
@@ -922,6 +1096,13 @@ impl App {
 
         if is_ctrl_c(key) {
             return Ok(false);
+        }
+
+        if self.should_open_ask_ai_prompt(key) {
+            self.open_ask_ai_prompt();
+            self.text_selection.clear();
+            self.ensure_scroll_bounds();
+            return Ok(true);
         }
 
         self.text_selection.clear();
@@ -1016,6 +1197,9 @@ impl App {
             Some(Overlay::Help { .. }) => self.handle_help_overlay_key(key),
             Some(Overlay::Discard(_)) => self.handle_discard_confirmation_key(key),
             Some(Overlay::CommandOutput(_)) => self.handle_command_output_key(key),
+            Some(Overlay::AskAiPrompt(_)) => self.handle_ask_ai_prompt_key(key),
+            Some(Overlay::AskAiRunning { .. }) => self.handle_ask_ai_running_key(key),
+            Some(Overlay::AskAiOutput(_)) => self.handle_ask_ai_output_key(key),
             Some(Overlay::CommandRunning { .. }) | None => {}
         }
     }
@@ -1024,7 +1208,12 @@ impl App {
         match self.overlay {
             Some(Overlay::Help { .. }) => self.handle_help_overlay_mouse(mouse),
             Some(Overlay::CommandOutput(_)) => self.handle_command_output_mouse(mouse),
-            Some(Overlay::Discard(_)) | Some(Overlay::CommandRunning { .. }) | None => {}
+            Some(Overlay::AskAiOutput(_)) => self.handle_ask_ai_output_mouse(mouse),
+            Some(Overlay::Discard(_))
+            | Some(Overlay::CommandRunning { .. })
+            | Some(Overlay::AskAiPrompt(_))
+            | Some(Overlay::AskAiRunning { .. })
+            | None => {}
         }
     }
 
@@ -1081,6 +1270,64 @@ impl App {
     fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
             app.scroll_command_output_by(direction, MOUSE_WHEEL_STEP);
+        });
+    }
+
+    fn handle_ask_ai_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Enter => self.submit_ask_ai_prompt(),
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.ask_ai_prompt_mut() {
+                    prompt.input.pop();
+                }
+            }
+            KeyCode::Char(value) if accepts_text_input(key) => {
+                if let Some(prompt) = self.ask_ai_prompt_mut() {
+                    prompt.input.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_ask_ai_running_key(&mut self, key: KeyEvent) {
+        if !closes_ask_ai_running(key) {
+            return;
+        }
+
+        if let Some(Overlay::AskAiRunning {
+            cancelling,
+            question: _,
+            spinner_frame: _,
+        }) = &mut self.overlay
+            && !*cancelling
+        {
+            *cancelling = true;
+            self.ask_ai_cancel_request = true;
+        }
+    }
+
+    fn handle_ask_ai_output_key(&mut self, key: KeyEvent) {
+        if closes_ask_ai_output(key) {
+            self.overlay = None;
+            return;
+        }
+
+        match scroll_key_action(key) {
+            Some(ScrollKeyAction::Line(direction)) => self.scroll_ask_ai_output_by(direction, 1),
+            Some(ScrollKeyAction::Page(direction)) => {
+                self.scroll_ask_ai_output_by(direction, self.ask_ai_output_page())
+            }
+            Some(ScrollKeyAction::Top) => self.scroll_ask_ai_output_to_top(),
+            Some(ScrollKeyAction::Bottom) => self.scroll_ask_ai_output_to_bottom(),
+            None => {}
+        }
+    }
+
+    fn handle_ask_ai_output_mouse(&mut self, mouse: MouseEvent) {
+        self.handle_selectable_text_mouse(mouse, |app, direction| {
+            app.scroll_ask_ai_output_by(direction, MOUSE_WHEEL_STEP);
         });
     }
 
@@ -1293,6 +1540,61 @@ impl App {
         self.search.open_prompt();
     }
 
+    fn should_open_ask_ai_prompt(&self, key: KeyEvent) -> bool {
+        self.overlay.is_none()
+            && !self.search.is_prompt_open()
+            && key.code == KeyCode::Char('a')
+            && accepts_text_input(key)
+    }
+
+    fn open_ask_ai_prompt(&mut self) {
+        let file_context = self.focus == FocusPane::Sidebar && self.files_panel_visible;
+        let hunk_index = if file_context {
+            None
+        } else {
+            self.selected_hunk_index
+        };
+        let selected_text = if file_context {
+            None
+        } else {
+            self.text_selection.selected_text()
+        };
+
+        self.focus = FocusPane::Diff;
+        let Some(file) = self.selected_file() else {
+            self.live_error = Some("no selected file to ask about".to_string());
+            return;
+        };
+
+        let context = AskAiContext::focused(
+            self.source.ask_ai_review_mode(),
+            self.changeset.title.clone(),
+            self.changeset.source_label.clone(),
+            file,
+            hunk_index,
+            selected_text,
+        );
+        self.live_error = None;
+        self.overlay = Some(Overlay::AskAiPrompt(AskAiPromptState {
+            context,
+            input: String::new(),
+        }));
+    }
+
+    fn submit_ask_ai_prompt(&mut self) {
+        let Some(Overlay::AskAiPrompt(prompt)) = self.overlay.take() else {
+            return;
+        };
+
+        let question = prompt.input.trim().to_string();
+        if question.is_empty() {
+            self.overlay = Some(Overlay::AskAiPrompt(prompt));
+            return;
+        }
+
+        self.ask_ai_request = Some(AskAiRequest::new(question, prompt.context));
+    }
+
     fn queue_custom_command_for_key(&mut self, key: KeyEvent) -> bool {
         let Some(command) = self
             .custom_commands
@@ -1319,6 +1621,11 @@ impl App {
             .map_or(1, |output| output.visible_height.max(1))
     }
 
+    fn ask_ai_output_page(&self) -> usize {
+        self.ask_ai_output()
+            .map_or(1, |output| output.visible_height.max(1))
+    }
+
     fn scroll_command_output_by(&mut self, direction: VerticalDirection, amount: usize) {
         let Some(output) = self.command_output_mut() else {
             return;
@@ -1338,6 +1645,28 @@ impl App {
         if let Some(output) = self.command_output_mut() {
             output.scroll = usize::MAX;
             clamp_command_output_scroll(output);
+        }
+    }
+
+    fn scroll_ask_ai_output_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let Some(output) = self.ask_ai_output_mut() else {
+            return;
+        };
+
+        output.scroll = direction.shift(output.scroll, amount);
+        clamp_ask_ai_output_scroll(output);
+    }
+
+    fn scroll_ask_ai_output_to_top(&mut self) {
+        if let Some(output) = self.ask_ai_output_mut() {
+            output.scroll = 0;
+        }
+    }
+
+    fn scroll_ask_ai_output_to_bottom(&mut self) {
+        if let Some(output) = self.ask_ai_output_mut() {
+            output.scroll = usize::MAX;
+            clamp_ask_ai_output_scroll(output);
         }
     }
 
@@ -1652,6 +1981,14 @@ fn closes_command_output(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc || matches!(key.code, KeyCode::Char('q') if accepts_text_input(key))
 }
 
+fn closes_ask_ai_running(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc || matches!(key.code, KeyCode::Char('q') if accepts_text_input(key))
+}
+
+fn closes_ask_ai_output(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc || matches!(key.code, KeyCode::Char('q') if accepts_text_input(key))
+}
+
 fn scroll_key_action(key: KeyEvent) -> Option<ScrollKeyAction> {
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => Some(ScrollKeyAction::Line(VerticalDirection::Down)),
@@ -1688,6 +2025,14 @@ fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Re
 }
 
 fn clamp_command_output_scroll(output: &mut CommandOutputState) {
+    output.scroll = output.scroll.min(
+        output
+            .rendered_row_count
+            .saturating_sub(output.visible_height),
+    );
+}
+
+fn clamp_ask_ai_output_scroll(output: &mut AskAiOutputState) {
     output.scroll = output.scroll.min(
         output
             .rendered_row_count
@@ -1781,6 +2126,7 @@ fn find_file_index(changeset: &Changeset, identity: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ask_ai::AskAiReviewMode;
     use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
     use crate::theme::Theme;
     use crate::viewport::RenderedDiffLines;
@@ -2402,6 +2748,104 @@ mod tests {
         assert!(app.command_output().is_none());
     }
 
+    #[test]
+    fn ask_ai_key_from_files_panel_queues_file_context() {
+        let mut changeset = changeset_with_one_file();
+        changeset.title = "Tracked changes".to_string();
+        changeset.source_label = "git diff HEAD + untracked".to_string();
+        let mut app = app_with(changeset);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        let prompt_pane = render_diff_pane(&mut app, Theme::github_dark());
+
+        assert!(pane_text(&prompt_pane).contains("Ask AI: type a question"));
+        assert!(matches!(app.overlay, Some(Overlay::AskAiPrompt(_))));
+
+        enter_ask_ai_question(&mut app, "Why changed?");
+
+        let request = app
+            .take_ask_ai_request()
+            .expect("Ask AI request should be queued");
+        assert_eq!(request.question(), "Why changed?");
+        assert_eq!(request.context().summary(), "sample.txt");
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn ask_ai_key_from_diff_pane_queues_hunk_context() {
+        let mut changeset = changeset_with_one_file();
+        changeset.title = "Tracked changes".to_string();
+        changeset.source_label = "git diff HEAD + untracked".to_string();
+        let mut app = app_with(changeset);
+        app.focus = FocusPane::Diff;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        let prompt_pane = render_diff_pane(&mut app, Theme::github_dark());
+
+        assert!(pane_text(&prompt_pane).contains("Ask AI: type a question"));
+        assert!(matches!(app.overlay, Some(Overlay::AskAiPrompt(_))));
+
+        enter_ask_ai_question(&mut app, "Why changed?");
+
+        let request = app
+            .take_ask_ai_request()
+            .expect("Ask AI request should be queued");
+        assert_eq!(request.question(), "Why changed?");
+        assert_eq!(request.context().summary(), "sample.txt hunk 1");
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn ask_ai_running_can_be_cancelled() {
+        let mut app = app_with(changeset_with_one_file());
+        let request = ask_ai_request("Explain this");
+
+        app.set_ask_ai_running(&request);
+        let running_pane = render_diff_pane(&mut app, Theme::github_dark());
+        assert!(pane_text(&running_pane).contains("Asking AI: Explain this"));
+
+        let keep_running = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(keep_running);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::AskAiRunning {
+                cancelling: true,
+                ..
+            })
+        ));
+        assert!(app.take_ask_ai_cancel_request());
+        assert!(!app.take_ask_ai_cancel_request());
+    }
+
+    #[test]
+    fn ask_ai_output_pane_scrolls_and_closes() {
+        let mut app = app_with(changeset_with_one_file());
+        let request = ask_ai_request("Explain this");
+        app.set_ask_ai_result(AskAiResult::not_started(
+            request,
+            None,
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+        ));
+
+        let pane = render_diff_pane(&mut app, Theme::github_dark());
+        assert!(pane.title.contains("Ask AI: sample.txt hunk 1"));
+        assert!(pane_text(&pane).contains("question: Explain this"));
+        assert_eq!(app.ask_ai_output().map(|output| output.scroll), Some(0));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.ask_ai_output().map(|output| output.scroll), Some(1));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.ask_ai_output().is_none());
+    }
+
     fn app_with(changeset: Changeset) -> App {
         App::new(LoadedReview::worktree(changeset))
     }
@@ -2427,6 +2871,29 @@ mod tests {
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+    }
+
+    fn enter_ask_ai_question(app: &mut App, question: &str) {
+        for character in question.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    fn ask_ai_request(question: &str) -> AskAiRequest {
+        let file = diff_file("sample.txt", 1);
+        let context = AskAiContext::focused(
+            AskAiReviewMode::Worktree,
+            "Tracked changes".to_string(),
+            "git diff HEAD + untracked".to_string(),
+            &file,
+            Some(0),
+            None,
+        );
+
+        AskAiRequest::new(question.to_string(), context)
     }
 
     fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {

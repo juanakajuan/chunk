@@ -4,6 +4,7 @@
 //! diff source, then hand the resulting changeset to the terminal app.
 
 mod app;
+mod ask_ai;
 mod clipboard;
 mod config;
 mod custom_command;

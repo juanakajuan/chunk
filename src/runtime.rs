@@ -5,7 +5,7 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::App;
+use crate::ask_ai::{self, AskAiRequest, AskAiResult};
 use crate::clipboard;
 use crate::custom_command::{self, CustomCommandBinding, CustomCommandResult};
 use crate::editor::{EditorCommand, EditorRequest};
@@ -45,6 +46,13 @@ struct DrainedWorktreeEvents {
 struct CustomCommandTask {
     command: CustomCommandBinding,
     result: Receiver<CustomCommandResult>,
+    worker: JoinHandle<()>,
+}
+
+struct AskAiTask {
+    request: AskAiRequest,
+    result: Receiver<AskAiResult>,
+    cancel: Sender<()>,
     worker: JoinHandle<()>,
 }
 
@@ -107,10 +115,13 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
     let watcher = start_live_worktree_watcher(app);
     let mut pending_reload_at: Option<Instant> = None;
     let mut custom_command_task: Option<CustomCommandTask> = None;
+    let mut ask_ai_task: Option<AskAiTask> = None;
 
     loop {
         finish_custom_command_if_ready(app, &mut custom_command_task);
+        finish_ask_ai_if_ready(app, &mut ask_ai_task);
         app.advance_custom_command_spinner();
+        app.advance_ask_ai_spinner();
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         drain_live_worktree_events(watcher.as_ref(), app, &mut pending_reload_at);
@@ -123,7 +134,16 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
         }
 
         match event::read()? {
-            Event::Key(key) if !handle_key_event(terminal, app, key, &mut custom_command_task)? => {
+            Event::Key(key)
+                if !handle_key_event(
+                    terminal,
+                    app,
+                    key,
+                    &mut custom_command_task,
+                    &mut ask_ai_task,
+                )? =>
+            {
+                cancel_ask_ai_task(&mut ask_ai_task);
                 break;
             }
             Event::Key(_) => {}
@@ -143,6 +163,7 @@ fn handle_key_event(
     app: &mut App,
     key: KeyEvent,
     custom_command_task: &mut Option<CustomCommandTask>,
+    ask_ai_task: &mut Option<AskAiTask>,
 ) -> Result<bool> {
     if !app.handle_key(key)? {
         return Ok(false);
@@ -154,6 +175,14 @@ fn handle_key_event(
 
     if let Some(command) = app.take_custom_command_request() {
         start_requested_custom_command(terminal, app, command, custom_command_task)?;
+    }
+
+    if app.take_ask_ai_cancel_request() {
+        request_ask_ai_cancel(ask_ai_task);
+    }
+
+    if let Some(request) = app.take_ask_ai_request() {
+        start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
     }
 
     Ok(true)
@@ -258,6 +287,93 @@ fn finish_custom_command_if_ready(
     let _ = task.worker.join();
     app.set_custom_command_result(result);
     app.reload_review_source(true);
+}
+
+fn start_requested_ask_ai(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    request: AskAiRequest,
+    ask_ai_task: &mut Option<AskAiTask>,
+) -> Result<()> {
+    if ask_ai_task.is_some() {
+        return Ok(());
+    }
+
+    app.set_ask_ai_running(&request);
+    terminal.draw(|frame| ui::draw(frame, app))?;
+    *ask_ai_task = Some(spawn_ask_ai_task(request));
+    Ok(())
+}
+
+fn spawn_ask_ai_task(request: AskAiRequest) -> AskAiTask {
+    let (result_sender, result) = mpsc::channel();
+    let (cancel_sender, cancel) = mpsc::channel();
+    let worker_request = request.clone();
+    let worker = thread::spawn(move || {
+        let ask_result = run_ask_ai_request(worker_request, cancel);
+        let _ = result_sender.send(ask_result);
+    });
+
+    AskAiTask {
+        request,
+        result,
+        cancel: cancel_sender,
+        worker,
+    }
+}
+
+fn finish_ask_ai_if_ready(app: &mut App, ask_ai_task: &mut Option<AskAiTask>) {
+    let Some(task) = ask_ai_task.as_ref() else {
+        return;
+    };
+
+    let result = match task.result.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Disconnected) => AskAiResult::not_started(
+            task.request.clone(),
+            None,
+            "OpenCode runner stopped before reporting a result",
+        ),
+    };
+
+    let task = ask_ai_task
+        .take()
+        .expect("completed Ask AI task should still be stored");
+    let _ = task.worker.join();
+    app.set_ask_ai_result(result);
+}
+
+fn request_ask_ai_cancel(ask_ai_task: &mut Option<AskAiTask>) {
+    if let Some(task) = ask_ai_task {
+        let _ = task.cancel.send(());
+    }
+}
+
+fn cancel_ask_ai_task(ask_ai_task: &mut Option<AskAiTask>) {
+    let Some(task) = ask_ai_task.take() else {
+        return;
+    };
+
+    let _ = task.cancel.send(());
+    let _ = task.worker.join();
+}
+
+fn run_ask_ai_request(request: AskAiRequest, cancel: Receiver<()>) -> AskAiResult {
+    let repo_root = match git::worktree_root() {
+        Ok(root) => root,
+        Err(error) => {
+            return AskAiResult::not_started(
+                request,
+                None,
+                format!("could not determine Git worktree root: {error}"),
+            );
+        }
+    };
+
+    ask_ai::run(request.clone(), repo_root.clone(), cancel).unwrap_or_else(|error| {
+        AskAiResult::not_started(request, Some(repo_root), error.to_string())
+    })
 }
 
 fn run_custom_command(command: &CustomCommandBinding) -> CustomCommandResult {

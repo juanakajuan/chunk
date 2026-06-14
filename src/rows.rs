@@ -7,6 +7,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::ask_ai::AskAiResult;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::model::Changeset;
 use crate::theme::Theme;
@@ -95,6 +96,55 @@ pub(crate) fn custom_command_running_lines(
     )
 }
 
+pub(crate) fn ask_ai_prompt_lines(
+    input: Option<&str>,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Some(input) = input else {
+        return Vec::new();
+    };
+
+    let text = if input.is_empty() {
+        "Ask AI: type a question, Enter submit, Esc cancel".to_string()
+    } else {
+        format!("Ask AI: {input}")
+    };
+
+    wrap_line(
+        Line::styled(text, color_style(theme.accent, theme.background)),
+        content_width,
+    )
+}
+
+pub(crate) fn ask_ai_running_lines(
+    question: Option<&str>,
+    spinner_frame: usize,
+    cancelling: bool,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Some(question) = question else {
+        return Vec::new();
+    };
+
+    let status = if cancelling {
+        "Cancelling Ask AI"
+    } else {
+        "Asking AI"
+    };
+    wrap_line(
+        Line::styled(
+            format!(
+                "{} {status}: {question}",
+                CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()]
+            ),
+            color_style(theme.accent, theme.background),
+        ),
+        content_width,
+    )
+}
+
 pub(crate) enum SearchStatus<'a> {
     Prompt {
         input: &'a str,
@@ -169,6 +219,7 @@ pub(crate) fn keybind_bar_line(
     if let Some(discard_hint) = discard_hint {
         hints.push(("d", discard_hint));
     }
+    hints.push(("a", "ask AI"));
     hints.push(("/", "search"));
     hints.push(("j/k", "move"));
     hints.push(("?", "help"));
@@ -195,6 +246,75 @@ pub(crate) fn keybind_bar_line(
     Line::from(spans)
 }
 
+pub(crate) fn ask_ai_prompt_keybind_bar_line(theme: Theme) -> Line<'static> {
+    let background = theme.background;
+    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+    let separator_style = color_style(theme.border, background);
+
+    Line::from(vec![
+        Span::styled(
+            " ASK AI ",
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+        Span::styled("  ", label_style),
+        Span::styled("Enter", key_style),
+        Span::styled(" submit", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("Esc", key_style),
+        Span::styled(" cancel", label_style),
+    ])
+}
+
+pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
+    let background = theme.background;
+    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+    let separator_style = color_style(theme.border, background);
+
+    Line::from(vec![
+        Span::styled(
+            " ASK AI ",
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+        Span::styled("  ", label_style),
+        Span::styled("Esc/q", key_style),
+        Span::styled(" cancel", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("Ctrl-c", key_style),
+        Span::styled(" quit", label_style),
+    ])
+}
+
+pub(crate) fn ask_ai_output_keybind_bar_line(theme: Theme) -> Line<'static> {
+    let background = theme.background;
+    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+    let separator_style = color_style(theme.border, background);
+
+    Line::from(vec![
+        Span::styled(
+            " ASK AI ",
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+        Span::styled("  ", label_style),
+        Span::styled("j/k", key_style),
+        Span::styled(" scroll", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("Ctrl-d/Ctrl-u", key_style),
+        Span::styled(" page", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("g/G", key_style),
+        Span::styled(" top/bottom", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
+        Span::styled("Esc/q", key_style),
+        Span::styled(" close", label_style),
+    ])
+}
+
 pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'static> {
     let background = theme.background;
     let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
@@ -211,7 +331,7 @@ pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'stat
         Span::styled("j/k", key_style),
         Span::styled(" scroll", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("PgUp/PgDn", key_style),
+        Span::styled("Ctrl-d/Ctrl-u", key_style),
         Span::styled(" page", label_style),
         Span::styled("  \u{b7}  ", separator_style),
         Span::styled("g/G", key_style),
@@ -318,9 +438,9 @@ pub(crate) fn help_overlay_lines(
             HelpSegment::text("/"),
             HelpSegment::command("k"),
             HelpSegment::text(" scroll row   "),
-            HelpSegment::command("PageDown"),
+            HelpSegment::command("Ctrl-d"),
             HelpSegment::text("/"),
-            HelpSegment::command("PageUp"),
+            HelpSegment::command("Ctrl-u"),
             HelpSegment::text(" page"),
         ],
         content_width,
@@ -337,6 +457,19 @@ pub(crate) fn help_overlay_lines(
             HelpSegment::text("/"),
             HelpSegment::command("N"),
             HelpSegment::text(" next or previous hunk"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("a"),
+            HelpSegment::text(" Ask AI about focused file or hunk, "),
+            HelpSegment::command("Enter"),
+            HelpSegment::text(" submit, "),
+            HelpSegment::command("Esc"),
+            HelpSegment::text(" cancel"),
         ],
         content_width,
         theme,
@@ -597,6 +730,84 @@ pub(crate) fn custom_command_output_lines(
     lines
 }
 
+pub(crate) fn ask_ai_output_lines(
+    result: &AskAiResult,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let status_color = if result.success() {
+        theme.added
+    } else {
+        theme.removed
+    };
+    let label = if result.cancelled_status() {
+        "CANCELLED"
+    } else if result.success() {
+        "OK"
+    } else {
+        "FAIL"
+    };
+
+    push_wrapped_output_line(
+        &mut lines,
+        Line::styled(
+            format!("{label}  {}", result.status_text()),
+            color_style(status_color, theme.background),
+        ),
+        content_width,
+    );
+    if let Some(root) = result.repo_root() {
+        push_wrapped_output_line(
+            &mut lines,
+            Line::styled(
+                format!("repo: {}", root.display()),
+                color_style(theme.muted, theme.background),
+            ),
+            content_width,
+        );
+    }
+    push_wrapped_output_line(
+        &mut lines,
+        Line::styled(
+            format!("context: {}", result.context_summary()),
+            color_style(theme.muted, theme.background),
+        ),
+        content_width,
+    );
+    push_wrapped_output_line(
+        &mut lines,
+        Line::styled(
+            format!("question: {}", result.question()),
+            color_style(theme.accent, theme.background),
+        ),
+        content_width,
+    );
+    lines.push(Line::raw(""));
+
+    push_output_section(
+        &mut lines,
+        "answer",
+        result.stdout(),
+        content_width,
+        color_style(theme.text, theme.background),
+        theme,
+    );
+    if !result.stderr().is_empty() {
+        lines.push(Line::raw(""));
+        push_output_section(
+            &mut lines,
+            "diagnostics",
+            result.stderr(),
+            content_width,
+            color_style(theme.removed, theme.background),
+            theme,
+        );
+    }
+
+    lines
+}
+
 fn push_output_section(
     lines: &mut Vec<Line<'static>>,
     title: &'static str,
@@ -680,6 +891,7 @@ mod tests {
         assert!(worktree_help.contains("Space stage/unstage focused file or hunk"));
         assert!(worktree_help.contains("d discard focused file or hunk"));
         assert!(worktree_help.contains("e open selected file in $EDITOR"));
+        assert!(worktree_help.contains("a Ask AI about focused file or hunk"));
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
         assert!(!pr_help.contains("d discard focused file or hunk"));

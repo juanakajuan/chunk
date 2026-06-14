@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 use color_eyre::eyre::{Result, eyre};
 
+use crate::ask_ai::AskAiReviewMode;
 use crate::editor::EditorRequest;
 use crate::git;
 use crate::model::{Changeset, DiffFile, FileStatus};
@@ -158,6 +159,13 @@ impl ReviewSource {
         match self {
             Self::Worktree(_) => NO_DIFF_MESSAGE,
             Self::PullRequest(_) => NO_PR_DIFF_MESSAGE,
+        }
+    }
+
+    pub(crate) fn ask_ai_review_mode(&self) -> AskAiReviewMode {
+        match self {
+            Self::Worktree(_) => AskAiReviewMode::Worktree,
+            Self::PullRequest(_) => AskAiReviewMode::PullRequest,
         }
     }
 

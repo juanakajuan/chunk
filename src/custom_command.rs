@@ -7,8 +7,8 @@ use std::process::{Command, Output};
 use color_eyre::eyre::{Result, eyre};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-const RESERVED_KEYS: [char; 14] = [
-    'q', '?', 'f', '/', 'j', 'k', 'n', 'N', 'g', 'G', ' ', 'd', 'e', 'y',
+const RESERVED_KEYS: [char; 15] = [
+    'q', '?', 'f', '/', 'j', 'k', 'n', 'N', 'g', 'G', ' ', 'd', 'e', 'a', 'y',
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +225,7 @@ mod tests {
     fn detects_builtin_key_conflicts() {
         assert!(CommandKey::parse("d").unwrap().conflicts_with_builtin());
         assert!(CommandKey::parse("e").unwrap().conflicts_with_builtin());
+        assert!(CommandKey::parse("a").unwrap().conflicts_with_builtin());
         assert!(CommandKey::parse("y").unwrap().conflicts_with_builtin());
         assert!(!CommandKey::parse("C").unwrap().conflicts_with_builtin());
     }

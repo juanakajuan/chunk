@@ -393,7 +393,12 @@ impl RenderedViewport {
     }
 
     /// Rendered row offset of `hunk_index` for the cached file, if known.
-    pub fn hunk_offset(&self, file_index: usize, file_id: &str, hunk_index: usize) -> Option<usize> {
+    pub fn hunk_offset(
+        &self,
+        file_index: usize,
+        file_id: &str,
+        hunk_index: usize,
+    ) -> Option<usize> {
         self.diff_hunk_offsets(file_index, file_id)
             .and_then(|offsets| offsets.get(hunk_index).copied())
     }
