@@ -10,10 +10,8 @@ use std::process::{Child, Command, Output, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::model::{
-    Changeset, DiffFile, DiffHunk, DiffLineKind, FileStage, FileStatus, SourceSnapshot,
-};
-use crate::patch::parse_unified_diff;
+use crate::model::{Changeset, DiffFile, DiffHunk, FileStage, SourceSnapshot};
+use crate::patch::{hunk_overlaps_file, overlapping_hunk_patch, parse_unified_diff};
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 512 * 1024;
 const DEFAULT_BASE_REFS: [&str; 3] = ["origin/HEAD", "main", "master"];
@@ -288,16 +286,13 @@ fn apply_matching_hunks_to_index(
             file.display_path()
         )
     })?;
-    let hunk_indices = overlapping_hunk_indices(source_file, selected_hunk);
-    if hunk_indices.is_empty() {
-        return Err(eyre!(
+    let patch = overlapping_hunk_patch(source_file, selected_hunk).ok_or_else(|| {
+        eyre!(
             "no {} hunk overlaps selected hunk in {}",
             source.label(),
             file.display_path()
-        ));
-    }
-
-    let patch = build_hunk_patch(source_file, &hunk_indices);
+        )
+    })?;
     apply_patch_to_index(&patch, source.reverse())
 }
 
@@ -309,15 +304,12 @@ fn discard_matching_hunks_from_worktree(
     let source_changeset = load_unstaged_diff(untracked_paths)?;
     let source_file = matching_file(&source_changeset.files, file)
         .ok_or_else(|| eyre!("no unstaged hunk found for {}", file.display_path()))?;
-    let hunk_indices = overlapping_hunk_indices(source_file, selected_hunk);
-    if hunk_indices.is_empty() {
-        return Err(eyre!(
+    let patch = overlapping_hunk_patch(source_file, selected_hunk).ok_or_else(|| {
+        eyre!(
             "no unstaged hunk overlaps selected hunk in {}",
             file.display_path()
-        ));
-    }
-
-    let patch = build_hunk_patch(source_file, &hunk_indices);
+        )
+    })?;
     apply_patch_to_worktree(&patch, true)
 }
 
@@ -333,134 +325,6 @@ fn same_file_identity(left: &DiffFile, right: &DiffFile) -> bool {
 
 fn non_empty_eq(left: &str, right: &str) -> bool {
     !left.is_empty() && left == right
-}
-
-fn hunk_overlaps_file(hunk: &DiffHunk, file: &DiffFile) -> bool {
-    file.hunks
-        .iter()
-        .any(|candidate| hunks_overlap(hunk, candidate))
-}
-
-fn overlapping_hunk_indices(file: &DiffFile, selected_hunk: &DiffHunk) -> Vec<usize> {
-    file.hunks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, hunk)| hunks_overlap(selected_hunk, hunk).then_some(index))
-        .collect()
-}
-
-fn hunks_overlap(left: &DiffHunk, right: &DiffHunk) -> bool {
-    ranges_overlap(
-        line_span(left.old_start, left.old_lines),
-        line_span(right.old_start, right.old_lines),
-    ) || ranges_overlap(
-        line_span(left.new_start, left.new_lines),
-        line_span(right.new_start, right.new_lines),
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LineSpan {
-    start: u32,
-    end: u32,
-}
-
-fn line_span(start: u32, lines: u32) -> LineSpan {
-    LineSpan {
-        start,
-        end: start.saturating_add(lines),
-    }
-}
-
-fn ranges_overlap(left: LineSpan, right: LineSpan) -> bool {
-    left.start < left.end
-        && right.start < right.end
-        && left.start < right.end
-        && right.start < left.end
-}
-
-fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
-    let mut patch = String::new();
-    let old_path = patch_old_path(file);
-    let new_path = patch_new_path(file);
-
-    patch.push_str(&format!(
-        "diff --git {} {}\n",
-        prefixed_patch_path("a", old_path),
-        prefixed_patch_path("b", new_path)
-    ));
-    match file.status {
-        FileStatus::Added => patch.push_str("new file mode 100644\n"),
-        FileStatus::Deleted => patch.push_str("deleted file mode 100644\n"),
-        _ => {}
-    }
-    patch.push_str(&format!("--- {}\n", old_patch_header_path(file, old_path)));
-    patch.push_str(&format!("+++ {}\n", new_patch_header_path(file, new_path)));
-
-    for index in hunk_indices {
-        if let Some(hunk) = file.hunks.get(*index) {
-            push_hunk_patch(&mut patch, hunk);
-        }
-    }
-
-    patch
-}
-
-fn patch_old_path(file: &DiffFile) -> &str {
-    patch_side_path(file, &file.old_path)
-}
-
-fn patch_new_path(file: &DiffFile) -> &str {
-    patch_side_path(file, &file.path)
-}
-
-fn patch_side_path<'a>(file: &'a DiffFile, path: &'a str) -> &'a str {
-    if path.is_empty() {
-        file.display_path()
-    } else {
-        path
-    }
-}
-
-fn old_patch_header_path(file: &DiffFile, path: &str) -> String {
-    patch_header_path(file.status, FileStatus::Added, "a", path)
-}
-
-fn new_patch_header_path(file: &DiffFile, path: &str) -> String {
-    patch_header_path(file.status, FileStatus::Deleted, "b", path)
-}
-
-fn patch_header_path(
-    status: FileStatus,
-    null_status: FileStatus,
-    prefix: &str,
-    path: &str,
-) -> String {
-    if status == null_status {
-        "/dev/null".to_string()
-    } else {
-        prefixed_patch_path(prefix, path)
-    }
-}
-
-fn prefixed_patch_path(prefix: &str, path: &str) -> String {
-    format!("{prefix}/{path}")
-}
-
-fn push_hunk_patch(patch: &mut String, hunk: &DiffHunk) {
-    patch.push_str(&hunk.header);
-    patch.push('\n');
-
-    for line in &hunk.lines {
-        match line.kind {
-            DiffLineKind::Context => patch.push(' '),
-            DiffLineKind::Added => patch.push('+'),
-            DiffLineKind::Removed => patch.push('-'),
-            DiffLineKind::Meta => {}
-        }
-        patch.push_str(&line.content);
-        patch.push('\n');
-    }
 }
 
 fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {

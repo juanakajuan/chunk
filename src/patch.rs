@@ -364,6 +364,156 @@ fn parse_hunk_line(line: &str) -> HunkLine<'_> {
     }
 }
 
+// --- Patch construction -----------------------------------------------------
+//
+// The inverse of `parse_unified_diff`: given a freshly-loaded source `DiffFile`
+// and the hunk a caller acted on, emit Git unified diff text for the overlapping
+// hunks. Kept beside the parser so the patch format lives in one place and the
+// build path round-trips against the parse path in tests, with no Git index.
+
+/// Build a patch containing every hunk in `file` that overlaps `selected_hunk`.
+///
+/// `file` is the source side (staged or unstaged) just loaded from Git;
+/// `selected_hunk` is the hunk the user acted on. Returns `None` when no source
+/// hunk overlaps, letting callers raise a precise "nothing to apply" error. The
+/// text is a Git unified diff and round-trips through [`parse_unified_diff`].
+pub(crate) fn overlapping_hunk_patch(file: &DiffFile, selected_hunk: &DiffHunk) -> Option<String> {
+    let hunk_indices = overlapping_hunk_indices(file, selected_hunk);
+    if hunk_indices.is_empty() {
+        return None;
+    }
+    Some(build_hunk_patch(file, &hunk_indices))
+}
+
+/// Whether any hunk in `file` overlaps `hunk` by old- or new-side line span.
+pub(crate) fn hunk_overlaps_file(hunk: &DiffHunk, file: &DiffFile) -> bool {
+    file.hunks
+        .iter()
+        .any(|candidate| hunks_overlap(hunk, candidate))
+}
+
+fn overlapping_hunk_indices(file: &DiffFile, selected_hunk: &DiffHunk) -> Vec<usize> {
+    file.hunks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hunk)| hunks_overlap(selected_hunk, hunk).then_some(index))
+        .collect()
+}
+
+fn hunks_overlap(left: &DiffHunk, right: &DiffHunk) -> bool {
+    ranges_overlap(
+        line_span(left.old_start, left.old_lines),
+        line_span(right.old_start, right.old_lines),
+    ) || ranges_overlap(
+        line_span(left.new_start, left.new_lines),
+        line_span(right.new_start, right.new_lines),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineSpan {
+    start: u32,
+    end: u32,
+}
+
+fn line_span(start: u32, lines: u32) -> LineSpan {
+    LineSpan {
+        start,
+        end: start.saturating_add(lines),
+    }
+}
+
+fn ranges_overlap(left: LineSpan, right: LineSpan) -> bool {
+    left.start < left.end
+        && right.start < right.end
+        && left.start < right.end
+        && right.start < left.end
+}
+
+fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
+    let mut patch = String::new();
+    let old_path = patch_old_path(file);
+    let new_path = patch_new_path(file);
+
+    patch.push_str(&format!(
+        "diff --git {} {}\n",
+        prefixed_patch_path("a", old_path),
+        prefixed_patch_path("b", new_path)
+    ));
+    match file.status {
+        FileStatus::Added => patch.push_str("new file mode 100644\n"),
+        FileStatus::Deleted => patch.push_str("deleted file mode 100644\n"),
+        _ => {}
+    }
+    patch.push_str(&format!("--- {}\n", old_patch_header_path(file, old_path)));
+    patch.push_str(&format!("+++ {}\n", new_patch_header_path(file, new_path)));
+
+    for index in hunk_indices {
+        if let Some(hunk) = file.hunks.get(*index) {
+            push_hunk_patch(&mut patch, hunk);
+        }
+    }
+
+    patch
+}
+
+fn patch_old_path(file: &DiffFile) -> &str {
+    patch_side_path(file, &file.old_path)
+}
+
+fn patch_new_path(file: &DiffFile) -> &str {
+    patch_side_path(file, &file.path)
+}
+
+fn patch_side_path<'a>(file: &'a DiffFile, path: &'a str) -> &'a str {
+    if path.is_empty() {
+        file.display_path()
+    } else {
+        path
+    }
+}
+
+fn old_patch_header_path(file: &DiffFile, path: &str) -> String {
+    patch_header_path(file.status, FileStatus::Added, "a", path)
+}
+
+fn new_patch_header_path(file: &DiffFile, path: &str) -> String {
+    patch_header_path(file.status, FileStatus::Deleted, "b", path)
+}
+
+fn patch_header_path(
+    status: FileStatus,
+    null_status: FileStatus,
+    prefix: &str,
+    path: &str,
+) -> String {
+    if status == null_status {
+        "/dev/null".to_string()
+    } else {
+        prefixed_patch_path(prefix, path)
+    }
+}
+
+fn prefixed_patch_path(prefix: &str, path: &str) -> String {
+    format!("{prefix}/{path}")
+}
+
+fn push_hunk_patch(patch: &mut String, hunk: &DiffHunk) {
+    patch.push_str(&hunk.header);
+    patch.push('\n');
+
+    for line in &hunk.lines {
+        match line.kind {
+            DiffLineKind::Context => patch.push(' '),
+            DiffLineKind::Added => patch.push('+'),
+            DiffLineKind::Removed => patch.push('-'),
+            DiffLineKind::Meta => {}
+        }
+        patch.push_str(&line.content);
+        patch.push('\n');
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +561,155 @@ mod tests {
         assert_eq!(file.old_path, "old.rs");
         assert_eq!(file.path, "new.rs");
         assert_eq!(file.status, FileStatus::Renamed);
+    }
+
+    fn line(kind: DiffLineKind, content: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            old_line: None,
+            new_line: None,
+            content: content.to_string(),
+        }
+    }
+
+    fn hunk(
+        header: &str,
+        old_start: u32,
+        old_lines: u32,
+        new_start: u32,
+        new_lines: u32,
+        lines: Vec<DiffLine>,
+    ) -> DiffHunk {
+        DiffHunk {
+            header: header.to_string(),
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+            stage: FileStage::Unstaged,
+            lines,
+        }
+    }
+
+    fn file(path: &str, status: FileStatus, hunks: Vec<DiffHunk>) -> DiffFile {
+        DiffFile {
+            id: String::new(),
+            old_path: path.to_string(),
+            path: path.to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
+            status,
+            stage: FileStage::Unstaged,
+            additions: 0,
+            deletions: 0,
+            hunks,
+            binary: false,
+        }
+    }
+
+    fn line_shapes(hunk: &DiffHunk) -> Vec<(DiffLineKind, &str)> {
+        hunk.lines
+            .iter()
+            .map(|line| (line.kind, line.content.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn overlapping_hunk_patch_selects_only_overlapping_hunks() {
+        let source = file(
+            "src/lib.rs",
+            FileStatus::Modified,
+            vec![
+                hunk(
+                    "@@ -1,3 +1,3 @@",
+                    1,
+                    3,
+                    1,
+                    3,
+                    vec![
+                        line(DiffLineKind::Context, "fn a() {"),
+                        line(DiffLineKind::Removed, "    let x = 1;"),
+                        line(DiffLineKind::Added, "    let x = 2;"),
+                    ],
+                ),
+                hunk(
+                    "@@ -20,3 +20,3 @@",
+                    20,
+                    3,
+                    20,
+                    3,
+                    vec![
+                        line(DiffLineKind::Context, "fn b() {"),
+                        line(DiffLineKind::Removed, "    let y = 1;"),
+                        line(DiffLineKind::Added, "    let y = 2;"),
+                    ],
+                ),
+            ],
+        );
+        let selected = hunk("@@ -1,3 +1,3 @@", 1, 3, 1, 3, Vec::new());
+
+        let patch = overlapping_hunk_patch(&source, &selected).expect("overlap");
+        let parsed = parse_unified_diff(&patch);
+
+        assert_eq!(parsed.files.len(), 1);
+        let parsed_file = &parsed.files[0];
+        assert_eq!(parsed_file.path, "src/lib.rs");
+        assert_eq!(parsed_file.hunks.len(), 1);
+        assert_eq!(
+            line_shapes(&parsed_file.hunks[0]),
+            vec![
+                (DiffLineKind::Context, "fn a() {"),
+                (DiffLineKind::Removed, "    let x = 1;"),
+                (DiffLineKind::Added, "    let x = 2;"),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlapping_hunk_patch_returns_none_when_disjoint() {
+        let source = file(
+            "src/lib.rs",
+            FileStatus::Modified,
+            vec![hunk(
+                "@@ -1,3 +1,3 @@",
+                1,
+                3,
+                1,
+                3,
+                vec![line(DiffLineKind::Context, "fn a() {")],
+            )],
+        );
+        let selected = hunk("@@ -50,2 +50,2 @@", 50, 2, 50, 2, Vec::new());
+
+        assert!(overlapping_hunk_patch(&source, &selected).is_none());
+    }
+
+    #[test]
+    fn added_file_patch_round_trips_with_dev_null_old_side() {
+        let mut source = file(
+            "new.rs",
+            FileStatus::Added,
+            vec![hunk(
+                "@@ -0,0 +1,2 @@",
+                0,
+                0,
+                1,
+                2,
+                vec![
+                    line(DiffLineKind::Added, "fn new() {}"),
+                    line(DiffLineKind::Added, "// added"),
+                ],
+            )],
+        );
+        source.old_path = String::new();
+        let selected = hunk("@@ -0,0 +1,2 @@", 0, 0, 1, 2, Vec::new());
+
+        let patch = overlapping_hunk_patch(&source, &selected).expect("overlap");
+        assert!(patch.contains("new file mode 100644"));
+        assert!(patch.contains("--- /dev/null"));
+
+        let parsed = parse_unified_diff(&patch);
+        assert_eq!(parsed.files[0].status, FileStatus::Added);
+        assert_eq!(parsed.files[0].path, "new.rs");
     }
 }
