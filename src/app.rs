@@ -10,8 +10,7 @@ use std::path::PathBuf;
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 use crate::config::AppConfig;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
@@ -19,6 +18,7 @@ use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile, DiffHunk};
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
+use crate::search::Search;
 use crate::selection::TextSelection;
 use crate::theme::Theme;
 use crate::viewport::{
@@ -66,24 +66,6 @@ enum ScrollKeyAction {
 enum PendingLeftClick {
     Sidebar { index: usize },
     Diff { hunk_index: Option<usize> },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SearchMatch {
-    row: usize,
-    start: usize,
-    end: usize,
-}
-
-#[derive(Debug, Default)]
-struct SearchState {
-    prompt_open: bool,
-    input: String,
-    query: String,
-    matches: Vec<SearchMatch>,
-    active_index: Option<usize>,
-    match_file_id: Option<String>,
-    scroll_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +156,7 @@ pub(crate) struct App {
     /// Deferred request for runtime to open an external editor safely.
     editor_request: Option<EditorRequest>,
     /// Literal search prompt, query, matches, and active match.
-    search: SearchState,
+    search: Search,
 }
 
 pub(crate) struct DiffPaneRows {
@@ -217,7 +199,7 @@ impl App {
             pending_left_click: None,
             diff_scrollbar_drag: None,
             editor_request: None,
-            search: SearchState::default(),
+            search: Search::default(),
         }
     }
 
@@ -717,7 +699,7 @@ impl App {
             visible_height,
         );
         self.apply_selected_hunk_style(&mut lines, content_width, theme);
-        self.highlight_search_matches(lines, theme)
+        self.search.highlight(lines, self.diff_scroll, theme)
     }
 
     fn command_output_pane_rows(
@@ -796,26 +778,6 @@ impl App {
 
             lines[rendered_row - visible_start] = header_row;
         }
-    }
-
-    fn highlight_search_matches(
-        &self,
-        lines: Vec<Line<'static>>,
-        theme: Theme,
-    ) -> Vec<Line<'static>> {
-        if self.search.active_query().is_none() || self.search.matches.is_empty() {
-            return lines;
-        }
-
-        lines
-            .into_iter()
-            .enumerate()
-            .map(|(visible_index, line)| {
-                let row = self.diff_scroll.saturating_add(visible_index);
-                let matches = self.search.matches_on_row(row);
-                highlight_line_search_matches(line, &matches, self.search.active_index, theme)
-            })
-            .collect()
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
@@ -937,7 +899,7 @@ impl App {
             return Ok(true);
         }
 
-        if self.search.prompt_open {
+        if self.search.is_prompt_open() {
             self.search.handle_prompt_key(key);
             self.ensure_scroll_bounds();
             return Ok(true);
@@ -1419,20 +1381,21 @@ impl App {
     }
 
     fn jump_search_match(&mut self, direction: VerticalDirection) {
-        if self.search.move_active(direction).is_some() {
+        if self
+            .search
+            .advance_match(matches!(direction, VerticalDirection::Down))
+        {
             self.scroll_active_search_match();
             self.select_hunk_at_scroll();
         }
     }
 
     fn scroll_active_search_match(&mut self) {
-        let Some(active_match) = self.search.active_match() else {
+        let Some(active_row) = self.search.active_match_row() else {
             return;
         };
 
-        self.diff_scroll = active_match
-            .row
-            .saturating_sub(self.viewport.diff_view_height() / 2);
+        self.diff_scroll = active_row.saturating_sub(self.viewport.diff_view_height() / 2);
     }
 
     fn center_selected_hunk(&mut self) {
@@ -1651,127 +1614,7 @@ impl App {
     }
 }
 
-impl SearchState {
-    fn active_query(&self) -> Option<&str> {
-        (!self.query.is_empty()).then_some(self.query.as_str())
-    }
-
-    fn status(&self) -> Option<rows::SearchStatus<'_>> {
-        if self.prompt_open {
-            return Some(rows::SearchStatus::Prompt { input: &self.input });
-        }
-
-        self.active_query().map(|query| rows::SearchStatus::Active {
-            query,
-            active: self.active_index.map(|index| index + 1),
-            total: self.matches.len(),
-        })
-    }
-
-    fn open_prompt(&mut self) {
-        self.input.clone_from(&self.query);
-        self.prompt_open = true;
-    }
-
-    fn handle_prompt_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.clear_query(),
-            KeyCode::Enter => self.apply_prompt(),
-            KeyCode::Backspace => {
-                self.input.pop();
-            }
-            KeyCode::Char(value) if accepts_text_input(key) => self.input.push(value),
-            _ => {}
-        }
-    }
-
-    fn apply_prompt(&mut self) {
-        self.prompt_open = false;
-        if self.input.is_empty() {
-            self.clear_query();
-            return;
-        }
-
-        self.query.clone_from(&self.input);
-        self.invalidate_matches();
-    }
-
-    fn clear_query(&mut self) {
-        self.prompt_open = false;
-        self.query.clear();
-        self.input.clear();
-        self.clear_rendered_matches();
-        self.scroll_pending = false;
-    }
-
-    fn clear_rendered_matches(&mut self) {
-        self.matches.clear();
-        self.active_index = None;
-        self.match_file_id = None;
-    }
-
-    fn invalidate_matches(&mut self) {
-        self.clear_rendered_matches();
-        if self.active_query().is_some() {
-            self.scroll_pending = true;
-        }
-    }
-
-    fn refresh_matches(&mut self, file_id: &str, lines: &[Line<'static>]) -> bool {
-        let Some(query) = self.active_query() else {
-            self.clear_rendered_matches();
-            return false;
-        };
-        let previous_active_index = if self.match_file_id.as_deref() == Some(file_id) {
-            self.active_index
-        } else {
-            None
-        };
-
-        self.matches = diff_search_matches(lines, query);
-        self.match_file_id = Some(file_id.to_string());
-        self.active_index = (!self.matches.is_empty()).then(|| {
-            previous_active_index
-                .unwrap_or(0)
-                .min(self.matches.len() - 1)
-        });
-
-        let should_scroll = self.scroll_pending && self.active_index.is_some();
-        self.scroll_pending = false;
-        should_scroll
-    }
-
-    fn move_active(&mut self, direction: VerticalDirection) -> Option<SearchMatch> {
-        if self.matches.is_empty() {
-            self.active_index = None;
-            return None;
-        }
-
-        let current = self.active_index.unwrap_or(0).min(self.matches.len() - 1);
-        self.active_index = Some(match direction {
-            VerticalDirection::Down => (current + 1) % self.matches.len(),
-            VerticalDirection::Up => current.checked_sub(1).unwrap_or(self.matches.len() - 1),
-        });
-
-        self.active_match()
-    }
-
-    fn active_match(&self) -> Option<SearchMatch> {
-        self.active_index
-            .and_then(|index| self.matches.get(index).copied())
-    }
-
-    fn matches_on_row(&self, row: usize) -> Vec<(usize, SearchMatch)> {
-        self.matches
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, search_match)| search_match.row == row)
-            .collect()
-    }
-}
-
-fn accepts_text_input(key: KeyEvent) -> bool {
+pub(crate) fn accepts_text_input(key: KeyEvent) -> bool {
     !key.modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
@@ -1828,153 +1671,7 @@ fn clamp_command_output_scroll(output: &mut CommandOutputState) {
     );
 }
 
-fn diff_search_matches(lines: &[Line<'static>], query: &str) -> Vec<SearchMatch> {
-    lines
-        .iter()
-        .enumerate()
-        .flat_map(|(row, line)| {
-            search_matches_in_text(&line_text(line), query)
-                .into_iter()
-                .map(move |(start, end)| SearchMatch { row, start, end })
-        })
-        .collect()
-}
-
-fn search_matches_in_text(text: &str, query: &str) -> Vec<(usize, usize)> {
-    let haystack: Vec<char> = text.chars().collect();
-    let needle: Vec<char> = query.chars().collect();
-    let needle_len = needle.len();
-    if needle_len == 0 || haystack.len() < needle_len {
-        return Vec::new();
-    }
-
-    (0..=haystack.len() - needle_len)
-        .filter(|start| {
-            haystack[*start..*start + needle_len]
-                .iter()
-                .zip(&needle)
-                .all(|(left, right)| search_chars_match(*left, *right))
-        })
-        .map(|start| (start, start + needle_len))
-        .collect()
-}
-
-fn search_chars_match(left: char, right: char) -> bool {
-    left == right || (left.is_ascii() && right.is_ascii() && left.eq_ignore_ascii_case(&right))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchMatchKind {
-    Active,
-    Inactive,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SearchStyledChar {
-    value: char,
-    style: Style,
-}
-
-fn highlight_line_search_matches(
-    line: Line<'static>,
-    matches: &[(usize, SearchMatch)],
-    active_index: Option<usize>,
-    theme: Theme,
-) -> Line<'static> {
-    if matches.is_empty() {
-        return line;
-    }
-
-    let style = line.style;
-    let alignment = line.alignment;
-    let chars = line_search_chars(line.spans);
-    let spans = chars_to_search_spans(chars.into_iter().enumerate().map(|(index, character)| {
-        SearchStyledChar {
-            value: character.value,
-            style: search_style_for_char(index, character.style, matches, active_index, theme),
-        }
-    }));
-
-    Line {
-        spans,
-        style,
-        alignment,
-    }
-}
-
-fn line_search_chars(spans: Vec<Span<'static>>) -> Vec<SearchStyledChar> {
-    let mut chars = Vec::new();
-
-    for span in spans {
-        let style = span.style;
-        for value in span.content.chars() {
-            chars.push(SearchStyledChar { value, style });
-        }
-    }
-
-    chars
-}
-
-fn search_style_for_char(
-    index: usize,
-    base_style: Style,
-    matches: &[(usize, SearchMatch)],
-    active_index: Option<usize>,
-    theme: Theme,
-) -> Style {
-    match search_match_kind_at(index, matches, active_index) {
-        Some(SearchMatchKind::Active) => base_style
-            .fg(theme.on_accent)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-        Some(SearchMatchKind::Inactive) => {
-            base_style.bg(theme.selected).add_modifier(Modifier::BOLD)
-        }
-        None => base_style,
-    }
-}
-
-fn search_match_kind_at(
-    index: usize,
-    matches: &[(usize, SearchMatch)],
-    active_index: Option<usize>,
-) -> Option<SearchMatchKind> {
-    let mut found_inactive_match = false;
-
-    for (match_index, search_match) in matches {
-        if !search_match_contains(*search_match, index) {
-            continue;
-        }
-
-        if Some(*match_index) == active_index {
-            return Some(SearchMatchKind::Active);
-        }
-
-        found_inactive_match = true;
-    }
-
-    found_inactive_match.then_some(SearchMatchKind::Inactive)
-}
-
-fn search_match_contains(search_match: SearchMatch, index: usize) -> bool {
-    index >= search_match.start && index < search_match.end
-}
-
-fn chars_to_search_spans(chars: impl IntoIterator<Item = SearchStyledChar>) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-
-    for character in chars {
-        match spans.last_mut() {
-            Some(span) if span.style == character.style => {
-                span.content.to_mut().push(character.value);
-            }
-            _ => spans.push(Span::styled(character.value.to_string(), character.style)),
-        }
-    }
-
-    spans
-}
-
+#[cfg(test)]
 fn line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
@@ -2496,9 +2193,9 @@ mod tests {
         enter_search_query(&mut app, "target");
         let pane = render_diff_pane(&mut app, theme);
 
-        assert_eq!(app.search.matches.len(), 2);
-        assert_eq!(app.search.active_index, Some(0));
-        let active_row = app.search.active_match().unwrap().row;
+        assert_eq!(app.search.match_count(), 2);
+        assert_eq!(app.search.active_index(), Some(0));
+        let active_row = app.search.active_match_row().unwrap();
         assert!(active_row >= app.diff_scroll);
         assert!(active_row < app.diff_scroll + app.viewport.diff_view_height());
         assert!(pane.lines.iter().any(|line| {
@@ -2521,11 +2218,11 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.search.active_index, Some(1));
+        assert_eq!(app.search.active_index(), Some(1));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.search.active_index, Some(0));
+        assert_eq!(app.search.active_index(), Some(0));
     }
 
     #[test]
@@ -2547,8 +2244,8 @@ mod tests {
 
         assert!(keep_running);
         assert!(app.search.active_query().is_none());
-        assert!(app.search.matches.is_empty());
-        assert_eq!(app.search.active_index, None);
+        assert_eq!(app.search.match_count(), 0);
+        assert_eq!(app.search.active_index(), None);
     }
 
     #[test]
@@ -2565,9 +2262,9 @@ mod tests {
             .unwrap();
 
         assert!(keep_running);
-        assert!(!app.search.prompt_open);
+        assert!(!app.search.is_prompt_open());
         assert!(app.search.active_query().is_none());
-        assert!(app.search.matches.is_empty());
+        assert_eq!(app.search.match_count(), 0);
     }
 
     #[test]

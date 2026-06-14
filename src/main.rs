@@ -14,6 +14,7 @@ mod patch;
 mod review_source;
 mod rows;
 mod runtime;
+mod search;
 mod selection;
 mod syntax;
 mod theme;
