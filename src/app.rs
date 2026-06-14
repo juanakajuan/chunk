@@ -23,7 +23,7 @@ use crate::selection::TextSelection;
 use crate::theme::Theme;
 use crate::viewport::{
     DiffLayoutMetrics, DiffLayoutRequest, DiffRenderRequest, DiffScrollbar, DiffScrollbarDrag,
-    RenderedDiffLines, RenderedViewport, ViewportScrollInput,
+    RenderedViewport, ViewportScrollInput,
 };
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -518,13 +518,6 @@ impl App {
         self.selected_file()?.hunks.get(self.selected_hunk_index?)
     }
 
-    fn ensure_selected_file_sources_loaded(&mut self) {
-        let source = &self.source;
-        if let Some(file) = self.changeset.files.get_mut(self.selected_file_index) {
-            source.load_source_snapshots(file);
-        }
-    }
-
     fn ensure_scroll_bounds(&mut self) {
         self.ensure_selected_hunk_bounds();
         let scrolls = self.viewport.clamped_scrolls(self.viewport_scroll_input());
@@ -663,41 +656,39 @@ impl App {
         }
 
         let target_rows = self.diff_render_target_rows(visible_height);
+        let hunk_offsets = self
+            .selected_diff_layout_metrics(content_width, theme)
+            .map(|metrics| metrics.hunk_offsets.clone())
+            .unwrap_or_default();
 
-        let render_target = {
-            let file = &self.changeset.files[selected_file_index];
-            self.viewport.diff_lines_render_target(DiffRenderRequest {
-                file_index: selected_file_index,
-                file_id: file.id.as_str(),
-                content_width,
-                syntax_palette: theme.syntax,
-                can_stage,
-                requested_rows: target_rows,
-            })
+        let file_id = self.changeset.files[selected_file_index].id.clone();
+        let request = DiffRenderRequest {
+            file_index: selected_file_index,
+            file_id: file_id.as_str(),
+            content_width,
+            syntax_palette: theme.syntax,
+            can_stage,
+            requested_rows: target_rows,
         };
 
-        if let Some(render_target) = render_target {
-            let hunk_offsets = self
-                .selected_diff_layout_metrics(content_width, theme)
-                .map(|metrics| metrics.hunk_offsets.clone())
-                .unwrap_or_default();
-            self.ensure_selected_file_sources_loaded();
-            let file = self.changeset.files[selected_file_index].clone();
-            let rendered_rows =
-                rows::diff_lines_until(&file, content_width, theme, can_stage, None, render_target);
-            self.viewport.cache_diff_lines(
-                selected_file_index,
-                RenderedDiffLines::new(
-                    file.id.clone(),
-                    content_width,
-                    theme.syntax,
-                    can_stage,
-                    rendered_rows.lines,
-                    rendered_rows.complete,
-                )
-                .with_hunk_offsets(hunk_offsets),
-            );
-        }
+        // Split borrows so the render seam can load source snapshots and render
+        // rows while the viewport owns the cache; source snapshots load only
+        // when the viewport actually invokes `render`.
+        let Self {
+            viewport,
+            changeset,
+            source,
+            ..
+        } = self;
+        viewport.ensure_diff_lines(request, hunk_offsets, |render_target| {
+            if let Some(file) = changeset.files.get_mut(selected_file_index) {
+                source.load_source_snapshots(file);
+            }
+            let file = &changeset.files[selected_file_index];
+            let rendered =
+                rows::diff_lines_until(file, content_width, theme, can_stage, None, render_target);
+            (rendered.lines, rendered.complete)
+        });
 
         let pending_search_scroll = self.refresh_search_matches(selected_file_index);
         self.ensure_scroll_bounds();
@@ -807,11 +798,9 @@ impl App {
         let Some(hunk) = file.hunks.get(selected_hunk_index) else {
             return;
         };
-        let Some(hunk_offset) = self
-            .viewport
-            .diff_hunk_offsets(self.selected_file_index, file.id.as_str())
-            .and_then(|offsets| offsets.get(selected_hunk_index))
-            .copied()
+        let Some(hunk_offset) =
+            self.viewport
+                .hunk_offset(self.selected_file_index, file.id.as_str(), selected_hunk_index)
         else {
             return;
         };
@@ -1464,14 +1453,10 @@ impl App {
             return;
         }
 
-        let Some(offsets) = self
-            .viewport
-            .diff_hunk_offsets(self.selected_file_index, file_id.as_str())
-        else {
-            return;
-        };
-
-        if let Some(offset) = offsets.get(index) {
+        if let Some(offset) =
+            self.viewport
+                .hunk_offset(self.selected_file_index, file_id.as_str(), index)
+        {
             self.diff_scroll = offset.saturating_sub(self.viewport.diff_view_height() / 2);
         }
     }
@@ -1482,24 +1467,11 @@ impl App {
 
     fn hunk_index_at_rendered_row(&self, rendered_row: usize) -> Option<usize> {
         let file = self.selected_file()?;
-        if file.hunks.is_empty() {
-            return None;
-        }
-
-        let Some(offsets) = self
-            .viewport
-            .diff_hunk_offsets(self.selected_file_index, file.id.as_str())
-            .filter(|offsets| !offsets.is_empty())
-        else {
-            return Some(0);
-        };
-
-        Some(
-            offsets
-                .iter()
-                .rposition(|offset| *offset <= rendered_row)
-                .unwrap_or(0)
-                .min(file.hunks.len() - 1),
+        self.viewport.hunk_index_at(
+            self.selected_file_index,
+            file.id.as_str(),
+            rendered_row,
+            file.hunks.len(),
         )
     }
 

@@ -326,7 +326,7 @@ impl RenderedViewport {
         }
     }
 
-    pub fn diff_lines_render_target(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
+    fn diff_lines_render_target(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
         let Some(cache) = self.diff_lines_cache(request.file_index) else {
             return Some(request.requested_rows);
         };
@@ -334,6 +334,37 @@ impl RenderedViewport {
         cache.render_target_if_needed(request)
     }
 
+    /// Ensure the diff-lines cache for `request` covers the requested rows,
+    /// invoking `render` only when more rows are needed. The viewport owns the
+    /// render target, cache key, and hunk-offset bookkeeping; `render` is the
+    /// internal seam that produces wrapped rows for a row budget.
+    pub fn ensure_diff_lines(
+        &mut self,
+        request: DiffRenderRequest<'_>,
+        hunk_offsets: Vec<usize>,
+        render: impl FnOnce(usize) -> (Vec<Line<'static>>, bool),
+    ) {
+        let Some(render_target) = self.diff_lines_render_target(request) else {
+            return;
+        };
+
+        let (lines, complete) = render(render_target);
+        let cached = RenderedDiffLines::new(
+            request.file_id.to_string(),
+            request.content_width,
+            request.syntax_palette,
+            request.can_stage,
+            lines,
+            complete,
+        )
+        .with_hunk_offsets(hunk_offsets);
+
+        if let Some(cache_slot) = self.diff_lines_cache.get_mut(request.file_index) {
+            *cache_slot = Some(cached);
+        }
+    }
+
+    #[cfg(test)]
     pub fn cache_diff_lines(&mut self, file_index: usize, lines: RenderedDiffLines) {
         if let Some(cache_slot) = self.diff_lines_cache.get_mut(file_index) {
             *cache_slot = Some(lines);
@@ -356,9 +387,45 @@ impl RenderedViewport {
             .map(|cache| cache.lines.as_slice())
     }
 
-    pub fn diff_hunk_offsets(&self, file_index: usize, file_id: &str) -> Option<&[usize]> {
+    fn diff_hunk_offsets(&self, file_index: usize, file_id: &str) -> Option<&[usize]> {
         self.matching_diff_lines_cache(file_index, Some(file_id))
             .map(|cache| cache.hunk_offsets.as_slice())
+    }
+
+    /// Rendered row offset of `hunk_index` for the cached file, if known.
+    pub fn hunk_offset(&self, file_index: usize, file_id: &str, hunk_index: usize) -> Option<usize> {
+        self.diff_hunk_offsets(file_index, file_id)
+            .and_then(|offsets| offsets.get(hunk_index).copied())
+    }
+
+    /// Hunk index occupying `rendered_row`, mapping a scroll position back to a
+    /// hunk via the cached offsets. Falls back to the first hunk when offsets
+    /// are not yet cached.
+    pub fn hunk_index_at(
+        &self,
+        file_index: usize,
+        file_id: &str,
+        rendered_row: usize,
+        hunk_count: usize,
+    ) -> Option<usize> {
+        if hunk_count == 0 {
+            return None;
+        }
+
+        let Some(offsets) = self
+            .diff_hunk_offsets(file_index, file_id)
+            .filter(|offsets| !offsets.is_empty())
+        else {
+            return Some(0);
+        };
+
+        Some(
+            offsets
+                .iter()
+                .rposition(|offset| *offset <= rendered_row)
+                .unwrap_or(0)
+                .min(hunk_count - 1),
+        )
     }
 
     pub fn cached_sidebar_row_counts(
