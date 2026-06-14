@@ -107,6 +107,29 @@ impl DiscardConfirmation {
     }
 }
 
+/// The single modal overlay active over the diff view, if any.
+///
+/// At most one overlay can be active at a time. Holding them in one value makes
+/// that exclusivity a type invariant instead of a guard-clause ordering that
+/// would otherwise be re-derived across `handle_key`, `handle_mouse`, and the
+/// renderer. The literal search prompt is intentionally not an overlay: it
+/// captures keystrokes only, leaves mouse handling identical to the normal diff
+/// view, and its persistent query/match state belongs to the `search` module.
+#[derive(Debug)]
+enum Overlay {
+    /// Keymap help modal; owns the scroll offset for keymaps taller than the modal.
+    Help { scroll: usize },
+    /// Pending destructive worktree discard awaiting y/n confirmation.
+    Discard(DiscardConfirmation),
+    /// A custom command is running; all input is swallowed until runtime delivers output.
+    CommandRunning {
+        binding: CustomCommandBinding,
+        spinner_frame: usize,
+    },
+    /// Completed custom command output shown in the diff pane.
+    CommandOutput(CommandOutputState),
+}
+
 #[derive(Debug)]
 pub(crate) struct App {
     /// Review source behavior for this session.
@@ -123,22 +146,13 @@ pub(crate) struct App {
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
     files_panel_visible: bool,
-    /// Whether the in-app keymap help overlay is open.
-    help_overlay_visible: bool,
-    /// First help overlay row visible when help content exceeds the modal height.
-    help_overlay_scroll: usize,
+    /// Active modal overlay (help, discard confirmation, running command, or
+    /// command output); at most one at a time.
+    overlay: Option<Overlay>,
     /// User-configured shell command bindings.
     custom_commands: Vec<CustomCommandBinding>,
     /// Deferred request for runtime to execute a configured shell command safely.
     custom_command_request: Option<CustomCommandBinding>,
-    /// Custom command currently running while runtime waits for captured output.
-    custom_command_running: Option<CustomCommandBinding>,
-    /// Index into the running custom command spinner animation.
-    custom_command_spinner_frame: usize,
-    /// Completed custom command output currently shown in the diff pane.
-    command_output: Option<CommandOutputState>,
-    /// Pending destructive worktree discard request.
-    discard_confirmation: Option<DiscardConfirmation>,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
     /// Rendered live-status rows above the diff rows in the diff pane.
@@ -183,14 +197,9 @@ impl App {
             selected_hunk_index,
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
-            help_overlay_visible: false,
-            help_overlay_scroll: 0,
+            overlay: None,
             custom_commands: config.commands,
             custom_command_request: None,
-            custom_command_running: None,
-            custom_command_spinner_frame: 0,
-            command_output: None,
-            discard_confirmation: None,
             diff_scroll: 0,
             diff_status_rows: 0,
             sidebar_scroll: 0,
@@ -213,17 +222,58 @@ impl App {
     }
 
     pub(crate) fn help_overlay_visible(&self) -> bool {
-        self.help_overlay_visible
+        matches!(self.overlay, Some(Overlay::Help { .. }))
     }
 
     pub(crate) fn help_overlay_scroll(&self) -> usize {
-        self.help_overlay_scroll
+        match &self.overlay {
+            Some(Overlay::Help { scroll }) => *scroll,
+            _ => 0,
+        }
     }
 
     pub(crate) fn clamp_help_overlay_scroll(&mut self, line_count: usize, visible_height: usize) {
-        self.help_overlay_scroll = self
-            .help_overlay_scroll
-            .min(line_count.saturating_sub(visible_height));
+        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
+            *scroll = (*scroll).min(line_count.saturating_sub(visible_height));
+        }
+    }
+
+    fn set_help_overlay_scroll(&mut self, value: usize) {
+        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
+            *scroll = value;
+        }
+    }
+
+    fn command_output(&self) -> Option<&CommandOutputState> {
+        match &self.overlay {
+            Some(Overlay::CommandOutput(output)) => Some(output),
+            _ => None,
+        }
+    }
+
+    fn command_output_mut(&mut self) -> Option<&mut CommandOutputState> {
+        match &mut self.overlay {
+            Some(Overlay::CommandOutput(output)) => Some(output),
+            _ => None,
+        }
+    }
+
+    fn command_running(&self) -> Option<(&CustomCommandBinding, usize)> {
+        match &self.overlay {
+            Some(Overlay::CommandRunning {
+                binding,
+                spinner_frame,
+            }) => Some((binding, *spinner_frame)),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn discard_target(&self) -> Option<&DiscardTarget> {
+        match &self.overlay {
+            Some(Overlay::Discard(confirmation)) => Some(&confirmation.target),
+            _ => None,
+        }
     }
 
     pub(crate) fn focus(&self) -> FocusPane {
@@ -282,15 +332,16 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> DiffPaneRows {
-        if self.command_output.is_some() {
+        if self.command_output().is_some() {
             return self.command_output_pane_rows(area, content_width, visible_height, theme);
         }
 
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
         let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+        let running = self.command_running();
         lines.extend(rows::custom_command_running_lines(
-            self.custom_command_running.as_ref(),
-            self.custom_command_spinner_frame,
+            running.map(|(binding, _)| binding),
+            running.map_or(0, |(_, frame)| frame),
             content_width,
             theme,
         ));
@@ -380,7 +431,7 @@ impl App {
     }
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
-        if self.command_output.is_some() {
+        if self.command_output().is_some() {
             return rows::custom_command_output_keybind_bar_line(theme);
         }
 
@@ -440,10 +491,10 @@ impl App {
     }
 
     fn discard_status_lines(&self, content_width: usize, theme: Theme) -> Vec<Line<'static>> {
-        let prompt = self
-            .discard_confirmation
-            .as_ref()
-            .map(DiscardConfirmation::prompt);
+        let prompt = match &self.overlay {
+            Some(Overlay::Discard(confirmation)) => Some(confirmation.prompt()),
+            _ => None,
+        };
         rows::discard_status_lines(prompt.as_deref(), content_width, theme)
     }
 
@@ -713,8 +764,7 @@ impl App {
         self.diff_status_rows = 0;
 
         let output = self
-            .command_output
-            .as_mut()
+            .command_output_mut()
             .expect("command output pane requires command output state");
         let title = format!(" Command: {} ", output.result.label());
         let all_lines = rows::custom_command_output_lines(&output.result, content_width, theme);
@@ -800,13 +850,15 @@ impl App {
         self.live_error = None;
         self.focus = FocusPane::Diff;
         self.text_selection.clear();
-        self.custom_command_running = Some(command.clone());
-        self.custom_command_spinner_frame = 0;
+        self.overlay = Some(Overlay::CommandRunning {
+            binding: command.clone(),
+            spinner_frame: 0,
+        });
     }
 
     pub(crate) fn advance_custom_command_spinner(&mut self) {
-        if self.custom_command_running.is_some() {
-            self.custom_command_spinner_frame = self.custom_command_spinner_frame.wrapping_add(1);
+        if let Some(Overlay::CommandRunning { spinner_frame, .. }) = &mut self.overlay {
+            *spinner_frame = spinner_frame.wrapping_add(1);
         }
     }
 
@@ -814,14 +866,12 @@ impl App {
         self.live_error = None;
         self.focus = FocusPane::Diff;
         self.text_selection.clear();
-        self.custom_command_running = None;
-        self.custom_command_spinner_frame = 0;
-        self.command_output = Some(CommandOutputState {
+        self.overlay = Some(Overlay::CommandOutput(CommandOutputState {
             result,
             scroll: 0,
             rendered_row_count: 0,
             visible_height: 0,
-        });
+        }));
     }
 
     pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
@@ -846,7 +896,9 @@ impl App {
 
         self.changeset = changeset;
         self.live_error = None;
-        self.discard_confirmation = None;
+        if matches!(self.overlay, Some(Overlay::Discard(_))) {
+            self.overlay = None;
+        }
         self.text_selection.clear();
         self.selected_file_index = selected_file_index;
         self.selected_hunk_index = reloaded_hunk_index(
@@ -874,7 +926,8 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if self.custom_command_running.is_some() {
+        // A running command blocks all input, including ctrl-c, until it finishes.
+        if matches!(self.overlay, Some(Overlay::CommandRunning { .. })) {
             return Ok(true);
         }
 
@@ -884,18 +937,8 @@ impl App {
 
         self.text_selection.clear();
 
-        if self.command_output.is_some() {
-            self.handle_command_output_key(key);
-            return Ok(true);
-        }
-
-        if self.discard_confirmation.is_some() {
-            self.handle_discard_confirmation_key(key);
-            return Ok(true);
-        }
-
-        if self.help_overlay_visible {
-            self.handle_help_overlay_key(key);
+        if self.overlay.is_some() {
+            self.handle_overlay_key(key);
             return Ok(true);
         }
 
@@ -950,27 +993,18 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.custom_command_running.is_some() {
+        // A running command blocks all mouse input until it finishes.
+        if matches!(self.overlay, Some(Overlay::CommandRunning { .. })) {
+            return;
+        }
+
+        if self.overlay.is_some() {
+            self.handle_overlay_mouse(mouse);
             return;
         }
 
         let column = mouse.column;
         let row = mouse.row;
-
-        if self.help_overlay_visible {
-            self.handle_help_overlay_mouse(mouse);
-            return;
-        }
-
-        if self.discard_confirmation.is_some() {
-            return;
-        }
-
-        if self.command_output.is_some() {
-            self.handle_command_output_mouse(mouse);
-            return;
-        }
-
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.handle_left_down(column, row),
             MouseEventKind::Drag(MouseButton::Left) => self.handle_left_drag(column, row),
@@ -988,9 +1022,26 @@ impl App {
         self.ensure_scroll_bounds();
     }
 
+    fn handle_overlay_key(&mut self, key: KeyEvent) {
+        match self.overlay {
+            Some(Overlay::Help { .. }) => self.handle_help_overlay_key(key),
+            Some(Overlay::Discard(_)) => self.handle_discard_confirmation_key(key),
+            Some(Overlay::CommandOutput(_)) => self.handle_command_output_key(key),
+            Some(Overlay::CommandRunning { .. }) | None => {}
+        }
+    }
+
+    fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
+        match self.overlay {
+            Some(Overlay::Help { .. }) => self.handle_help_overlay_mouse(mouse),
+            Some(Overlay::CommandOutput(_)) => self.handle_command_output_mouse(mouse),
+            Some(Overlay::Discard(_)) | Some(Overlay::CommandRunning { .. }) | None => {}
+        }
+    }
+
     fn handle_help_overlay_key(&mut self, key: KeyEvent) {
         if closes_help_overlay(key) {
-            self.help_overlay_visible = false;
+            self.overlay = None;
             return;
         }
 
@@ -999,8 +1050,8 @@ impl App {
             Some(ScrollKeyAction::Page(direction)) => {
                 self.scroll_help_overlay_by(direction, HELP_OVERLAY_SCROLL_PAGE)
             }
-            Some(ScrollKeyAction::Top) => self.help_overlay_scroll = 0,
-            Some(ScrollKeyAction::Bottom) => self.help_overlay_scroll = usize::MAX,
+            Some(ScrollKeyAction::Top) => self.set_help_overlay_scroll(0),
+            Some(ScrollKeyAction::Bottom) => self.set_help_overlay_scroll(usize::MAX),
             None => {}
         }
     }
@@ -1015,15 +1066,15 @@ impl App {
         match key.code {
             KeyCode::Enter => self.execute_pending_discard(),
             KeyCode::Char('y') if accepts_text_input(key) => self.execute_pending_discard(),
-            KeyCode::Esc => self.discard_confirmation = None,
-            KeyCode::Char('n') if accepts_text_input(key) => self.discard_confirmation = None,
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Char('n') if accepts_text_input(key) => self.overlay = None,
             _ => {}
         }
     }
 
     fn handle_command_output_key(&mut self, key: KeyEvent) {
         if closes_command_output(key) {
-            self.command_output = None;
+            self.overlay = None;
             return;
         }
 
@@ -1083,10 +1134,10 @@ impl App {
     }
 
     fn toggle_help_overlay(&mut self) {
-        self.help_overlay_visible = !self.help_overlay_visible;
-        if self.help_overlay_visible {
-            self.help_overlay_scroll = 0;
-        }
+        self.overlay = match self.overlay {
+            Some(Overlay::Help { .. }) => None,
+            _ => Some(Overlay::Help { scroll: 0 }),
+        };
     }
 
     fn handle_left_down(&mut self, column: u16, row: u16) {
@@ -1269,17 +1320,18 @@ impl App {
     }
 
     fn scroll_help_overlay_by(&mut self, direction: VerticalDirection, amount: usize) {
-        self.help_overlay_scroll = direction.shift(self.help_overlay_scroll, amount);
+        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
+            *scroll = direction.shift(*scroll, amount);
+        }
     }
 
     fn command_output_page(&self) -> usize {
-        self.command_output
-            .as_ref()
+        self.command_output()
             .map_or(1, |output| output.visible_height.max(1))
     }
 
     fn scroll_command_output_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let Some(output) = self.command_output.as_mut() else {
+        let Some(output) = self.command_output_mut() else {
             return;
         };
 
@@ -1288,13 +1340,13 @@ impl App {
     }
 
     fn scroll_command_output_to_top(&mut self) {
-        if let Some(output) = self.command_output.as_mut() {
+        if let Some(output) = self.command_output_mut() {
             output.scroll = 0;
         }
     }
 
     fn scroll_command_output_to_bottom(&mut self) {
-        if let Some(output) = self.command_output.as_mut() {
+        if let Some(output) = self.command_output_mut() {
             output.scroll = usize::MAX;
             clamp_command_output_scroll(output);
         }
@@ -1522,12 +1574,12 @@ impl App {
         let path = file.display_path().to_string();
 
         self.live_error = None;
-        self.discard_confirmation = Some(DiscardConfirmation {
+        self.overlay = Some(Overlay::Discard(DiscardConfirmation {
             target: DiscardTarget::File {
                 file_index: self.selected_file_index,
                 path,
             },
-        });
+        }));
     }
 
     fn request_selected_hunk_discard(&mut self) {
@@ -1542,17 +1594,17 @@ impl App {
         let path = file.display_path().to_string();
 
         self.live_error = None;
-        self.discard_confirmation = Some(DiscardConfirmation {
+        self.overlay = Some(Overlay::Discard(DiscardConfirmation {
             target: DiscardTarget::Hunk {
                 file_index: self.selected_file_index,
                 hunk_index,
                 path,
             },
-        });
+        }));
     }
 
     fn execute_pending_discard(&mut self) {
-        let Some(confirmation) = self.discard_confirmation.take() else {
+        let Some(Overlay::Discard(confirmation)) = self.overlay.take() else {
             return;
         };
 
@@ -1904,11 +1956,11 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.help_overlay_visible);
+        assert!(app.help_overlay_visible());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
-        assert!(!app.help_overlay_visible);
+        assert!(!app.help_overlay_visible());
     }
 
     #[test]
@@ -1921,7 +1973,7 @@ mod tests {
             .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
         assert!(keep_running);
-        assert!(!app.help_overlay_visible);
+        assert!(!app.help_overlay_visible());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
@@ -1929,7 +1981,7 @@ mod tests {
             .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
             .unwrap();
         assert!(keep_running);
-        assert!(!app.help_overlay_visible);
+        assert!(!app.help_overlay_visible());
     }
 
     #[test]
@@ -2169,7 +2221,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            app.discard_confirmation.as_ref().map(|confirmation| &confirmation.target),
+            app.discard_target(),
             Some(DiscardTarget::File { path, .. }) if path == "sample.txt"
         ));
         assert!(app.live_error.is_none());
@@ -2177,7 +2229,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
 
-        assert!(app.discard_confirmation.is_none());
+        assert!(app.discard_target().is_none());
     }
 
     #[test]
@@ -2355,13 +2407,13 @@ mod tests {
             .unwrap();
 
         assert!(keep_running);
-        assert!(app.custom_command_running.is_some());
+        assert!(app.command_running().is_some());
 
         app.set_custom_command_result(CustomCommandResult::not_started(&command, None, "failed"));
         let output_pane = render_diff_pane(&mut app, Theme::github_dark());
         let output_text = pane_text(&output_pane);
 
-        assert!(app.custom_command_running.is_none());
+        assert!(app.command_running().is_none());
         assert!(output_pane.title.contains("Command: commit and push"));
         assert!(!output_text.contains("Running command: commit and push"));
     }
@@ -2378,21 +2430,15 @@ mod tests {
 
         let pane = render_diff_pane(&mut app, Theme::github_dark());
         assert!(pane.title.contains("Command: long output"));
-        assert_eq!(
-            app.command_output.as_ref().map(|output| output.scroll),
-            Some(0)
-        );
+        assert_eq!(app.command_output().map(|output| output.scroll), Some(0));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(
-            app.command_output.as_ref().map(|output| output.scroll),
-            Some(1)
-        );
+        assert_eq!(app.command_output().map(|output| output.scroll), Some(1));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.command_output.is_none());
+        assert!(app.command_output().is_none());
     }
 
     fn app_with(changeset: Changeset) -> App {
