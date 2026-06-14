@@ -16,6 +16,7 @@ const OPENCODE_PROGRAM: &str = "opencode";
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
 const READ_ONLY_CONFIG_CONTENT: &str = r#"{"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled","permission":{"*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"glob":"allow","grep":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","skill":"deny","webfetch":"allow","websearch":"allow","external_directory":"deny"}}"#;
+const EXPLAIN_CODE_PROMPT: &str = "Explain the selected or focused code for a code review. Describe what the code does, why the changed code matters in this review context, and any assumptions or risks that affect review. Inspect surrounding repository context read-only if needed.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AskAiRequest {
@@ -80,6 +81,13 @@ pub(crate) struct AskAiInvocation {
 impl AskAiRequest {
     pub(crate) fn new(question: String, context: AskAiContext) -> Self {
         Self { question, context }
+    }
+
+    pub(crate) fn explain_code(context: AskAiContext) -> Self {
+        Self {
+            question: EXPLAIN_CODE_PROMPT.to_string(),
+            context,
+        }
     }
 
     pub(crate) fn question(&self) -> &str {
@@ -592,6 +600,31 @@ mod tests {
         assert!(config.contains(r#""websearch":"allow""#));
         assert!(config.contains(r#""external_directory":"deny""#));
         assert!(config.contains(r#""autoupdate":false"#));
+    }
+
+    #[test]
+    fn explain_code_prompt_is_review_oriented_and_uses_context() {
+        let file = diff_file_with_hunk();
+        let context = AskAiContext::focused(
+            AskAiReviewMode::Worktree,
+            "Tracked changes".to_string(),
+            "git diff HEAD + untracked".to_string(),
+            &file,
+            Some(0),
+            Some("selected code".to_string()),
+        );
+        let request = AskAiRequest::explain_code(context);
+
+        let prompt = build_prompt(&request, Path::new("/repo"));
+
+        assert!(prompt.contains("Explain the selected or focused code"));
+        assert!(prompt.contains("what the code does"));
+        assert!(prompt.contains("why the changed code matters"));
+        assert!(prompt.contains("assumptions or risks"));
+        assert!(prompt.contains("Focused hunk: #1 @@ -1,2 +1,2 @@"));
+        assert!(prompt.contains("selected code"));
+        assert!(prompt.contains("+new line"));
+        assert!(prompt.contains("read-only"));
     }
 
     fn diff_file_with_hunk() -> DiffFile {

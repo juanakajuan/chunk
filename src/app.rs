@@ -1105,6 +1105,13 @@ impl App {
             return Ok(true);
         }
 
+        if self.should_queue_explain_code_request(key) {
+            self.queue_explain_code_request();
+            self.text_selection.clear();
+            self.ensure_scroll_bounds();
+            return Ok(true);
+        }
+
         self.text_selection.clear();
 
         if self.overlay.is_some() {
@@ -1547,7 +1554,14 @@ impl App {
             && accepts_text_input(key)
     }
 
-    fn open_ask_ai_prompt(&mut self) {
+    fn should_queue_explain_code_request(&self, key: KeyEvent) -> bool {
+        self.overlay.is_none()
+            && !self.search.is_prompt_open()
+            && key.code == KeyCode::Char('x')
+            && accepts_text_input(key)
+    }
+
+    fn focused_ask_ai_context(&self) -> Option<AskAiContext> {
         let file_context = self.focus == FocusPane::Sidebar && self.files_panel_visible;
         let hunk_index = if file_context {
             None
@@ -1560,20 +1574,25 @@ impl App {
             self.text_selection.selected_text()
         };
 
-        self.focus = FocusPane::Diff;
-        let Some(file) = self.selected_file() else {
-            self.live_error = Some("no selected file to ask about".to_string());
-            return;
-        };
+        let file = self.selected_file()?;
 
-        let context = AskAiContext::focused(
+        Some(AskAiContext::focused(
             self.source.ask_ai_review_mode(),
             self.changeset.title.clone(),
             self.changeset.source_label.clone(),
             file,
             hunk_index,
             selected_text,
-        );
+        ))
+    }
+
+    fn open_ask_ai_prompt(&mut self) {
+        let Some(context) = self.focused_ask_ai_context() else {
+            self.live_error = Some("no selected file to ask about".to_string());
+            return;
+        };
+
+        self.focus = FocusPane::Diff;
         self.live_error = None;
         self.overlay = Some(Overlay::AskAiPrompt(AskAiPromptState {
             context,
@@ -1593,6 +1612,17 @@ impl App {
         }
 
         self.ask_ai_request = Some(AskAiRequest::new(question, prompt.context));
+    }
+
+    fn queue_explain_code_request(&mut self) {
+        let Some(context) = self.focused_ask_ai_context() else {
+            self.live_error = Some("no selected file to explain".to_string());
+            return;
+        };
+
+        self.focus = FocusPane::Diff;
+        self.live_error = None;
+        self.ask_ai_request = Some(AskAiRequest::explain_code(context));
     }
 
     fn queue_custom_command_for_key(&mut self, key: KeyEvent) -> bool {
@@ -2798,6 +2828,43 @@ mod tests {
     }
 
     #[test]
+    fn explain_code_key_from_files_panel_queues_file_context() {
+        let mut changeset = changeset_with_one_file();
+        changeset.title = "Tracked changes".to_string();
+        changeset.source_label = "git diff HEAD + untracked".to_string();
+        let mut app = app_with(changeset);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+
+        let request = app
+            .take_ask_ai_request()
+            .expect("Explain Code request should be queued");
+        assert_explain_code_question(request.question());
+        assert_eq!(request.context().summary(), "sample.txt");
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn explain_code_key_from_diff_pane_queues_hunk_context() {
+        let mut changeset = changeset_with_one_file();
+        changeset.title = "Tracked changes".to_string();
+        changeset.source_label = "git diff HEAD + untracked".to_string();
+        let mut app = app_with(changeset);
+        app.focus = FocusPane::Diff;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+
+        let request = app
+            .take_ask_ai_request()
+            .expect("Explain Code request should be queued");
+        assert_explain_code_question(request.question());
+        assert_eq!(request.context().summary(), "sample.txt hunk 1");
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
     fn ask_ai_running_can_be_cancelled() {
         let mut app = app_with(changeset_with_one_file());
         let request = ask_ai_request("Explain this");
@@ -2894,6 +2961,14 @@ mod tests {
         );
 
         AskAiRequest::new(question.to_string(), context)
+    }
+
+    fn assert_explain_code_question(question: &str) {
+        assert!(question.contains("Explain the selected or focused code"));
+        assert!(question.contains("what the code does"));
+        assert!(question.contains("why the changed code matters"));
+        assert!(question.contains("assumptions or risks"));
+        assert!(question.contains("read-only"));
     }
 
     fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {

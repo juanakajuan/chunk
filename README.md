@@ -61,6 +61,8 @@ It does not live-refresh, stage files, or discard worktree changes.
 - `a`: ask OpenCode a read-only question about the selected file from the file
   list, or the focused hunk from the diff pane; `Enter` submits, `Esc` cancels
   the prompt or running request
+- `x`: ask OpenCode to explain the selected file from the file list, or the
+  focused hunk from the diff pane, using the preset review-oriented prompt
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
 - `d`: in `diff` mode, discard unstaged worktree changes for the selected file

@@ -221,6 +221,7 @@ pub(crate) fn keybind_bar_line(
         hints.push(("d", discard_hint));
     }
     hints.push(("a", "ask AI"));
+    hints.push(("x", "explain"));
     hints.push(("/", "search"));
     hints.push(("j/k", "move"));
     hints.push(("?", "help"));
@@ -471,6 +472,15 @@ pub(crate) fn help_overlay_lines(
             HelpSegment::text(" submit, "),
             HelpSegment::command("Esc"),
             HelpSegment::text(" cancel"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("x"),
+            HelpSegment::text(" Explain focused file or hunk with Ask AI"),
         ],
         content_width,
         theme,
@@ -904,6 +914,7 @@ mod tests {
         assert!(worktree_help.contains("d discard focused file or hunk"));
         assert!(worktree_help.contains("e open selected file in $EDITOR"));
         assert!(worktree_help.contains("a Ask AI about focused file or hunk"));
+        assert!(worktree_help.contains("x Explain focused file or hunk with Ask AI"));
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
         assert!(!pr_help.contains("d discard focused file or hunk"));
