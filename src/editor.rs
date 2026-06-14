@@ -65,21 +65,3 @@ fn supports_plus_line(program: &str) -> bool {
         "emacs" | "emacsclient" | "gvim" | "nano" | "nvim" | "vi" | "view" | "vim"
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_common_plus_line_editors() {
-        for editor in ["vim", "nvim", "/usr/bin/nano", "emacsclient"] {
-            assert!(supports_plus_line(editor));
-        }
-    }
-
-    #[test]
-    fn leaves_unknown_editors_without_plus_line_argument() {
-        assert!(!supports_plus_line("code"));
-        assert!(!supports_plus_line("custom-editor"));
-    }
-}

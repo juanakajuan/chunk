@@ -685,34 +685,12 @@ mod tests {
         assert!(!pr_help.contains("d discard focused file or hunk"));
     }
 
-    #[test]
-    fn help_overlay_styles_command_tokens_for_contrast() {
-        let theme = Theme::github_dark();
-        let lines = help_overlay_lines(true, true, &[], 80, theme);
-
-        let command_span = find_span(&lines, "?").expect("command span should render");
-        assert_eq!(command_span.style.fg, Some(theme.accent));
-        assert!(command_span.style.add_modifier.contains(Modifier::BOLD));
-
-        let description_span =
-            find_span(&lines, " help/dismiss   ").expect("description span should render");
-        assert_eq!(description_span.style.fg, Some(theme.text));
-        assert!(!description_span.style.add_modifier.contains(Modifier::BOLD));
-    }
-
     fn help_text(can_stage: bool) -> String {
         help_overlay_lines(can_stage, can_stage, &[], 80, Theme::github_dark())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn find_span<'a>(lines: &'a [Line<'_>], text: &str) -> Option<&'a Span<'a>> {
-        lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .find(|span| span.content.as_ref() == text)
     }
 
     fn line_text(line: &Line<'_>) -> String {

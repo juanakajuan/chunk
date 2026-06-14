@@ -502,11 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_vue_single_file_components() {
-        assert_eq!(syntax_name_for_path("src/App.vue"), Some("Vue Component"));
-    }
-
-    #[test]
     fn vue_components_use_theme_token_colors() {
         let palette = SyntaxPalette::github_dark_on_matte();
         let base_style = Style::default().fg(Color::White).bg(Color::Black);

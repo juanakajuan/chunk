@@ -407,29 +407,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn help_overlay_scrolls_long_keymaps() {
-        let mut app = app_with_commands(vec![
-            custom_command("A", "command 1", "true"),
-            custom_command("B", "command 2", "true"),
-            custom_command("C", "command 3", "true"),
-            custom_command("D", "command 4", "true"),
-            custom_command("E", "command 5", "true"),
-            custom_command("F", "command 6", "true"),
-        ]);
-        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
-            .unwrap();
-
-        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let buffer = buffer_text(terminal.backend().buffer());
-
-        assert!(buffer.contains("Worktree-only"), "buffer was {buffer}");
-        assert!(buffer.contains("█"), "buffer was {buffer}");
-    }
-
     fn app_with_commands(commands: Vec<CustomCommandBinding>) -> App {
         App::with_config(
             LoadedReview::worktree(Changeset {

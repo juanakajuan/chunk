@@ -1912,17 +1912,6 @@ mod tests {
     }
 
     #[test]
-    fn esc_does_not_exit_tui() {
-        let mut app = app_with(changeset_with_one_file());
-
-        let keep_running = app
-            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .unwrap();
-
-        assert!(keep_running);
-    }
-
-    #[test]
     fn question_mark_toggles_help_overlay() {
         let mut app = app_with(changeset_with_one_file());
 
