@@ -627,6 +627,139 @@ mod tests {
         assert!(prompt.contains("read-only"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn result_status_text_covers_completion_states() {
+        let request = ask_request();
+        let repo_root = PathBuf::from("/repo");
+
+        let success = AskAiResult::from_output(
+            request.clone(),
+            repo_root.clone(),
+            output(0, "answer\n", ""),
+        );
+        assert!(success.success());
+        assert_eq!(success.status_text(), "exit 0");
+        assert_eq!(success.stdout(), "answer\n");
+        assert_eq!(success.repo_root(), Some(Path::new("/repo")));
+
+        let failure =
+            AskAiResult::from_output(request.clone(), repo_root.clone(), output(2, "", "nope\n"));
+        assert!(!failure.success());
+        assert_eq!(failure.status_text(), "exit 2");
+        assert_eq!(failure.stderr(), "nope\n");
+
+        let cancelled = AskAiResult::cancelled(
+            request.clone(),
+            repo_root.clone(),
+            Some(output(143, "partial", "")),
+        );
+        assert!(cancelled.cancelled_status());
+        assert_eq!(cancelled.status_text(), "cancelled");
+        assert_eq!(cancelled.stdout(), "partial");
+
+        let not_started = AskAiResult::not_started(request, Some(repo_root), "missing opencode");
+        assert!(!not_started.success());
+        assert_eq!(
+            not_started.status_text(),
+            "failed to start: missing opencode"
+        );
+        assert_eq!(not_started.stderr(), "missing opencode");
+    }
+
+    #[test]
+    fn prompt_describes_renamed_binary_files_without_selection() {
+        let mut file = diff_file_with_hunk();
+        file.old_path = "src/old.rs".to_string();
+        file.path = "src/new.rs".to_string();
+        file.binary = true;
+        file.hunks.clear();
+        let context = AskAiContext::focused(
+            AskAiReviewMode::PullRequest,
+            "PR review feature into main".to_string(),
+            "git diff main...HEAD".to_string(),
+            &file,
+            None,
+            Some("   ".to_string()),
+        );
+        let request = AskAiRequest::new("Review this".to_string(), context);
+
+        let prompt = build_prompt(&request, Path::new("/repo"));
+
+        assert!(prompt.contains("Focused file: src/new.rs"));
+        assert!(prompt.contains("Old file path: src/old.rs"));
+        assert!(prompt.contains("Focused file is binary."));
+        assert!(prompt.contains("Binary file changed"));
+        assert!(!prompt.contains("Selected visible text"));
+    }
+
+    #[test]
+    fn prompt_describes_text_changes_without_hunks() {
+        let mut file = diff_file_with_hunk();
+        file.hunks.clear();
+        let context = AskAiContext::focused(
+            AskAiReviewMode::Worktree,
+            "Tracked changes".to_string(),
+            "git diff HEAD + untracked".to_string(),
+            &file,
+            None,
+            None,
+        );
+        let request = AskAiRequest::new("What changed?".to_string(), context);
+
+        let prompt = build_prompt(&request, Path::new("/repo"));
+
+        assert!(prompt.contains("File changed without textual hunks"));
+        assert!(prompt.contains("Review mode: worktree diff"));
+    }
+
+    #[test]
+    fn diff_context_and_session_title_are_truncated() {
+        let mut file = diff_file_with_hunk();
+        file.hunks[0].lines[0].content = "x".repeat(MAX_DIFF_CONTEXT_CHARS + 100);
+        let context = AskAiContext::focused(
+            AskAiReviewMode::Worktree,
+            "Tracked changes".to_string(),
+            "git diff HEAD + untracked".to_string(),
+            &file,
+            Some(0),
+            None,
+        );
+        let request = AskAiRequest::new("q".repeat(200), context);
+
+        let prompt = build_prompt(&request, Path::new("/repo"));
+        let title = session_title(&request);
+
+        assert!(prompt.contains("[diff context truncated]"));
+        assert!(title.chars().count() <= 80);
+        assert!(title.ends_with("..."));
+    }
+
+    fn ask_request() -> AskAiRequest {
+        AskAiRequest::new(
+            "Explain this".to_string(),
+            AskAiContext::focused(
+                AskAiReviewMode::Worktree,
+                "Tracked changes".to_string(),
+                "git diff HEAD + untracked".to_string(),
+                &diff_file_with_hunk(),
+                Some(0),
+                None,
+            ),
+        )
+    }
+
+    #[cfg(unix)]
+    fn output(code: i32, stdout: &str, stderr: &str) -> Output {
+        use std::os::unix::process::ExitStatusExt;
+
+        Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
     fn diff_file_with_hunk() -> DiffFile {
         DiffFile {
             id: "0".to_string(),

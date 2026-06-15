@@ -24,6 +24,10 @@ pub(crate) struct EditorCommand {
 impl EditorCommand {
     pub(crate) fn from_env() -> Result<Self, String> {
         let raw = env::var("EDITOR").map_err(|_| NO_EDITOR_CONFIGURED.to_string())?;
+        Self::parse(&raw)
+    }
+
+    fn parse(raw: &str) -> Result<Self, String> {
         let mut parts = raw.split_whitespace();
         let Some(program) = parts.next() else {
             return Err(NO_EDITOR_CONFIGURED.to_string());
@@ -64,4 +68,34 @@ fn supports_plus_line(program: &str) -> bool {
         name,
         "emacs" | "emacsclient" | "gvim" | "nano" | "nvim" | "vi" | "view" | "vim"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_editor_program_and_arguments() {
+        let editor = EditorCommand::parse("nvim --wait -p").unwrap();
+
+        assert_eq!(editor.program, "nvim");
+        assert_eq!(editor.args, ["--wait", "-p"]);
+        assert_eq!(editor.display_name(), "nvim");
+    }
+
+    #[test]
+    fn rejects_empty_editor_values() {
+        assert_eq!(
+            EditorCommand::parse(" \t ").unwrap_err(),
+            NO_EDITOR_CONFIGURED
+        );
+    }
+
+    #[test]
+    fn plus_line_support_uses_program_basename() {
+        assert!(supports_plus_line("/usr/bin/nvim"));
+        assert!(supports_plus_line("vim"));
+        assert!(supports_plus_line("emacsclient"));
+        assert!(!supports_plus_line("code"));
+    }
 }

@@ -222,6 +222,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_and_control_keys() {
+        assert!(
+            CommandKey::parse("")
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be empty")
+        );
+        assert!(
+            CommandKey::parse("\u{7f}")
+                .unwrap_err()
+                .to_string()
+                .contains("control character")
+        );
+    }
+
+    #[test]
     fn detects_builtin_key_conflicts() {
         assert!(CommandKey::parse("d").unwrap().conflicts_with_builtin());
         assert!(CommandKey::parse("e").unwrap().conflicts_with_builtin());
@@ -229,5 +245,72 @@ mod tests {
         assert!(CommandKey::parse("x").unwrap().conflicts_with_builtin());
         assert!(CommandKey::parse("y").unwrap().conflicts_with_builtin());
         assert!(!CommandKey::parse("C").unwrap().conflicts_with_builtin());
+    }
+
+    #[test]
+    fn key_matching_rejects_control_alt_and_different_keys() {
+        let key = CommandKey::parse("C").unwrap();
+
+        assert!(key.matches(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE)));
+        assert!(key.matches(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)));
+        assert!(!key.matches(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL)));
+        assert!(!key.matches(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::ALT)));
+        assert!(!key.matches(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_result_preserves_output_and_status() {
+        let binding = binding();
+        let cwd = PathBuf::from("/repo");
+
+        let success =
+            CustomCommandResult::from_output(&binding, cwd.clone(), output_status(0, "done\n", ""));
+        assert_eq!(success.label(), "commit");
+        assert_eq!(success.command(), "true");
+        assert_eq!(success.cwd(), Some(Path::new("/repo")));
+        assert_eq!(success.stdout(), "done\n");
+        assert_eq!(success.stderr(), "");
+        assert!(success.success());
+        assert_eq!(success.status_text(), "exit 0");
+
+        let failure =
+            CustomCommandResult::from_output(&binding, cwd, output_status(7, "", "nope\n"));
+        assert!(!failure.success());
+        assert_eq!(failure.stderr(), "nope\n");
+        assert_eq!(failure.status_text(), "exit 7");
+    }
+
+    #[test]
+    fn not_started_result_reports_start_error() {
+        let binding = binding();
+        let result = CustomCommandResult::not_started(&binding, None, "missing shell");
+
+        assert!(!result.success());
+        assert_eq!(result.label(), "commit");
+        assert_eq!(result.command(), "true");
+        assert_eq!(result.cwd(), None);
+        assert_eq!(result.stdout(), "");
+        assert_eq!(result.stderr(), "missing shell");
+        assert_eq!(result.status_text(), "failed to start: missing shell");
+    }
+
+    fn binding() -> CustomCommandBinding {
+        CustomCommandBinding::new(
+            CommandKey::parse("C").unwrap(),
+            "commit".to_string(),
+            "true".to_string(),
+        )
+    }
+
+    #[cfg(unix)]
+    fn output_status(code: i32, stdout: &str, stderr: &str) -> Output {
+        use std::os::unix::process::ExitStatusExt;
+
+        Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
     }
 }

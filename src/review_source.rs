@@ -261,3 +261,123 @@ fn escapes_worktree(component: Component<'_>) -> bool {
         Component::ParentDir | Component::RootDir | Component::Prefix(_)
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStage, SourceSnapshot};
+
+    #[test]
+    fn pull_request_source_is_read_only_and_not_live_watched() {
+        let source = pull_request_source();
+        let file = diff_file(FileStatus::Modified, "src/lib.rs", "src/lib.rs");
+
+        assert!(!source.can_stage());
+        assert!(!source.can_discard());
+        assert_eq!(source.live_watch_root().unwrap(), None);
+        assert_eq!(source.toggle_staging_for_file("src/lib.rs").unwrap(), None);
+        assert_eq!(source.toggle_staging_for_hunk(&file, 0).unwrap(), None);
+        assert_eq!(source.discard_file("src/lib.rs").unwrap(), None);
+        assert_eq!(source.discard_hunk(&file, 0).unwrap(), None);
+        assert!(
+            source
+                .editor_request(&file)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot open PR snapshot")
+        );
+        assert_eq!(source.empty_sidebar_message(), NO_BRANCH_CHANGES);
+        assert_eq!(source.no_diff_message(), NO_PR_DIFF_MESSAGE);
+        assert_eq!(source.ask_ai_review_mode(), AskAiReviewMode::PullRequest);
+    }
+
+    #[test]
+    fn worktree_source_exposes_worktree_affordances() {
+        let source = ReviewSource::worktree();
+
+        assert!(source.can_stage());
+        assert!(source.can_discard());
+        assert_eq!(source.empty_sidebar_message(), NO_TRACKED_CHANGES);
+        assert_eq!(source.no_diff_message(), NO_DIFF_MESSAGE);
+        assert_eq!(source.ask_ai_review_mode(), AskAiReviewMode::Worktree);
+    }
+
+    #[test]
+    fn editable_file_path_rejects_files_that_cannot_be_opened() {
+        let valid = diff_file(FileStatus::Modified, "src/lib.rs", "src/lib.rs");
+        assert_eq!(editable_file_path(&valid).unwrap(), "src/lib.rs");
+
+        let deleted = diff_file(FileStatus::Deleted, "src/lib.rs", "");
+        assert!(
+            editable_file_path(&deleted)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot open deleted file")
+        );
+
+        let empty = diff_file(FileStatus::Modified, "", "");
+        assert!(
+            editable_file_path(&empty)
+                .unwrap_err()
+                .to_string()
+                .contains("no worktree path")
+        );
+    }
+
+    #[test]
+    fn worktree_file_path_rejects_paths_outside_root() {
+        let root = Path::new("/repo");
+
+        assert_eq!(
+            worktree_file_path(root, "src/lib.rs").unwrap(),
+            PathBuf::from("/repo/src/lib.rs")
+        );
+        for path in ["/tmp/lib.rs", "../lib.rs", "src/../lib.rs"] {
+            assert!(
+                worktree_file_path(root, path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("outside worktree"),
+                "{path} should be rejected"
+            );
+        }
+    }
+
+    fn pull_request_source() -> ReviewSource {
+        ReviewSource::PullRequest(PullRequestReviewSource {
+            old_ref: "main".to_string(),
+            new_ref: "HEAD".to_string(),
+            title: "PR review feature into main".to_string(),
+            source_label: "git diff main...HEAD".to_string(),
+        })
+    }
+
+    fn diff_file(status: FileStatus, old_path: &str, path: &str) -> DiffFile {
+        DiffFile {
+            id: "0".to_string(),
+            old_path: old_path.to_string(),
+            path: path.to_string(),
+            old_source: SourceSnapshot::Unloaded,
+            new_source: SourceSnapshot::Unloaded,
+            status,
+            stage: FileStage::Unstaged,
+            additions: 1,
+            deletions: 1,
+            hunks: vec![DiffHunk {
+                header: "@@ -10,1 +10,1 @@".to_string(),
+                old_start: 10,
+                old_lines: 1,
+                new_start: 10,
+                new_lines: 1,
+                stage: FileStage::Unstaged,
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Added,
+                    old_line: None,
+                    new_line: Some(10),
+                    content: "new line".to_string(),
+                }],
+            }],
+            binary: false,
+        }
+    }
+}

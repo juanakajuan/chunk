@@ -1,1 +1,2 @@
-Run `cargo isntall --path .` after you finish making code changes.
+- Run `cargo install --path .` after you finish making code changes.
+- Use `cargo llvm-cov --html` to run test coverage if asked to.

@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::Deserialize;
@@ -34,22 +35,29 @@ pub(crate) fn load() -> Result<AppConfig> {
     let Some(path) = config_path() else {
         return Ok(AppConfig::default());
     };
+    load_from_path(&path)
+}
+
+fn load_from_path(path: &Path) -> Result<AppConfig> {
     if !path.exists() {
         return Ok(AppConfig::default());
     }
 
-    let source = fs::read_to_string(&path)
+    let source = fs::read_to_string(path)
         .wrap_err_with(|| format!("failed to read config {}", path.display()))?;
     parse(&source).wrap_err_with(|| format!("invalid config {}", path.display()))
 }
 
 fn config_path() -> Option<PathBuf> {
-    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+    config_path_from_env(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
+}
+
+fn config_path_from_env(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    if let Some(config_home) = config_home.filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(config_home).join("chunk/config.toml"));
     }
 
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
+    home.filter(|value| !value.is_empty())
         .map(|home| PathBuf::from(home).join(".config/chunk/config.toml"))
 }
 
@@ -100,6 +108,8 @@ fn validate_command(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     #[test]
@@ -157,5 +167,117 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("duplicate custom command key"));
+    }
+
+    #[test]
+    fn rejects_empty_command_fields() {
+        let empty_label = parse(
+            r#"
+            [[commands]]
+            key = "C"
+            label = " "
+            command = "true"
+            "#,
+        )
+        .unwrap_err();
+        assert!(empty_label.to_string().contains("label cannot be empty"));
+
+        let empty_command = parse(
+            r#"
+            [[commands]]
+            key = "C"
+            label = "commit"
+            command = " "
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            empty_command
+                .to_string()
+                .contains("shell command cannot be empty")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_config_fields() {
+        let error = parse(
+            r#"
+            [[commands]]
+            key = "C"
+            label = "commit"
+            command = "true"
+            unexpected = "nope"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn config_path_prefers_xdg_config_home_over_home() {
+        assert_eq!(
+            config_path_from_env(
+                Some(OsString::from("/xdg")),
+                Some(OsString::from("/home/user"))
+            ),
+            Some(PathBuf::from("/xdg/chunk/config.toml"))
+        );
+        assert_eq!(
+            config_path_from_env(None, Some(OsString::from("/home/user"))),
+            Some(PathBuf::from("/home/user/.config/chunk/config.toml"))
+        );
+        assert_eq!(
+            config_path_from_env(Some(OsString::from("")), Some(OsString::from(""))),
+            None
+        );
+    }
+
+    #[test]
+    fn load_from_path_returns_default_when_config_is_missing() {
+        let root = temp_root();
+        let path = root.join("chunk/config.toml");
+
+        assert_eq!(load_from_path(&path).unwrap(), AppConfig::default());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_from_path_reads_config_and_wraps_invalid_errors() {
+        let root = temp_root();
+        let path = root.join("chunk/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"
+            [[commands]]
+            key = "C"
+            label = "commit"
+            command = "true"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_from_path(&path).unwrap();
+        assert_eq!(config.commands.len(), 1);
+        assert_eq!(config.commands[0].label(), "commit");
+
+        fs::write(&path, "invalid =").unwrap();
+        let error = load_from_path(&path).unwrap_err();
+        assert!(error.to_string().contains("invalid config"));
+        assert!(format!("{error:?}").contains(path.to_str().unwrap()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn temp_root() -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("chunk-config-test-{now}"));
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 }
