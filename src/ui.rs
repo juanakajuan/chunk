@@ -101,13 +101,51 @@ fn render_diff_scrollbar(frame: &mut Frame<'_>, scrollbar: DiffScrollbar, theme:
 
 fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     let line = app.keybind_bar_line(theme);
-    let lines = app.selectable_lines(area, vec![line], 0, 1, theme);
+    let mode_tag = app.keybind_mode_tag_line(theme);
+    let tag_width = mode_tag
+        .as_ref()
+        .map(|line| line.width().min(area.width as usize) as u16);
+    let key_area = keybind_content_area(area, line.width(), tag_width);
+    let lines = app.selectable_lines(key_area, vec![line], 0, 1, theme);
     frame.render_widget(
         Paragraph::new(lines)
-            .alignment(Alignment::Left)
+            .alignment(Alignment::Center)
             .style(color_style(theme.muted, theme.background)),
-        area,
+        key_area,
     );
+    if let (Some(mode_tag), Some(tag_width)) = (mode_tag, tag_width) {
+        if tag_width == 0 {
+            return;
+        }
+        let tag_area = Rect {
+            width: tag_width,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(mode_tag)
+                .alignment(Alignment::Left)
+                .style(color_style(theme.muted, theme.background)),
+            tag_area,
+        );
+    }
+}
+
+fn keybind_content_area(area: Rect, line_width: usize, tag_width: Option<u16>) -> Rect {
+    let Some(tag_width) = tag_width else {
+        return area;
+    };
+    let line_width = line_width.min(area.width as usize) as u16;
+    let centered_start = area.width.saturating_sub(line_width) / 2;
+    if centered_start > tag_width {
+        return area;
+    }
+
+    let offset = tag_width.saturating_add(1).min(area.width);
+    Rect {
+        x: area.x.saturating_add(offset),
+        width: area.width.saturating_sub(offset),
+        ..area
+    }
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
@@ -404,6 +442,43 @@ mod tests {
         assert!(
             buffer.contains("P publish  git push"),
             "buffer was {buffer}"
+        );
+    }
+
+    #[test]
+    fn keybind_bar_renders_accent_filled_key_tokens() {
+        let mut app = app_with_commands(Vec::new());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let theme = active_theme();
+        let buffer = terminal.backend().buffer();
+        let row = buffer.area.height.saturating_sub(1);
+        let footer_debug = (0..buffer.area.width)
+            .filter_map(|column| {
+                let cell = buffer.cell((column, row))?;
+                (cell.symbol() != " ").then(|| {
+                    format!(
+                        "{column}:{} fg={:?} bg={:?}",
+                        cell.symbol(),
+                        cell.fg,
+                        cell.bg
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let has_accent_key = (0..buffer.area.width).any(|column| {
+            let Some(cell) = buffer.cell((column, row)) else {
+                return false;
+            };
+
+            cell.symbol() == "f" && cell.fg == theme.on_accent && cell.bg == theme.accent
+        });
+
+        assert!(
+            has_accent_key,
+            "footer f key should render with accent fill:\n{footer_debug}"
         );
     }
 

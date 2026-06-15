@@ -530,13 +530,19 @@ impl App {
             return rows::custom_command_output_keybind_bar_line(theme);
         }
 
-        rows::keybind_bar_line(
-            self.files_panel_visible,
-            self.can_stage(),
-            self.stage_keybind_hint(),
-            self.discard_keybind_hint(),
-            theme,
-        )
+        rows::keybind_bar_line(self.files_panel_visible, self.stage_keybind_hint(), theme)
+    }
+
+    pub(crate) fn keybind_mode_tag_line(&self, theme: Theme) -> Option<Line<'static>> {
+        if self.ask_ai_output().is_some()
+            || self.ask_ai_prompt().is_some()
+            || self.ask_ai_running().is_some()
+            || self.command_output().is_some()
+        {
+            return None;
+        }
+
+        Some(rows::keybind_mode_tag_line(self.can_stage(), theme))
     }
 
     pub(crate) fn help_overlay_lines(
@@ -569,18 +575,6 @@ impl App {
         match self.focus {
             FocusPane::Sidebar if self.files_panel_visible => Some("stage file"),
             FocusPane::Diff => Some("stage hunk"),
-            FocusPane::Sidebar => None,
-        }
-    }
-
-    fn discard_keybind_hint(&self) -> Option<&'static str> {
-        if !self.can_discard() {
-            return None;
-        }
-
-        match self.focus {
-            FocusPane::Sidebar if self.files_panel_visible => Some("discard file"),
-            FocusPane::Diff => Some("discard hunk"),
             FocusPane::Sidebar => None,
         }
     }
@@ -2720,6 +2714,27 @@ mod tests {
         assert!(!footer.contains("publish"), "footer was {footer:?}");
         assert!(help.contains("Custom commands"));
         assert!(help.contains("P publish  git push"));
+    }
+
+    #[test]
+    fn footer_keeps_secondary_actions_in_help_only() {
+        let app = app_with(changeset_with_one_file());
+        let theme = Theme::github_dark();
+
+        let footer = line_text(&app.keybind_bar_line(theme));
+        let help = app
+            .help_overlay_lines(80, theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!footer.contains("discard"), "footer was {footer:?}");
+        assert!(!footer.contains("ask AI"), "footer was {footer:?}");
+        assert!(!footer.contains("explain"), "footer was {footer:?}");
+        assert!(help.contains("d discard focused file or hunk"));
+        assert!(help.contains("a Ask AI about focused file or hunk"));
+        assert!(help.contains("x Explain focused file or hunk with Ask AI"));
     }
 
     #[test]

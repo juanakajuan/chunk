@@ -193,13 +193,11 @@ pub(crate) fn search_status_lines(
 
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
-    can_stage: bool,
     stage_hint: Option<&'static str>,
-    discard_hint: Option<&'static str>,
     theme: Theme,
 ) -> Line<'static> {
     let background = theme.background;
-    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
@@ -217,40 +215,43 @@ pub(crate) fn keybind_bar_line(
     if let Some(stage_hint) = stage_hint {
         hints.push(("Space", stage_hint));
     }
-    if let Some(discard_hint) = discard_hint {
-        hints.push(("d", discard_hint));
-    }
-    hints.push(("a", "ask AI"));
-    hints.push(("x", "explain"));
     hints.push(("/", "search"));
     hints.push(("j/k", "move"));
     hints.push(("?", "help"));
     hints.push(("q", "quit"));
 
-    let mode_label = if can_stage { " DIFF " } else { " REVIEW " };
-    let mut spans = vec![
-        Span::styled(
-            mode_label,
-            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
-        Span::styled("  ", label_style),
-    ];
+    let mut spans = Vec::new();
 
     for (index, (key, label)) in hints.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled("  \u{b7}  ", separator_style));
         }
-        spans.push(Span::styled(*key, key_style));
+        spans.push(keybind_key_span(key, key_style));
         spans.push(Span::styled(format!(" {label}"), label_style));
     }
 
     Line::from(spans)
 }
 
+pub(crate) fn keybind_mode_tag_line(can_stage: bool, theme: Theme) -> Line<'static> {
+    let background = theme.background;
+    let mode_label = if can_stage { " DIFF " } else { " REVIEW " };
+    Line::from(vec![
+        Span::styled(
+            mode_label,
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+    ])
+}
+
+fn keybind_key_span(key: &'static str, style: Style) -> Span<'static> {
+    Span::styled(format!(" {key} "), style)
+}
+
 pub(crate) fn ask_ai_prompt_keybind_bar_line(theme: Theme) -> Line<'static> {
     let background = theme.background;
-    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
@@ -261,17 +262,17 @@ pub(crate) fn ask_ai_prompt_keybind_bar_line(theme: Theme) -> Line<'static> {
         ),
         Span::styled("\u{e0b0}", color_style(theme.accent, background)),
         Span::styled("  ", label_style),
-        Span::styled("Enter", key_style),
+        keybind_key_span("Enter", key_style),
         Span::styled(" submit", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("Esc", key_style),
+        keybind_key_span("Esc", key_style),
         Span::styled(" cancel", label_style),
     ])
 }
 
 pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
     let background = theme.background;
-    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
@@ -282,17 +283,17 @@ pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
         ),
         Span::styled("\u{e0b0}", color_style(theme.accent, background)),
         Span::styled("  ", label_style),
-        Span::styled("Esc/q", key_style),
+        keybind_key_span("Esc/q", key_style),
         Span::styled(" cancel", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("Ctrl-c", key_style),
+        keybind_key_span("Ctrl-c", key_style),
         Span::styled(" quit", label_style),
     ])
 }
 
 pub(crate) fn ask_ai_output_keybind_bar_line(theme: Theme) -> Line<'static> {
     let background = theme.background;
-    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
@@ -303,23 +304,23 @@ pub(crate) fn ask_ai_output_keybind_bar_line(theme: Theme) -> Line<'static> {
         ),
         Span::styled("\u{e0b0}", color_style(theme.accent, background)),
         Span::styled("  ", label_style),
-        Span::styled("j/k", key_style),
+        keybind_key_span("j/k", key_style),
         Span::styled(" scroll", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("Ctrl-d/Ctrl-u", key_style),
+        keybind_key_span("Ctrl-d/Ctrl-u", key_style),
         Span::styled(" page", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("g/G", key_style),
+        keybind_key_span("g/G", key_style),
         Span::styled(" top/bottom", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("Esc/q", key_style),
+        keybind_key_span("Esc/q", key_style),
         Span::styled(" close", label_style),
     ])
 }
 
 pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'static> {
     let background = theme.background;
-    let key_style = color_style(theme.accent, background).add_modifier(Modifier::BOLD);
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
@@ -330,16 +331,16 @@ pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'stat
         ),
         Span::styled("\u{e0b0}", color_style(theme.accent, background)),
         Span::styled("  ", label_style),
-        Span::styled("j/k", key_style),
+        keybind_key_span("j/k", key_style),
         Span::styled(" scroll", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("Ctrl-d/Ctrl-u", key_style),
+        keybind_key_span("Ctrl-d/Ctrl-u", key_style),
         Span::styled(" page", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("g/G", key_style),
+        keybind_key_span("g/G", key_style),
         Span::styled(" top/bottom", label_style),
         Span::styled("  \u{b7}  ", separator_style),
-        Span::styled("Esc/q", key_style),
+        keybind_key_span("Esc/q", key_style),
         Span::styled(" close", label_style),
     ])
 }
@@ -918,6 +919,21 @@ mod tests {
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
         assert!(!pr_help.contains("d discard focused file or hunk"));
+    }
+
+    #[test]
+    fn keybind_bar_colors_key_tokens_with_accent_fill() {
+        let theme = Theme::github_dark();
+        let line = keybind_bar_line(true, Some("stage file"), theme);
+        let key_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.trim() == "f")
+            .expect("footer should include f key");
+
+        assert_eq!(key_span.style.fg, Some(theme.on_accent));
+        assert_eq!(key_span.style.bg, Some(theme.accent));
+        assert!(key_span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     fn help_text(can_stage: bool) -> String {
