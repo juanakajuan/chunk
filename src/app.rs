@@ -19,6 +19,7 @@ use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile, DiffHunk};
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
+use crate::scroll_text::{ScrollText, VerticalDirection};
 use crate::search::Search;
 use crate::selection::TextSelection;
 use crate::theme::Theme;
@@ -34,25 +35,6 @@ const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
 pub(crate) enum FocusPane {
     Sidebar,
     Diff,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VerticalDirection {
-    Down,
-    Up,
-}
-
-impl VerticalDirection {
-    fn shift(self, value: usize, amount: usize) -> usize {
-        match self {
-            Self::Down => value.saturating_add(amount),
-            Self::Up => value.saturating_sub(amount),
-        }
-    }
-
-    fn shift_clamped(self, value: usize, amount: usize, max: usize) -> usize {
-        self.shift(value, amount).min(max)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,9 +54,7 @@ enum PendingLeftClick {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandOutputState {
     result: CustomCommandResult,
-    scroll: usize,
-    rendered_row_count: usize,
-    visible_height: usize,
+    scroll: ScrollText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,9 +66,7 @@ struct AskAiPromptState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AskAiOutputState {
     result: AskAiResult,
-    scroll: usize,
-    rendered_row_count: usize,
-    visible_height: usize,
+    scroll: ScrollText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +111,7 @@ impl DiscardConfirmation {
 #[derive(Debug)]
 enum Overlay {
     /// Keymap help modal; owns the scroll offset for keymaps taller than the modal.
-    Help { scroll: usize },
+    Help { scroll: ScrollText },
     /// Pending destructive worktree discard awaiting y/n confirmation.
     Discard(DiscardConfirmation),
     /// A custom command is running; all input is swallowed until runtime delivers output.
@@ -258,20 +236,21 @@ impl App {
 
     pub(crate) fn help_overlay_scroll(&self) -> usize {
         match &self.overlay {
-            Some(Overlay::Help { scroll }) => *scroll,
+            Some(Overlay::Help { scroll }) => scroll.offset(),
             _ => 0,
         }
     }
 
     pub(crate) fn clamp_help_overlay_scroll(&mut self, line_count: usize, visible_height: usize) {
-        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
-            *scroll = (*scroll).min(line_count.saturating_sub(visible_height));
+        if let Some(scroll) = self.help_scroll_mut() {
+            scroll.sync(line_count, visible_height);
         }
     }
 
-    fn set_help_overlay_scroll(&mut self, value: usize) {
-        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
-            *scroll = value;
+    fn help_scroll_mut(&mut self) -> Option<&mut ScrollText> {
+        match &mut self.overlay {
+            Some(Overlay::Help { scroll }) => Some(scroll),
+            _ => None,
         }
     }
 
@@ -848,15 +827,8 @@ impl App {
             .expect("command output pane requires command output state");
         let title = format!(" Command: {} ", output.result.label());
         let all_lines = rows::custom_command_output_lines(&output.result, content_width, theme);
-        output.rendered_row_count = all_lines.len();
-        output.visible_height = visible_height;
-        clamp_command_output_scroll(output);
-        let scroll = output.scroll;
-        let lines = all_lines
-            .into_iter()
-            .skip(scroll)
-            .take(visible_height)
-            .collect();
+        output.scroll.sync(all_lines.len(), visible_height);
+        let lines = output.scroll.visible(all_lines);
         let lines = self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             lines,
@@ -887,15 +859,8 @@ impl App {
             .expect("Ask AI output pane requires output state");
         let title = format!(" Ask AI: {} ", output.result.context_summary());
         let all_lines = rows::ask_ai_output_lines(&output.result, content_width, theme);
-        output.rendered_row_count = all_lines.len();
-        output.visible_height = visible_height;
-        clamp_ask_ai_output_scroll(output);
-        let scroll = output.scroll;
-        let lines = all_lines
-            .into_iter()
-            .skip(scroll)
-            .take(visible_height)
-            .collect();
+        output.scroll.sync(all_lines.len(), visible_height);
+        let lines = output.scroll.visible(all_lines);
         let lines = self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             lines,
@@ -996,9 +961,7 @@ impl App {
         self.text_selection.clear();
         self.overlay = Some(Overlay::CommandOutput(CommandOutputState {
             result,
-            scroll: 0,
-            rendered_row_count: 0,
-            visible_height: 0,
+            scroll: ScrollText::default(),
         }));
     }
 
@@ -1025,9 +988,7 @@ impl App {
         self.text_selection.clear();
         self.overlay = Some(Overlay::AskAiOutput(AskAiOutputState {
             result,
-            scroll: 0,
-            rendered_row_count: 0,
-            visible_height: 0,
+            scroll: ScrollText::default(),
         }));
     }
 
@@ -1224,20 +1185,18 @@ impl App {
             return;
         }
 
-        match scroll_key_action(key) {
-            Some(ScrollKeyAction::Line(direction)) => self.scroll_help_overlay_by(direction, 1),
-            Some(ScrollKeyAction::Page(direction)) => {
-                self.scroll_help_overlay_by(direction, HELP_OVERLAY_SCROLL_PAGE)
-            }
-            Some(ScrollKeyAction::Top) => self.set_help_overlay_scroll(0),
-            Some(ScrollKeyAction::Bottom) => self.set_help_overlay_scroll(usize::MAX),
-            None => {}
+        if let Some(action) = scroll_key_action(key)
+            && let Some(scroll) = self.help_scroll_mut()
+        {
+            apply_scroll_action(scroll, action, HELP_OVERLAY_SCROLL_PAGE);
         }
     }
 
     fn handle_help_overlay_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
-            app.scroll_help_overlay_by(direction, MOUSE_WHEEL_STEP);
+            if let Some(scroll) = app.help_scroll_mut() {
+                scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
+            }
         });
     }
 
@@ -1257,20 +1216,19 @@ impl App {
             return;
         }
 
-        match scroll_key_action(key) {
-            Some(ScrollKeyAction::Line(direction)) => self.scroll_command_output_by(direction, 1),
-            Some(ScrollKeyAction::Page(direction)) => {
-                self.scroll_command_output_by(direction, self.command_output_page())
-            }
-            Some(ScrollKeyAction::Top) => self.scroll_command_output_to_top(),
-            Some(ScrollKeyAction::Bottom) => self.scroll_command_output_to_bottom(),
-            None => {}
+        if let Some(action) = scroll_key_action(key)
+            && let Some(output) = self.command_output_mut()
+        {
+            let page = output.scroll.page();
+            apply_scroll_action(&mut output.scroll, action, page);
         }
     }
 
     fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
-            app.scroll_command_output_by(direction, MOUSE_WHEEL_STEP);
+            if let Some(output) = app.command_output_mut() {
+                output.scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
+            }
         });
     }
 
@@ -1315,20 +1273,19 @@ impl App {
             return;
         }
 
-        match scroll_key_action(key) {
-            Some(ScrollKeyAction::Line(direction)) => self.scroll_ask_ai_output_by(direction, 1),
-            Some(ScrollKeyAction::Page(direction)) => {
-                self.scroll_ask_ai_output_by(direction, self.ask_ai_output_page())
-            }
-            Some(ScrollKeyAction::Top) => self.scroll_ask_ai_output_to_top(),
-            Some(ScrollKeyAction::Bottom) => self.scroll_ask_ai_output_to_bottom(),
-            None => {}
+        if let Some(action) = scroll_key_action(key)
+            && let Some(output) = self.ask_ai_output_mut()
+        {
+            let page = output.scroll.page();
+            apply_scroll_action(&mut output.scroll, action, page);
         }
     }
 
     fn handle_ask_ai_output_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
-            app.scroll_ask_ai_output_by(direction, MOUSE_WHEEL_STEP);
+            if let Some(output) = app.ask_ai_output_mut() {
+                output.scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
+            }
         });
     }
 
@@ -1373,7 +1330,9 @@ impl App {
     fn toggle_help_overlay(&mut self) {
         self.overlay = match self.overlay {
             Some(Overlay::Help { .. }) => None,
-            _ => Some(Overlay::Help { scroll: 0 }),
+            _ => Some(Overlay::Help {
+                scroll: ScrollText::default(),
+            }),
         };
     }
 
@@ -1632,66 +1591,6 @@ impl App {
         self.live_error = None;
         self.custom_command_request = Some(command);
         true
-    }
-
-    fn scroll_help_overlay_by(&mut self, direction: VerticalDirection, amount: usize) {
-        if let Some(Overlay::Help { scroll }) = &mut self.overlay {
-            *scroll = direction.shift(*scroll, amount);
-        }
-    }
-
-    fn command_output_page(&self) -> usize {
-        self.command_output()
-            .map_or(1, |output| output.visible_height.max(1))
-    }
-
-    fn ask_ai_output_page(&self) -> usize {
-        self.ask_ai_output()
-            .map_or(1, |output| output.visible_height.max(1))
-    }
-
-    fn scroll_command_output_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let Some(output) = self.command_output_mut() else {
-            return;
-        };
-
-        output.scroll = direction.shift(output.scroll, amount);
-        clamp_command_output_scroll(output);
-    }
-
-    fn scroll_command_output_to_top(&mut self) {
-        if let Some(output) = self.command_output_mut() {
-            output.scroll = 0;
-        }
-    }
-
-    fn scroll_command_output_to_bottom(&mut self) {
-        if let Some(output) = self.command_output_mut() {
-            output.scroll = usize::MAX;
-            clamp_command_output_scroll(output);
-        }
-    }
-
-    fn scroll_ask_ai_output_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let Some(output) = self.ask_ai_output_mut() else {
-            return;
-        };
-
-        output.scroll = direction.shift(output.scroll, amount);
-        clamp_ask_ai_output_scroll(output);
-    }
-
-    fn scroll_ask_ai_output_to_top(&mut self) {
-        if let Some(output) = self.ask_ai_output_mut() {
-            output.scroll = 0;
-        }
-    }
-
-    fn scroll_ask_ai_output_to_bottom(&mut self) {
-        if let Some(output) = self.ask_ai_output_mut() {
-            output.scroll = usize::MAX;
-            clamp_ask_ai_output_scroll(output);
-        }
     }
 
     fn move_by(&mut self, direction: VerticalDirection) {
@@ -2048,20 +1947,13 @@ fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Re
     }
 }
 
-fn clamp_command_output_scroll(output: &mut CommandOutputState) {
-    output.scroll = output.scroll.min(
-        output
-            .rendered_row_count
-            .saturating_sub(output.visible_height),
-    );
-}
-
-fn clamp_ask_ai_output_scroll(output: &mut AskAiOutputState) {
-    output.scroll = output.scroll.min(
-        output
-            .rendered_row_count
-            .saturating_sub(output.visible_height),
-    );
+fn apply_scroll_action(scroll: &mut ScrollText, action: ScrollKeyAction, page: usize) {
+    match action {
+        ScrollKeyAction::Line(direction) => scroll.scroll_by(direction, 1),
+        ScrollKeyAction::Page(direction) => scroll.scroll_by(direction, page),
+        ScrollKeyAction::Top => scroll.scroll_to_top(),
+        ScrollKeyAction::Bottom => scroll.scroll_to_bottom(),
+    }
 }
 
 #[cfg(test)]
@@ -2782,11 +2674,17 @@ mod tests {
 
         let pane = render_diff_pane(&mut app, Theme::github_dark());
         assert!(pane.title.contains("Command: long output"));
-        assert_eq!(app.command_output().map(|output| output.scroll), Some(0));
+        assert_eq!(
+            app.command_output().map(|output| output.scroll.offset()),
+            Some(0)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.command_output().map(|output| output.scroll), Some(1));
+        assert_eq!(
+            app.command_output().map(|output| output.scroll.offset()),
+            Some(1)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
             .unwrap();
@@ -2917,11 +2815,17 @@ mod tests {
         let pane = render_diff_pane(&mut app, Theme::github_dark());
         assert!(pane.title.contains("Ask AI: sample.txt hunk 1"));
         assert!(pane_text(&pane).contains("question: Explain this"));
-        assert_eq!(app.ask_ai_output().map(|output| output.scroll), Some(0));
+        assert_eq!(
+            app.ask_ai_output().map(|output| output.scroll.offset()),
+            Some(0)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.ask_ai_output().map(|output| output.scroll), Some(1));
+        assert_eq!(
+            app.ask_ai_output().map(|output| output.scroll.offset()),
+            Some(1)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
             .unwrap();

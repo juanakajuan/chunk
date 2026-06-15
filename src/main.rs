@@ -15,6 +15,7 @@ mod patch;
 mod review_source;
 mod rows;
 mod runtime;
+mod scroll_text;
 mod search;
 mod selection;
 mod syntax;
