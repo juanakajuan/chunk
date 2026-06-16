@@ -64,6 +64,32 @@ pub struct Theme {
     pub syntax: SyntaxPalette,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ThemeName {
+    #[default]
+    Gruvbox,
+    GithubDark,
+}
+
+impl ThemeName {
+    pub(crate) const CONFIG_VALUES: &'static [&'static str] = &["gruvbox", "github-dark"];
+
+    pub(crate) fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "gruvbox" => Some(Self::Gruvbox),
+            "github-dark" => Some(Self::GithubDark),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn theme(self) -> Theme {
+        match self {
+            Self::Gruvbox => Theme::gruvbox_dark_hard(),
+            Self::GithubDark => Theme::github_dark(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntaxPalette {
     pub background: Color,

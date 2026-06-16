@@ -10,15 +10,18 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::Deserialize;
 
 use crate::custom_command::{CommandKey, CustomCommandBinding};
+use crate::theme::ThemeName;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AppConfig {
+    pub(crate) theme: ThemeName,
     pub(crate) commands: Vec<CustomCommandBinding>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    theme: Option<String>,
     #[serde(default)]
     commands: Vec<RawCommand>,
 }
@@ -63,6 +66,7 @@ fn config_path_from_env(config_home: Option<OsString>, home: Option<OsString>) -
 
 fn parse(source: &str) -> Result<AppConfig> {
     let raw: RawConfig = toml::from_str(source)?;
+    let theme = parse_theme(raw.theme.as_deref())?;
     let mut keys = HashSet::new();
     let mut commands = Vec::with_capacity(raw.commands.len());
 
@@ -76,7 +80,21 @@ fn parse(source: &str) -> Result<AppConfig> {
         ));
     }
 
-    Ok(AppConfig { commands })
+    Ok(AppConfig { theme, commands })
+}
+
+fn parse_theme(theme: Option<&str>) -> Result<ThemeName> {
+    let Some(theme) = theme else {
+        return Ok(ThemeName::default());
+    };
+
+    ThemeName::from_config_value(theme).ok_or_else(|| {
+        eyre!(
+            "invalid theme `{}`; expected one of: {}",
+            theme,
+            ThemeName::CONFIG_VALUES.join(", ")
+        )
+    })
 }
 
 fn validate_command(
@@ -128,6 +146,23 @@ mod tests {
         assert_eq!(config.commands[0].key_display(), "C");
         assert_eq!(config.commands[0].label(), "commit and push");
         assert_eq!(config.commands[0].command(), "ga . && com && gP");
+    }
+
+    #[test]
+    fn parses_runtime_theme() {
+        let github_dark = parse(r#"theme = "github-dark""#).unwrap();
+        assert_eq!(github_dark.theme, ThemeName::GithubDark);
+
+        let default_theme = parse("").unwrap();
+        assert_eq!(default_theme.theme, ThemeName::Gruvbox);
+    }
+
+    #[test]
+    fn rejects_invalid_theme() {
+        let error = parse(r#"theme = "solarized""#).unwrap_err();
+
+        assert!(error.to_string().contains("invalid theme `solarized`"));
+        assert!(error.to_string().contains("gruvbox, github-dark"));
     }
 
     #[test]

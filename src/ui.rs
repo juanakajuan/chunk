@@ -21,7 +21,7 @@ const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
 const HELP_SCROLLBAR_WIDTH: u16 = 1;
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
-    let theme = active_theme();
+    let theme = app.theme();
     app.begin_render_frame();
     frame.render_widget(Block::default().style(theme.base_style()), frame.area());
     let chunks = Layout::default()
@@ -32,13 +32,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     render_body(frame, chunks[0], app, theme);
     render_keybind_bar(frame, chunks[1], app, theme);
     render_help_overlay(frame, frame.area(), app, theme);
-}
-
-fn active_theme() -> Theme {
-    match option_env!("CHUNK_THEME") {
-        Some("github-dark") => Theme::github_dark(),
-        _ => Theme::gruvbox_dark_hard(),
-    }
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
@@ -428,6 +421,7 @@ mod tests {
     use crate::custom_command::{CommandKey, CustomCommandBinding};
     use crate::model::Changeset;
     use crate::review_source::LoadedReview;
+    use crate::theme::ThemeName;
 
     #[test]
     fn help_overlay_draws_custom_commands_from_config() {
@@ -447,11 +441,14 @@ mod tests {
 
     #[test]
     fn keybind_bar_renders_accent_filled_key_tokens() {
-        let mut app = app_with_commands(Vec::new());
+        let mut app = app_with_config(AppConfig {
+            theme: ThemeName::GithubDark,
+            commands: Vec::new(),
+        });
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-        let theme = active_theme();
+        let theme = Theme::github_dark();
         let buffer = terminal.backend().buffer();
         let row = buffer.area.height.saturating_sub(1);
         let footer_debug = (0..buffer.area.width)
@@ -483,13 +480,20 @@ mod tests {
     }
 
     fn app_with_commands(commands: Vec<CustomCommandBinding>) -> App {
+        app_with_config(AppConfig {
+            commands,
+            ..AppConfig::default()
+        })
+    }
+
+    fn app_with_config(config: AppConfig) -> App {
         App::with_config(
             LoadedReview::worktree(Changeset {
                 title: String::new(),
                 source_label: String::new(),
                 files: Vec::new(),
             }),
-            AppConfig { commands },
+            config,
         )
     }
 

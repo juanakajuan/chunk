@@ -534,6 +534,7 @@ fn search_no_match_state_is_rendered() {
 fn custom_command_key_queues_command_request() {
     let mut app = app_with_config(AppConfig {
         commands: vec![custom_command("C", "commit", "git commit")],
+        ..AppConfig::default()
     });
 
     app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT))
@@ -550,6 +551,7 @@ fn custom_command_key_queues_command_request() {
 fn custom_commands_are_help_only_not_footer_hints() {
     let app = app_with_config(AppConfig {
         commands: vec![custom_command("P", "publish", "git push")],
+        ..AppConfig::default()
     });
     let theme = Theme::github_dark();
 

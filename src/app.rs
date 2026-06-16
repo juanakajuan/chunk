@@ -22,7 +22,7 @@ use crate::rows::{self, SidebarRowsInput};
 use crate::scroll_text::VerticalDirection;
 use crate::search::Search;
 use crate::selection::TextSelection;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeName};
 use crate::viewport::{DiffScrollbar, DiffScrollbarDrag, RenderedViewport, ViewportScrollInput};
 
 mod diff_frame;
@@ -73,6 +73,8 @@ pub(crate) struct App {
     overlay: Option<Overlay>,
     /// User-configured shell command bindings.
     custom_commands: Vec<CustomCommandBinding>,
+    /// User-selected UI and syntax palette.
+    theme: ThemeName,
     /// Deferred request for runtime to execute a configured shell command safely.
     custom_command_request: Option<CustomCommandBinding>,
     /// Deferred request for runtime to invoke OpenCode in read-only mode.
@@ -123,6 +125,7 @@ impl App {
             files_panel_visible: true,
             overlay: None,
             custom_commands: config.commands,
+            theme: config.theme,
             custom_command_request: None,
             ask_ai_request: None,
             ask_ai_cancel_request: false,
@@ -148,6 +151,10 @@ impl App {
 
     pub(crate) fn focus(&self) -> FocusPane {
         self.focus
+    }
+
+    pub(crate) fn theme(&self) -> Theme {
+        self.theme.theme()
     }
 
     pub(crate) fn sidebar_rows(

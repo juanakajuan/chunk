@@ -94,11 +94,16 @@ quotes, and code blocks.
 exists.
 
 ```toml
+theme = "github-dark"
+
 [[commands]]
 key = "C"
 label = "commit and push"
 command = "ga . && com && gP"
 ```
+
+The `theme` setting is optional. Supported values are `gruvbox` (default) and
+`github-dark`.
 
 Custom command keys are single characters. Built-in key conflicts and duplicate
 custom keys are rejected at startup. Commands run from the Git repository root
@@ -106,12 +111,9 @@ through the user shell, and `chunk` reloads the review source after completion.
 
 ## Themes
 
-The default theme is Gruvbox (dark, hard contrast). Set `CHUNK_THEME=github-dark`
-at compile time to use the GitHub dark palette instead:
-
-```sh
-CHUNK_THEME=github-dark cargo run
-```
+The default theme is Gruvbox (dark, hard contrast). Set `theme = "github-dark"`
+in `${XDG_CONFIG_HOME:-$HOME/.config}/chunk/config.toml` to use the GitHub dark
+palette.
 
 ## Development
 
