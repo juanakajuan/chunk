@@ -187,24 +187,25 @@ impl WorktreeReviewSource {
         git::load_worktree_source_snapshots(file);
     }
 
+    fn reload_after(self, git_action: impl FnOnce() -> Result<()>) -> Result<Changeset> {
+        git_action()?;
+        self.reload()
+    }
+
     fn toggle_staging_for_file(self, path: &str) -> Result<Changeset> {
-        git::toggle_staging_for_file(path)?;
-        git::load_worktree_diff()
+        self.reload_after(|| git::toggle_staging_for_file(path))
     }
 
     fn toggle_staging_for_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
-        git::toggle_staging_for_hunk(file, hunk_index)?;
-        git::load_worktree_diff()
+        self.reload_after(|| git::toggle_staging_for_hunk(file, hunk_index))
     }
 
     fn discard_file(self, path: &str) -> Result<Changeset> {
-        git::discard_worktree_file(path)?;
-        git::load_worktree_diff()
+        self.reload_after(|| git::discard_worktree_file(path))
     }
 
     fn discard_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
-        git::discard_worktree_hunk(file, hunk_index)?;
-        git::load_worktree_diff()
+        self.reload_after(|| git::discard_worktree_hunk(file, hunk_index))
     }
 
     fn editor_request(self, file: &DiffFile) -> Result<EditorRequest> {

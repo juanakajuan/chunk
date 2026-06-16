@@ -313,38 +313,23 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> DiffPaneRows {
-        let mut lines = rows::live_status_lines(
-            self.live_error.as_deref(),
-            self.live_notice.as_deref(),
+        self.output_pane_rows(
+            area,
             content_width,
-            theme,
-        );
-        let output_height = visible_height.saturating_sub(lines.len());
-
-        self.viewport.begin_diff(area, visible_height);
-        self.viewport.set_diff_status_rows(lines.len());
-
-        let output = self
-            .command_output_mut()
-            .expect("command output pane requires command output state");
-        let title = format!(" Command: {} ", output.result.label());
-        let all_lines = rows::custom_command_output_lines(&output.result, content_width, theme);
-        output.scroll.sync(all_lines.len(), output_height);
-        lines.extend(output.scroll.visible(all_lines));
-        lines.truncate(visible_height);
-        let lines = self.text_selection.decorate_visible_lines(
-            pane_text_area(area, content_width, visible_height),
-            lines,
-            0,
             visible_height,
             theme,
-        );
+            |app, output_height| {
+                let output = app
+                    .command_output_mut()
+                    .expect("command output pane requires command output state");
+                let title = format!(" Command: {} ", output.result.label());
+                let all_lines =
+                    rows::custom_command_output_lines(&output.result, content_width, theme);
+                output.scroll.sync(all_lines.len(), output_height);
 
-        DiffPaneRows {
-            title,
-            lines,
-            scrollbar: None,
-        }
+                (title, output.scroll.visible(all_lines))
+            },
+        )
     }
 
     fn ask_ai_output_pane_rows(
@@ -353,6 +338,32 @@ impl App {
         content_width: usize,
         visible_height: usize,
         theme: Theme,
+    ) -> DiffPaneRows {
+        self.output_pane_rows(
+            area,
+            content_width,
+            visible_height,
+            theme,
+            |app, output_height| {
+                let output = app
+                    .ask_ai_output_mut()
+                    .expect("Ask AI output pane requires output state");
+                let title = format!(" Ask AI: {} ", output.result.context_summary());
+                let all_lines = rows::ask_ai_output_lines(&output.result, content_width, theme);
+                output.scroll.sync(all_lines.len(), output_height);
+
+                (title, output.scroll.visible(all_lines))
+            },
+        )
+    }
+
+    fn output_pane_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+        pane_lines: impl FnOnce(&mut Self, usize) -> (String, Vec<Line<'static>>),
     ) -> DiffPaneRows {
         let mut lines = rows::live_status_lines(
             self.live_error.as_deref(),
@@ -365,13 +376,8 @@ impl App {
         self.viewport.begin_diff(area, visible_height);
         self.viewport.set_diff_status_rows(lines.len());
 
-        let output = self
-            .ask_ai_output_mut()
-            .expect("Ask AI output pane requires output state");
-        let title = format!(" Ask AI: {} ", output.result.context_summary());
-        let all_lines = rows::ask_ai_output_lines(&output.result, content_width, theme);
-        output.scroll.sync(all_lines.len(), output_height);
-        lines.extend(output.scroll.visible(all_lines));
+        let (title, visible_output_lines) = pane_lines(self, output_height);
+        lines.extend(visible_output_lines);
         lines.truncate(visible_height);
         let lines = self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),

@@ -307,6 +307,16 @@ fn build_prompt(request: &AskAiRequest, repo_root: &Path) -> String {
     let context = request.context();
     let mut prompt = String::new();
 
+    push_read_only_instructions(&mut prompt);
+    push_user_question(&mut prompt, request.question());
+    push_review_context(&mut prompt, context, repo_root);
+    push_selected_text(&mut prompt, context.selected_text.as_deref());
+    push_diff_context(&mut prompt, &context.diff_text);
+
+    prompt
+}
+
+fn push_read_only_instructions(prompt: &mut String) {
     prompt.push_str("You are answering a question from chunk, a terminal diff reviewer.\n");
     prompt.push_str("Read-only enforcement:\n");
     prompt.push_str("- Do not edit, write, patch, stage, commit, push, delete, install, or run mutating commands.\n");
@@ -319,9 +329,15 @@ fn build_prompt(request: &AskAiRequest, repo_root: &Path) -> String {
     prompt.push_str(
         "- The OpenCode process is launched with edit, bash, task, skill, and external-directory permissions denied.\n\n",
     );
+}
+
+fn push_user_question(prompt: &mut String, question: &str) {
     prompt.push_str("User question:\n");
-    prompt.push_str(request.question());
+    prompt.push_str(question);
     prompt.push_str("\n\nStructured review context:\n");
+}
+
+fn push_review_context(prompt: &mut String, context: &AskAiContext, repo_root: &Path) {
     prompt.push_str(&format!("Repository root: {}\n", repo_root.display()));
     prompt.push_str(&format!("Review mode: {}\n", context.review_mode.label()));
     prompt.push_str(context.review_mode.note());
@@ -339,19 +355,23 @@ fn build_prompt(request: &AskAiRequest, repo_root: &Path) -> String {
         prompt.push_str(&hunk.prompt_lines());
         prompt.push('\n');
     }
-    if let Some(selection) = &context.selected_text {
+}
+
+fn push_selected_text(prompt: &mut String, selected_text: Option<&str>) {
+    if let Some(selection) = selected_text {
         prompt.push_str("\nSelected visible text:\n");
         prompt.push_str(selection);
         prompt.push('\n');
     }
+}
+
+fn push_diff_context(prompt: &mut String, diff_text: &str) {
     prompt.push_str("\nDiff context with old/new line columns:\n```diff\n");
-    prompt.push_str(&context.diff_text);
-    if !context.diff_text.ends_with('\n') {
+    prompt.push_str(diff_text);
+    if !diff_text.ends_with('\n') {
         prompt.push('\n');
     }
     prompt.push_str("```\n");
-
-    prompt
 }
 
 fn session_title(request: &AskAiRequest) -> String {
@@ -366,25 +386,32 @@ fn session_title(request: &AskAiRequest) -> String {
 }
 
 fn file_diff_text(file: &DiffFile) -> String {
-    let mut text = diff_header(file);
     if file.binary {
+        let mut text = diff_header(file);
         text.push_str("Binary file changed\n");
         return text;
     }
     if file.hunks.is_empty() {
+        let mut text = diff_header(file);
         text.push_str("File changed without textual hunks\n");
         return text;
     }
 
-    for hunk in &file.hunks {
-        push_hunk_text(&mut text, hunk);
-    }
-    text
+    diff_text_with_hunks(file, &file.hunks)
 }
 
 fn hunk_diff_text(file: &DiffFile, hunk: &DiffHunk) -> String {
+    diff_text_with_hunks(file, std::iter::once(hunk))
+}
+
+fn diff_text_with_hunks<'a>(
+    file: &DiffFile,
+    hunks: impl IntoIterator<Item = &'a DiffHunk>,
+) -> String {
     let mut text = diff_header(file);
-    push_hunk_text(&mut text, hunk);
+    for hunk in hunks {
+        push_hunk_text(&mut text, hunk);
+    }
     text
 }
 

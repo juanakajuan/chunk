@@ -297,60 +297,59 @@ pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
 }
 
 pub(crate) fn ask_ai_output_keybind_bar_line(theme: Theme) -> Line<'static> {
-    let background = theme.background;
-    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
-    let label_style = color_style(theme.muted, background);
-    let separator_style = color_style(theme.border, background);
-
-    Line::from(vec![
-        Span::styled(
-            " ASK AI ",
-            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
-        Span::styled("  ", label_style),
-        keybind_key_span("j/k", key_style),
-        Span::styled(" scroll", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("Ctrl-d/Ctrl-u", key_style),
-        Span::styled(" page", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("g/G", key_style),
-        Span::styled(" top/bottom", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("y", key_style),
-        Span::styled(" copy", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("Esc/q", key_style),
-        Span::styled(" close", label_style),
-    ])
+    output_keybind_bar_line(" ASK AI ", true, theme)
 }
 
 pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'static> {
+    output_keybind_bar_line(" COMMAND ", false, theme)
+}
+
+fn output_keybind_bar_line(
+    tag: &'static str,
+    include_copy_hint: bool,
+    theme: Theme,
+) -> Line<'static> {
+    let mut hints: Vec<(&'static str, &'static str)> = vec![
+        ("j/k", "scroll"),
+        ("Ctrl-d/Ctrl-u", "page"),
+        ("g/G", "top/bottom"),
+    ];
+    if include_copy_hint {
+        hints.push(("y", "copy"));
+    }
+    hints.push(("Esc/q", "close"));
+
+    tagged_keybind_bar_line(tag, &hints, theme)
+}
+
+fn tagged_keybind_bar_line(
+    tag: &'static str,
+    hints: &[(&'static str, &'static str)],
+    theme: Theme,
+) -> Line<'static> {
     let background = theme.background;
     let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
-            " COMMAND ",
+            tag,
             color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled("\u{e0b0}", color_style(theme.accent, background)),
         Span::styled("  ", label_style),
-        keybind_key_span("j/k", key_style),
-        Span::styled(" scroll", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("Ctrl-d/Ctrl-u", key_style),
-        Span::styled(" page", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("g/G", key_style),
-        Span::styled(" top/bottom", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("Esc/q", key_style),
-        Span::styled(" close", label_style),
-    ])
+    ];
+
+    for (index, (key, label)) in hints.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  \u{b7}  ", separator_style));
+        }
+        spans.push(keybind_key_span(key, key_style));
+        spans.push(Span::styled(format!(" {label}"), label_style));
+    }
+
+    Line::from(spans)
 }
 
 pub(crate) fn help_overlay_lines(
@@ -710,41 +709,29 @@ pub(crate) fn custom_command_output_lines(
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let status_color = if result.success() {
-        theme.added
-    } else {
-        theme.removed
-    };
-
-    push_wrapped_output_line(
+    push_output_status_line(
         &mut lines,
-        Line::styled(
-            format!(
-                "{}  {}",
-                if result.success() { "OK" } else { "FAIL" },
-                result.status_text()
-            ),
-            color_style(status_color, theme.background),
-        ),
+        command_status_label(result),
+        result.status_text(),
+        output_status_color(result.success(), theme),
         content_width,
+        theme,
     );
 
     if let Some(cwd) = result.cwd() {
-        push_wrapped_output_line(
+        push_output_metadata_line(
             &mut lines,
-            Line::styled(
-                format!("cwd: {}", cwd.display()),
-                color_style(theme.muted, theme.background),
-            ),
+            "cwd",
+            cwd.display().to_string(),
+            theme.muted,
             content_width,
+            theme,
         );
     }
-    push_wrapped_output_line(
+    push_output_text_line(
         &mut lines,
-        Line::styled(
-            format!("$ {}", result.command()),
-            color_style(theme.accent, theme.background),
-        ),
+        format!("$ {}", result.command()),
+        color_style(theme.accent, theme.background),
         content_width,
     );
     lines.push(Line::raw(""));
@@ -776,52 +763,39 @@ pub(crate) fn ask_ai_output_lines(
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let status_color = if result.success() {
-        theme.added
-    } else {
-        theme.removed
-    };
-    let label = if result.cancelled_status() {
-        "CANCELLED"
-    } else if result.success() {
-        "OK"
-    } else {
-        "FAIL"
-    };
-
-    push_wrapped_output_line(
+    push_output_status_line(
         &mut lines,
-        Line::styled(
-            format!("{label}  {}", result.status_text()),
-            color_style(status_color, theme.background),
-        ),
+        ask_ai_status_label(result),
+        result.status_text(),
+        output_status_color(result.success(), theme),
         content_width,
+        theme,
     );
     if let Some(root) = result.repo_root() {
-        push_wrapped_output_line(
+        push_output_metadata_line(
             &mut lines,
-            Line::styled(
-                format!("repo: {}", root.display()),
-                color_style(theme.muted, theme.background),
-            ),
+            "repo",
+            root.display().to_string(),
+            theme.muted,
             content_width,
+            theme,
         );
     }
-    push_wrapped_output_line(
+    push_output_metadata_line(
         &mut lines,
-        Line::styled(
-            format!("context: {}", result.context_summary()),
-            color_style(theme.muted, theme.background),
-        ),
+        "context",
+        result.context_summary(),
+        theme.muted,
         content_width,
+        theme,
     );
-    push_wrapped_output_line(
+    push_output_metadata_line(
         &mut lines,
-        Line::styled(
-            format!("question: {}", result.question()),
-            color_style(theme.accent, theme.background),
-        ),
+        "question",
+        result.question().to_string(),
+        theme.accent,
         content_width,
+        theme,
     );
     lines.push(Line::raw(""));
 
@@ -848,14 +822,7 @@ fn push_markdown_output_section(
     content_width: usize,
     theme: Theme,
 ) {
-    push_wrapped_output_line(
-        lines,
-        Line::styled(
-            title,
-            color_style(theme.accent, theme.background).add_modifier(Modifier::BOLD),
-        ),
-        content_width,
-    );
+    push_output_section_heading(lines, title, content_width, theme);
     lines.extend(markdown::markdown_lines(output, content_width, theme));
 }
 
@@ -867,39 +834,94 @@ fn push_output_section(
     output_style: Style,
     theme: Theme,
 ) {
-    push_wrapped_output_line(
-        lines,
-        Line::styled(
-            title,
-            color_style(theme.accent, theme.background).add_modifier(Modifier::BOLD),
-        ),
-        content_width,
-    );
+    push_output_section_heading(lines, title, content_width, theme);
 
     if output.is_empty() {
-        push_wrapped_output_line(
+        push_output_text_line(
             lines,
-            Line::styled("(empty)", color_style(theme.muted, theme.background)),
+            "(empty)".to_string(),
+            color_style(theme.muted, theme.background),
             content_width,
         );
         return;
     }
 
     for row in output.lines() {
-        push_wrapped_output_line(
-            lines,
-            Line::styled(row.to_string(), output_style),
-            content_width,
-        );
+        push_output_text_line(lines, row.to_string(), output_style, content_width);
     }
 }
 
-fn push_wrapped_output_line(
+fn command_status_label(result: &CustomCommandResult) -> &'static str {
+    if result.success() { "OK" } else { "FAIL" }
+}
+
+fn ask_ai_status_label(result: &AskAiResult) -> &'static str {
+    if result.cancelled_status() {
+        "CANCELLED"
+    } else if result.success() {
+        "OK"
+    } else {
+        "FAIL"
+    }
+}
+
+fn output_status_color(success: bool, theme: Theme) -> Color {
+    if success { theme.added } else { theme.removed }
+}
+
+fn push_output_status_line(
     lines: &mut Vec<Line<'static>>,
-    line: Line<'static>,
+    label: &'static str,
+    status_text: String,
+    status_color: Color,
+    content_width: usize,
+    theme: Theme,
+) {
+    push_output_text_line(
+        lines,
+        format!("{label}  {status_text}"),
+        color_style(status_color, theme.background),
+        content_width,
+    );
+}
+
+fn push_output_metadata_line(
+    lines: &mut Vec<Line<'static>>,
+    label: &'static str,
+    value: String,
+    color: Color,
+    content_width: usize,
+    theme: Theme,
+) {
+    push_output_text_line(
+        lines,
+        format!("{label}: {value}"),
+        color_style(color, theme.background),
+        content_width,
+    );
+}
+
+fn push_output_section_heading(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    content_width: usize,
+    theme: Theme,
+) {
+    push_output_text_line(
+        lines,
+        title.to_string(),
+        color_style(theme.accent, theme.background).add_modifier(Modifier::BOLD),
+        content_width,
+    );
+}
+
+fn push_output_text_line(
+    lines: &mut Vec<Line<'static>>,
+    text: String,
+    style: Style,
     content_width: usize,
 ) {
-    lines.extend(wrap_line(line, content_width));
+    lines.extend(wrap_line(Line::styled(text, style), content_width));
 }
 
 pub(crate) fn changeset_title(changeset: &Changeset) -> String {
