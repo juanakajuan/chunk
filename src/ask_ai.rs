@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::model::{DiffFile, DiffHunk, DiffLine, DiffLineKind};
+use crate::process::ProcessOutcome;
 
 const OPENCODE_PROGRAM: &str = "opencode";
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -57,17 +58,7 @@ struct AskAiHunkContext {
 pub(crate) struct AskAiResult {
     request: AskAiRequest,
     repo_root: Option<PathBuf>,
-    stdout: String,
-    stderr: String,
-    status: AskAiStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AskAiStatus {
-    success: bool,
-    code: Option<i32>,
-    cancelled: bool,
-    start_error: Option<String>,
+    outcome: ProcessOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,14 +178,7 @@ impl AskAiResult {
         Self {
             request,
             repo_root: Some(repo_root),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            status: AskAiStatus {
-                success: output.status.success(),
-                code: output.status.code(),
-                cancelled: false,
-                start_error: None,
-            },
+            outcome: ProcessOutcome::from_output(output),
         }
     }
 
@@ -203,28 +187,10 @@ impl AskAiResult {
         repo_root: PathBuf,
         output: Option<Output>,
     ) -> Self {
-        let (stdout, stderr, code) = output.map_or_else(
-            || (String::new(), String::new(), None),
-            |output| {
-                (
-                    String::from_utf8_lossy(&output.stdout).to_string(),
-                    String::from_utf8_lossy(&output.stderr).to_string(),
-                    output.status.code(),
-                )
-            },
-        );
-
         Self {
             request,
             repo_root: Some(repo_root),
-            stdout,
-            stderr,
-            status: AskAiStatus {
-                success: false,
-                code,
-                cancelled: true,
-                start_error: None,
-            },
+            outcome: ProcessOutcome::cancelled(output),
         }
     }
 
@@ -233,18 +199,10 @@ impl AskAiResult {
         repo_root: Option<PathBuf>,
         error: impl Into<String>,
     ) -> Self {
-        let error = error.into();
         Self {
             request,
             repo_root,
-            stdout: String::new(),
-            stderr: error.clone(),
-            status: AskAiStatus {
-                success: false,
-                code: None,
-                cancelled: false,
-                start_error: Some(error),
-            },
+            outcome: ProcessOutcome::not_started(error),
         }
     }
 
@@ -261,33 +219,23 @@ impl AskAiResult {
     }
 
     pub(crate) fn stdout(&self) -> &str {
-        &self.stdout
+        self.outcome.stdout()
     }
 
     pub(crate) fn stderr(&self) -> &str {
-        &self.stderr
+        self.outcome.stderr()
     }
 
     pub(crate) fn success(&self) -> bool {
-        self.status.success
+        self.outcome.success()
     }
 
     pub(crate) fn cancelled_status(&self) -> bool {
-        self.status.cancelled
+        self.outcome.cancelled_status()
     }
 
     pub(crate) fn status_text(&self) -> String {
-        if self.status.cancelled {
-            return "cancelled".to_string();
-        }
-        if let Some(error) = &self.status.start_error {
-            return format!("failed to start: {error}");
-        }
-
-        match self.status.code {
-            Some(code) => format!("exit {code}"),
-            None => "terminated by signal".to_string(),
-        }
+        self.outcome.status_text()
     }
 }
 

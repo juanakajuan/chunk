@@ -7,6 +7,8 @@ use std::process::{Command, Output};
 use color_eyre::eyre::{Result, eyre};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::process::ProcessOutcome;
+
 const RESERVED_KEYS: [char; 16] = [
     'q', '?', 'f', '/', 'j', 'k', 'n', 'N', 'g', 'G', ' ', 'd', 'e', 'a', 'x', 'y',
 ];
@@ -28,16 +30,7 @@ pub(crate) struct CustomCommandResult {
     label: String,
     command: String,
     cwd: Option<PathBuf>,
-    stdout: String,
-    stderr: String,
-    status: CommandStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CommandStatus {
-    success: bool,
-    code: Option<i32>,
-    start_error: Option<String>,
+    outcome: ProcessOutcome,
 }
 
 impl CustomCommandBinding {
@@ -113,13 +106,7 @@ impl CustomCommandResult {
             label: binding.label.clone(),
             command: binding.command.clone(),
             cwd: Some(cwd),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            status: CommandStatus {
-                success: output.status.success(),
-                code: output.status.code(),
-                start_error: None,
-            },
+            outcome: ProcessOutcome::from_output(output),
         }
     }
 
@@ -128,18 +115,11 @@ impl CustomCommandResult {
         cwd: Option<PathBuf>,
         error: impl Into<String>,
     ) -> Self {
-        let error = error.into();
         Self {
             label: binding.label.clone(),
             command: binding.command.clone(),
             cwd,
-            stdout: String::new(),
-            stderr: error.clone(),
-            status: CommandStatus {
-                success: false,
-                code: None,
-                start_error: Some(error),
-            },
+            outcome: ProcessOutcome::not_started(error),
         }
     }
 
@@ -156,26 +136,19 @@ impl CustomCommandResult {
     }
 
     pub(crate) fn stdout(&self) -> &str {
-        &self.stdout
+        self.outcome.stdout()
     }
 
     pub(crate) fn stderr(&self) -> &str {
-        &self.stderr
+        self.outcome.stderr()
     }
 
     pub(crate) fn success(&self) -> bool {
-        self.status.success
+        self.outcome.success()
     }
 
     pub(crate) fn status_text(&self) -> String {
-        if let Some(error) = &self.status.start_error {
-            return format!("failed to start: {error}");
-        }
-
-        match self.status.code {
-            Some(code) => format!("exit {code}"),
-            None => "terminated by signal".to_string(),
-        }
+        self.outcome.status_text()
     }
 }
 

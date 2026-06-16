@@ -12,6 +12,7 @@ mod editor;
 mod git;
 mod model;
 mod patch;
+mod process;
 mod review_source;
 mod rows;
 mod runtime;
