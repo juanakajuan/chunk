@@ -20,6 +20,9 @@ pub struct RenderedViewport {
     diff_area: Option<Rect>,
     /// Last rendered diff scrollbar, used to draw and map mouse events.
     diff_scrollbar: Option<DiffScrollbar>,
+    /// Live-status rows stacked above the diff rows, used to map mouse events
+    /// back to diff rows. Produced by the diff frame, read by hit-testing.
+    diff_status_rows: usize,
     /// Rendered sidebar row to file index mapping for click handling.
     sidebar_row_indices: Vec<usize>,
     /// Cached sidebar row counts for the current sidebar layout.
@@ -135,6 +138,7 @@ impl RenderedViewport {
             sidebar_area: None,
             diff_area: None,
             diff_scrollbar: None,
+            diff_status_rows: 0,
             sidebar_row_indices: Vec::new(),
             sidebar_row_counts_cache: None,
             diff_lines_cache: vec![None; file_count],
@@ -177,6 +181,14 @@ impl RenderedViewport {
 
     pub fn diff_scrollbar(&self) -> Option<&DiffScrollbar> {
         self.diff_scrollbar.as_ref()
+    }
+
+    pub fn set_diff_status_rows(&mut self, rows: usize) {
+        self.diff_status_rows = rows;
+    }
+
+    pub fn diff_status_rows(&self) -> usize {
+        self.diff_status_rows
     }
 
     pub fn begin_sidebar_rows(&mut self) {
