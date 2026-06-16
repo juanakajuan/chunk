@@ -385,6 +385,25 @@ pub(crate) fn overlapping_hunk_patch(file: &DiffFile, selected_hunk: &DiffHunk) 
     Some(build_hunk_patch(file, &hunk_indices))
 }
 
+/// Build a patch containing exactly one hunk from `file`.
+pub(crate) fn selected_hunk_patch(file: &DiffFile, hunk_index: usize) -> Option<String> {
+    if file.binary || file.hunks.get(hunk_index).is_none() {
+        return None;
+    }
+
+    Some(build_hunk_patch(file, &[hunk_index]))
+}
+
+/// Build a patch containing every text hunk in `file`.
+pub(crate) fn file_patch(file: &DiffFile) -> Option<String> {
+    if file.binary || file.hunks.is_empty() {
+        return None;
+    }
+
+    let hunk_indices = (0..file.hunks.len()).collect::<Vec<_>>();
+    Some(build_hunk_patch(file, &hunk_indices))
+}
+
 /// Whether any hunk in `file` overlaps `hunk` by old- or new-side line span.
 pub(crate) fn hunk_overlaps_file(hunk: &DiffHunk, file: &DiffFile) -> bool {
     file.hunks

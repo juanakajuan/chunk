@@ -63,6 +63,9 @@ It does not live-refresh, stage files, or discard worktree changes.
   the prompt or running request
 - `x`: ask OpenCode to explain the selected file from the file list, or the
   focused hunk from the diff pane, using the preset review-oriented prompt
+- `y`: copy the selected file path from the file list, or the selected hunk
+  diff from the diff pane
+- `Y`: copy the selected file diff from the diff pane
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
 - `d`: in `diff` mode, discard unstaged worktree changes for the selected file
@@ -82,11 +85,11 @@ In the command output pane, use `j` / `k` or the mouse wheel to scroll,
 `PageDown` / `PageUp` to page, `g` / `G` to jump, and `Esc` / `q` to return to
 the diff.
 
-In the Ask AI answer pane, use the same scroll and close keys. The OpenCode
-process receives the Git root, focused file or hunk, selected visible text when
-present, read-only repository permissions, and web fetch/search access.
-Answers render Markdown for common formatting such as headings, lists, links,
-quotes, and code blocks.
+In the Ask AI answer pane, use the same scroll and close keys, and `y` to copy
+the answer text. The OpenCode process receives the Git root, focused file or
+hunk, selected visible text when present, read-only repository permissions, and
+web fetch/search access. Answers render Markdown for common formatting such as
+headings, lists, links, quotes, and code blocks.
 
 ## Configuration
 

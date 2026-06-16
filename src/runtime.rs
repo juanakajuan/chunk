@@ -240,16 +240,20 @@ fn handle_key_event(
         start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
     }
 
+    write_clipboard_request(app);
+
     Ok(true)
 }
 
 fn write_clipboard_request(app: &mut App) {
-    let Some(text) = app.take_clipboard_request() else {
+    let Some(request) = app.take_clipboard_request() else {
         return;
     };
 
-    if let Err(error) = clipboard::write_text(&text) {
+    if let Err(error) = clipboard::write_text(request.text()) {
         app.set_live_error(format!("copy failed: {error}"));
+    } else {
+        app.set_live_notice(request.success_message().to_string());
     }
 }
 

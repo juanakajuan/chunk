@@ -380,6 +380,11 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Char('y') && accepts_text_input(key) {
+            self.queue_ask_ai_answer_copy();
+            return;
+        }
+
         if let Some(output) = self.ask_ai_output_mut() {
             let page = output.scroll.page();
             apply_scroll_key(&mut output.scroll, key, page);

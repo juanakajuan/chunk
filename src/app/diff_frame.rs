@@ -37,7 +37,12 @@ impl App {
         }
 
         let title = format!(" {} ", rows::changeset_title(&self.changeset));
-        let mut lines = rows::live_status_lines(self.live_error.as_deref(), content_width, theme);
+        let mut lines = rows::live_status_lines(
+            self.live_error.as_deref(),
+            self.live_notice.as_deref(),
+            content_width,
+            theme,
+        );
         let running = self.command_running();
         lines.extend(rows::custom_command_running_lines(
             running.map(|(binding, _)| binding),
@@ -308,16 +313,25 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> DiffPaneRows {
+        let mut lines = rows::live_status_lines(
+            self.live_error.as_deref(),
+            self.live_notice.as_deref(),
+            content_width,
+            theme,
+        );
+        let output_height = visible_height.saturating_sub(lines.len());
+
         self.viewport.begin_diff(area, visible_height);
-        self.viewport.set_diff_status_rows(0);
+        self.viewport.set_diff_status_rows(lines.len());
 
         let output = self
             .command_output_mut()
             .expect("command output pane requires command output state");
         let title = format!(" Command: {} ", output.result.label());
         let all_lines = rows::custom_command_output_lines(&output.result, content_width, theme);
-        output.scroll.sync(all_lines.len(), visible_height);
-        let lines = output.scroll.visible(all_lines);
+        output.scroll.sync(all_lines.len(), output_height);
+        lines.extend(output.scroll.visible(all_lines));
+        lines.truncate(visible_height);
         let lines = self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             lines,
@@ -340,16 +354,25 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> DiffPaneRows {
+        let mut lines = rows::live_status_lines(
+            self.live_error.as_deref(),
+            self.live_notice.as_deref(),
+            content_width,
+            theme,
+        );
+        let output_height = visible_height.saturating_sub(lines.len());
+
         self.viewport.begin_diff(area, visible_height);
-        self.viewport.set_diff_status_rows(0);
+        self.viewport.set_diff_status_rows(lines.len());
 
         let output = self
             .ask_ai_output_mut()
             .expect("Ask AI output pane requires output state");
         let title = format!(" Ask AI: {} ", output.result.context_summary());
         let all_lines = rows::ask_ai_output_lines(&output.result, content_width, theme);
-        output.scroll.sync(all_lines.len(), visible_height);
-        let lines = output.scroll.visible(all_lines);
+        output.scroll.sync(all_lines.len(), output_height);
+        lines.extend(output.scroll.visible(all_lines));
+        lines.truncate(visible_height);
         let lines = self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             lines,

@@ -17,6 +17,7 @@ use crate::config::AppConfig;
 use crate::custom_command::CustomCommandBinding;
 use crate::editor::EditorRequest;
 use crate::model::{Changeset, DiffFile, DiffHunk};
+use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowsInput};
 use crate::scroll_text::VerticalDirection;
@@ -52,6 +53,35 @@ enum PendingLeftClick {
     Diff { hunk_index: Option<usize> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyAction {
+    FocusedTarget,
+    SelectedFileDiff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClipboardRequest {
+    text: String,
+    success_message: String,
+}
+
+impl ClipboardRequest {
+    fn new(text: String, success_message: impl Into<String>) -> Self {
+        Self {
+            text,
+            success_message: success_message.into(),
+        }
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn success_message(&self) -> &str {
+        &self.success_message
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct App {
     /// Review source behavior for this session.
@@ -60,6 +90,8 @@ pub(crate) struct App {
     changeset: Changeset,
     /// Last live reload/watch error, rendered above the diff when present.
     live_error: Option<String>,
+    /// Last successful background/status event, rendered above the diff.
+    live_notice: Option<String>,
     /// Index into `changeset.files`.
     selected_file_index: usize,
     /// Index into the selected file's hunks.
@@ -81,6 +113,8 @@ pub(crate) struct App {
     ask_ai_request: Option<AskAiRequest>,
     /// Deferred request for runtime to cancel the active Ask AI task.
     ask_ai_cancel_request: bool,
+    /// Deferred request for runtime to write explicit copied text.
+    clipboard_request: Option<ClipboardRequest>,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
     /// First file index considered for sidebar rendering.
@@ -119,6 +153,7 @@ impl App {
             source,
             changeset,
             live_error: None,
+            live_notice: None,
             selected_file_index: 0,
             selected_hunk_index,
             focus: FocusPane::Sidebar,
@@ -129,6 +164,7 @@ impl App {
             custom_command_request: None,
             ask_ai_request: None,
             ask_ai_cancel_request: false,
+            clipboard_request: None,
             diff_scroll: 0,
             sidebar_scroll: 0,
             viewport: RenderedViewport::new(file_count),
@@ -326,7 +362,13 @@ impl App {
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
+        self.live_notice = None;
         self.live_error = Some(error);
+    }
+
+    pub(crate) fn set_live_notice(&mut self, notice: String) {
+        self.live_error = None;
+        self.live_notice = Some(notice);
     }
 
     pub(crate) fn take_editor_request(&mut self) -> Option<EditorRequest> {
@@ -347,8 +389,12 @@ impl App {
         requested
     }
 
-    pub(crate) fn take_clipboard_request(&mut self) -> Option<String> {
-        self.text_selection.take_clipboard_request()
+    pub(crate) fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
+        self.clipboard_request.take().or_else(|| {
+            self.text_selection
+                .take_clipboard_request()
+                .map(|text| ClipboardRequest::new(text, "copied selected text"))
+        })
     }
 
     pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
@@ -403,6 +449,10 @@ impl App {
 
         if self.search_prompt_open() {
             self.handle_search_prompt_key(key);
+            return Ok(true);
+        }
+
+        if self.queue_copy_for_key(key) {
             return Ok(true);
         }
 
@@ -753,6 +803,99 @@ impl App {
         self.focus = FocusPane::Diff;
         self.live_error = None;
         self.ask_ai_request = Some(AskAiRequest::explain_code(context));
+    }
+
+    fn queue_copy_for_key(&mut self, key: KeyEvent) -> bool {
+        if !accepts_text_input(key) {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('y') => self.queue_copy_action(CopyAction::FocusedTarget),
+            KeyCode::Char('Y') => self.queue_copy_action(CopyAction::SelectedFileDiff),
+            _ => return false,
+        }
+
+        true
+    }
+
+    fn queue_copy_action(&mut self, action: CopyAction) {
+        match action {
+            CopyAction::FocusedTarget => self.queue_focused_target_copy(),
+            CopyAction::SelectedFileDiff => self.queue_selected_file_diff_copy(),
+        }
+    }
+
+    fn queue_focused_target_copy(&mut self) {
+        match self.focus {
+            FocusPane::Sidebar if self.files_panel_visible => self.queue_selected_file_path_copy(),
+            FocusPane::Diff => self.queue_selected_hunk_diff_copy(),
+            FocusPane::Sidebar => self.set_copy_error("no visible file path to copy"),
+        }
+    }
+
+    fn queue_selected_file_path_copy(&mut self) {
+        let Some(file) = self.selected_file() else {
+            self.set_copy_error("no selected file path to copy");
+            return;
+        };
+
+        self.queue_clipboard_text(file.display_path().to_string(), "copied selected file path");
+    }
+
+    fn queue_selected_hunk_diff_copy(&mut self) {
+        let Some(hunk_index) = self.focused_hunk_index() else {
+            self.set_copy_error("no selected hunk to copy");
+            return;
+        };
+        let Some(file) = self.selected_file() else {
+            self.set_copy_error("no selected file to copy");
+            return;
+        };
+        let Some(text) = patch::selected_hunk_patch(file, hunk_index) else {
+            self.set_copy_error("no selected hunk diff to copy");
+            return;
+        };
+
+        self.queue_clipboard_text(text, "copied selected hunk diff");
+    }
+
+    fn queue_selected_file_diff_copy(&mut self) {
+        let Some(file) = self.selected_file() else {
+            self.set_copy_error("no selected file to copy");
+            return;
+        };
+        let Some(text) = patch::file_patch(file) else {
+            self.set_copy_error("no selected file diff to copy");
+            return;
+        };
+
+        self.queue_clipboard_text(text, "copied selected file diff");
+    }
+
+    fn queue_ask_ai_answer_copy(&mut self) {
+        let Some(answer) = self
+            .ask_ai_output()
+            .map(|output| output.result.stdout().to_string())
+            .filter(|answer| !answer.trim().is_empty())
+        else {
+            self.set_copy_error("no Ask AI answer to copy");
+            return;
+        };
+
+        self.queue_clipboard_text(answer, "copied Ask AI answer");
+    }
+
+    fn queue_clipboard_text(&mut self, text: String, success_message: &'static str) {
+        self.live_error = None;
+        self.live_notice = None;
+        self.clipboard_request = Some(ClipboardRequest::new(text, success_message));
+    }
+
+    fn set_copy_error(&mut self, message: &'static str) {
+        self.clipboard_request = None;
+        self.live_notice = None;
+        self.live_error = Some(message.to_string());
     }
 
     fn queue_custom_command_for_key(&mut self, key: KeyEvent) -> bool {

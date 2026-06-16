@@ -40,17 +40,22 @@ pub(crate) fn no_diff_lines(
 
 pub(crate) fn live_status_lines(
     error: Option<&str>,
+    notice: Option<&str>,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let Some(error) = error else {
+    let (prefix, message, color) = if let Some(error) = error {
+        ("!", error, theme.removed)
+    } else if let Some(notice) = notice {
+        ("ok", notice, theme.accent)
+    } else {
         return Vec::new();
     };
 
     wrap_line(
         Line::styled(
-            format!("! {error}"),
-            color_style(theme.removed, theme.background),
+            format!("{prefix} {message}"),
+            color_style(color, theme.background),
         ),
         content_width,
     )
@@ -313,6 +318,9 @@ pub(crate) fn ask_ai_output_keybind_bar_line(theme: Theme) -> Line<'static> {
         keybind_key_span("g/G", key_style),
         Span::styled(" top/bottom", label_style),
         Span::styled("  \u{b7}  ", separator_style),
+        keybind_key_span("y", key_style),
+        Span::styled(" copy", label_style),
+        Span::styled("  \u{b7}  ", separator_style),
         keybind_key_span("Esc/q", key_style),
         Span::styled(" close", label_style),
     ])
@@ -432,6 +440,15 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("y"),
+            HelpSegment::text(" copy selected file path"),
+        ],
+        content_width,
+        theme,
+    );
 
     push_help_section(&mut lines, "Diff", theme);
     push_help_line(
@@ -482,6 +499,17 @@ pub(crate) fn help_overlay_lines(
         &[
             HelpSegment::command("x"),
             HelpSegment::text(" Explain focused file or hunk with Ask AI"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
+            HelpSegment::command("y"),
+            HelpSegment::text(" copy selected hunk diff   "),
+            HelpSegment::command("Y"),
+            HelpSegment::text(" copy selected file diff"),
         ],
         content_width,
         theme,

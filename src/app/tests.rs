@@ -347,7 +347,56 @@ fn text_drag_requests_clipboard_copy() {
         modifiers: KeyModifiers::NONE,
     });
 
-    assert_eq!(app.take_clipboard_request().as_deref(), Some("bcd"));
+    let request = app
+        .take_clipboard_request()
+        .expect("text drag should request clipboard copy");
+    assert_eq!(request.text(), "bcd");
+    assert_eq!(request.success_message(), "copied selected text");
+}
+
+#[test]
+fn sidebar_y_copies_selected_file_path() {
+    let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
+    app.selected_file_index = 1;
+    app.focus = FocusPane::Sidebar;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = app
+        .take_clipboard_request()
+        .expect("selected file path should be copied");
+    assert_eq!(request.text(), "b.txt");
+    assert_eq!(request.success_message(), "copied selected file path");
+}
+
+#[test]
+fn diff_copy_keys_copy_hunk_or_file_diff() {
+    let mut app = app_with(changeset_with_two_hunk_file());
+    app.focus = FocusPane::Diff;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .unwrap();
+    let hunk_request = app
+        .take_clipboard_request()
+        .expect("selected hunk diff should be copied");
+    assert!(
+        hunk_request
+            .text()
+            .contains("diff --git a/sample.txt b/sample.txt")
+    );
+    assert!(hunk_request.text().contains("@@ -1,8 +1,8 @@"));
+    assert!(!hunk_request.text().contains("@@ -20 +20 @@"));
+    assert_eq!(hunk_request.success_message(), "copied selected hunk diff");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
+        .unwrap();
+    let file_request = app
+        .take_clipboard_request()
+        .expect("selected file diff should be copied");
+    assert!(file_request.text().contains("@@ -1,8 +1,8 @@"));
+    assert!(file_request.text().contains("@@ -20 +20 @@"));
+    assert_eq!(file_request.success_message(), "copied selected file diff");
 }
 
 #[test]
@@ -587,6 +636,8 @@ fn footer_keeps_secondary_actions_in_help_only() {
     assert!(help.contains("d discard focused file or hunk"));
     assert!(help.contains("a Ask AI about focused file or hunk"));
     assert!(help.contains("x Explain focused file or hunk with Ask AI"));
+    assert!(help.contains("y copy selected hunk diff"));
+    assert!(help.contains("Y copy selected file diff"));
 }
 
 #[test]
@@ -792,6 +843,31 @@ fn ask_ai_output_pane_scrolls_and_closes() {
     assert!(app.ask_ai_output().is_none());
 }
 
+#[test]
+fn ask_ai_output_y_copies_answer_text() {
+    let mut app = app_with(changeset_with_one_file());
+    let request = ask_ai_request("Explain this");
+    app.set_ask_ai_result(AskAiResult::from_output(
+        request,
+        std::path::PathBuf::from("."),
+        output_status(0, "answer\n", ""),
+    ));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = app
+        .take_clipboard_request()
+        .expect("Ask AI answer should be copied");
+    assert_eq!(request.text(), "answer\n");
+    assert_eq!(request.success_message(), "copied Ask AI answer");
+    assert!(app.ask_ai_output().is_some());
+
+    app.set_live_notice(request.success_message().to_string());
+    let pane = render_diff_pane(&mut app, Theme::github_dark());
+    assert!(pane_text(&pane).contains("ok copied Ask AI answer"));
+}
+
 fn app_with(changeset: Changeset) -> App {
     App::new(LoadedReview::worktree(changeset))
 }
@@ -840,6 +916,16 @@ fn ask_ai_request(question: &str) -> AskAiRequest {
     );
 
     AskAiRequest::new(question.to_string(), context)
+}
+
+fn output_status(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
 }
 
 fn assert_explain_code_question(question: &str) {
