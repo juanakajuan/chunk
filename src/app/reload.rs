@@ -34,7 +34,7 @@ pub(super) fn apply_changeset(app: &mut App, changeset: Changeset, preserve_scro
         0
     };
     app.clear_render_caches();
-    app.search.invalidate_matches();
+    app.invalidate_search_matches();
     app.ensure_scroll_bounds();
 }
 

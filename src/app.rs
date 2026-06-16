@@ -31,6 +31,7 @@ use crate::viewport::{
 mod keys;
 mod overlay;
 mod reload;
+mod search;
 
 pub(crate) use keys::accepts_text_input;
 
@@ -237,14 +238,13 @@ impl App {
         ));
         lines.extend(self.discard_status_lines(content_width, theme));
 
-        let provisional_search_lines =
-            rows::search_status_lines(self.search.status(), content_width, theme);
+        let provisional_search_lines = self.search_status_lines(content_width, theme);
         let provisional_visible_diff_height =
             visible_height.saturating_sub(lines.len() + provisional_search_lines.len());
         let mut diff_content_width =
             self.diff_content_width(content_width, provisional_visible_diff_height, theme);
 
-        let pending_search_scroll = if self.search.active_query().is_some() {
+        let pending_search_scroll = if self.has_active_search() {
             self.viewport
                 .begin_diff(area, provisional_visible_diff_height);
             self.ensure_scroll_bounds();
@@ -257,11 +257,7 @@ impl App {
             false
         };
 
-        lines.extend(rows::search_status_lines(
-            self.search.status(),
-            content_width,
-            theme,
-        ));
+        lines.extend(self.search_status_lines(content_width, theme));
 
         self.diff_status_rows = lines.len();
         let visible_diff_height = visible_height.saturating_sub(self.diff_status_rows);
@@ -536,7 +532,7 @@ impl App {
         let selected_file_index = self.selected_file_index;
         let can_stage = self.can_stage();
         if selected_file_index >= self.changeset.files.len() {
-            self.search.clear_rendered_matches();
+            self.clear_rendered_search_matches();
             return false;
         }
 
@@ -581,35 +577,6 @@ impl App {
         pending_search_scroll
     }
 
-    fn diff_render_target_rows(&self, visible_height: usize) -> usize {
-        if self.search.active_query().is_some() {
-            return usize::MAX;
-        }
-
-        self.diff_scroll
-            .saturating_add(visible_height)
-            .saturating_add(rows::DIFF_PREFETCH_ROWS)
-    }
-
-    fn refresh_search_matches(&mut self, selected_file_index: usize) -> bool {
-        let Some(file_id) = self
-            .changeset
-            .files
-            .get(selected_file_index)
-            .map(|file| file.id.as_str())
-        else {
-            self.search.clear_rendered_matches();
-            return false;
-        };
-
-        let Some(lines) = self.viewport.diff_lines(selected_file_index, file_id) else {
-            self.search.clear_rendered_matches();
-            return false;
-        };
-
-        self.search.refresh_matches(file_id, lines)
-    }
-
     fn visible_selected_diff_lines(
         &self,
         content_width: usize,
@@ -626,7 +593,7 @@ impl App {
             visible_height,
         );
         self.apply_selected_hunk_style(&mut lines, content_width, theme);
-        self.search.highlight(lines, self.diff_scroll, theme)
+        self.highlight_search_matches(lines, theme)
     }
 
     fn command_output_pane_rows(
@@ -806,9 +773,8 @@ impl App {
             return Ok(true);
         }
 
-        if self.search.is_prompt_open() {
-            self.search.handle_prompt_key(key);
-            self.ensure_scroll_bounds();
+        if self.search_prompt_open() {
+            self.handle_search_prompt_key(key);
             return Ok(true);
         }
 
@@ -818,7 +784,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') if accepts_text_input(key) => return Ok(false),
-            KeyCode::Esc => self.search.clear_query(),
+            KeyCode::Esc => self.clear_search_query(),
             KeyCode::Char('?') if accepts_text_input(key) => self.toggle_help_overlay(),
 
             KeyCode::Tab => self.toggle_focus(),
@@ -1083,21 +1049,16 @@ impl App {
         };
     }
 
-    fn open_search_prompt(&mut self) {
-        self.focus = FocusPane::Diff;
-        self.search.open_prompt();
-    }
-
     fn should_open_ask_ai_prompt(&self, key: KeyEvent) -> bool {
         self.overlay.is_none()
-            && !self.search.is_prompt_open()
+            && !self.search_prompt_open()
             && key.code == KeyCode::Char('a')
             && accepts_text_input(key)
     }
 
     fn should_queue_explain_code_request(&self, key: KeyEvent) -> bool {
         self.overlay.is_none()
-            && !self.search.is_prompt_open()
+            && !self.search_prompt_open()
             && key.code == KeyCode::Char('x')
             && accepts_text_input(key)
     }
@@ -1204,7 +1165,7 @@ impl App {
             .selected_file()
             .and_then(|file| bounded_hunk_index(file, None));
         self.diff_scroll = 0;
-        self.search.invalidate_matches();
+        self.invalidate_search_matches();
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
@@ -1251,32 +1212,6 @@ impl App {
 
         self.selected_hunk_index = Some(target);
         self.center_selected_hunk();
-    }
-
-    fn jump_by(&mut self, direction: VerticalDirection) {
-        if self.search.active_query().is_some() {
-            self.jump_search_match(direction);
-        } else {
-            self.jump_hunk(direction);
-        }
-    }
-
-    fn jump_search_match(&mut self, direction: VerticalDirection) {
-        if self
-            .search
-            .advance_match(matches!(direction, VerticalDirection::Down))
-        {
-            self.scroll_active_search_match();
-            self.select_hunk_at_scroll();
-        }
-    }
-
-    fn scroll_active_search_match(&mut self) {
-        let Some(active_row) = self.search.active_match_row() else {
-            return;
-        };
-
-        self.diff_scroll = active_row.saturating_sub(self.viewport.diff_view_height() / 2);
     }
 
     fn center_selected_hunk(&mut self) {
