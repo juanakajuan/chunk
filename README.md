@@ -66,6 +66,9 @@ It does not live-refresh, stage files, or discard worktree changes.
 - `y`: copy the selected file path from the file list, or the selected hunk
   diff from the diff pane
 - `Y`: copy the selected file diff from the diff pane
+- `r`: toggle reviewed state for the selected file; reviewed files are dimmed
+  and marked with a check in the file list, and the state survives reloads as
+  long as the file path stays the same
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
 - `d`: in `diff` mode, discard unstaged worktree changes for the selected file
@@ -102,7 +105,7 @@ theme = "github-dark"
 [[commands]]
 key = "C"
 label = "commit and push"
-command = "ga . && com && gP"
+command = "git add . && com && git push"
 ```
 
 The `theme` setting is optional. Supported values are `gruvbox` (default) and

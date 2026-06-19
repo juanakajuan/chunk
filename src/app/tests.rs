@@ -597,6 +597,68 @@ fn custom_command_key_queues_command_request() {
 }
 
 #[test]
+fn r_key_toggles_selected_file_review_state() {
+    let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
+    assert!(!app.is_selected_file_reviewed());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.is_selected_file_reviewed());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.is_selected_file_reviewed());
+}
+
+#[test]
+fn r_key_reviews_newly_selected_file_independently() {
+    let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.is_selected_file_reviewed());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("b.txt")
+    );
+    assert!(!app.is_selected_file_reviewed());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.is_selected_file_reviewed());
+}
+
+#[test]
+fn review_state_survives_reload_by_path_identity() {
+    let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.is_selected_file_reviewed());
+
+    app.apply_reloaded_changeset(changeset_with_paths(["b.txt", "a.txt"]), true);
+
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("a.txt")
+    );
+    assert!(app.is_selected_file_reviewed());
+}
+
+#[test]
+fn r_key_works_from_diff_pane_focus() {
+    let mut app = app_with(changeset_with_one_file());
+    app.focus = FocusPane::Diff;
+    assert!(!app.is_selected_file_reviewed());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.is_selected_file_reviewed());
+}
+
+#[test]
 fn custom_commands_are_help_only_not_footer_hints() {
     let app = app_with_config(AppConfig {
         commands: vec![custom_command("P", "publish", "git push")],

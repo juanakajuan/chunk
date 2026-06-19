@@ -442,6 +442,15 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
+            HelpSegment::command("r"),
+            HelpSegment::text(" toggle reviewed for selected file"),
+        ],
+        content_width,
+        theme,
+    );
+    push_help_line(
+        &mut lines,
+        &[
             HelpSegment::command("y"),
             HelpSegment::text(" copy selected file path"),
         ],
@@ -969,6 +978,15 @@ mod tests {
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
         assert!(!pr_help.contains("d discard focused file or hunk"));
+    }
+
+    #[test]
+    fn help_overlay_lists_review_toggle_in_sidebar_section() {
+        let worktree_help = help_text(true);
+        let pr_help = help_text(false);
+
+        assert!(worktree_help.contains("r toggle reviewed for selected file"));
+        assert!(pr_help.contains("r toggle reviewed for selected file"));
     }
 
     #[test]

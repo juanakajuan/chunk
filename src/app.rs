@@ -5,6 +5,7 @@
 //! live in `runtime`; rendered row preparation lives here while `ui` draws
 //! Ratatui widgets.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
@@ -131,6 +132,9 @@ pub(crate) struct App {
     editor_request: Option<EditorRequest>,
     /// Literal search prompt, query, matches, and active match.
     search: Search,
+    /// Display paths marked reviewed in this session. Keyed by `display_path`
+    /// so review state survives reloads as long as file identity stays stable.
+    reviewed_files: HashSet<String>,
 }
 
 pub(crate) struct DiffPaneRows {
@@ -173,6 +177,7 @@ impl App {
             diff_scrollbar_drag: None,
             editor_request: None,
             search: Search::default(),
+            reviewed_files: HashSet::new(),
         }
     }
 
@@ -221,6 +226,7 @@ impl App {
             content_width,
             visible_height,
             theme,
+            reviewed_files: &self.reviewed_files,
         });
         self.sidebar_scroll = rendered_rows.sidebar_scroll;
         self.viewport.begin_sidebar_rows();
@@ -484,6 +490,7 @@ impl App {
             KeyCode::Char(' ') => self.toggle_selected_staging(),
             KeyCode::Char('d') if accepts_text_input(key) => self.request_selected_discard(),
             KeyCode::Char('e') => self.queue_selected_file_editor_request(),
+            KeyCode::Char('r') if accepts_text_input(key) => self.toggle_selected_file_reviewed(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
             KeyCode::PageUp => self.scroll_diff_page(VerticalDirection::Up),
@@ -1046,6 +1053,24 @@ impl App {
             Ok(None) => {}
             Err(error) => self.live_error = Some(format!("staging failed: {error}")),
         }
+    }
+
+    fn toggle_selected_file_reviewed(&mut self) {
+        let Some(file) = self.selected_file() else {
+            return;
+        };
+
+        let path = file.display_path().to_string();
+        if !self.reviewed_files.insert(path.clone()) {
+            self.reviewed_files.remove(&path);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_selected_file_reviewed(&self) -> bool {
+        self.selected_file()
+            .map(|file| self.reviewed_files.contains(file.display_path()))
+            .unwrap_or(false)
     }
 
     fn toggle_selected_hunk_staging(&mut self) {

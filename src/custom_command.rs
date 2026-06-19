@@ -9,8 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::process::ProcessOutcome;
 
-const RESERVED_KEYS: [char; 17] = [
-    'q', '?', 'f', '/', 'j', 'k', 'n', 'N', 'g', 'G', ' ', 'd', 'e', 'a', 'x', 'y', 'Y',
+const RESERVED_KEYS: [char; 18] = [
+    'q', '?', 'f', '/', 'j', 'k', 'n', 'N', 'g', 'G', ' ', 'd', 'e', 'a', 'x', 'y', 'Y', 'r',
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +218,7 @@ mod tests {
         assert!(CommandKey::parse("x").unwrap().conflicts_with_builtin());
         assert!(CommandKey::parse("y").unwrap().conflicts_with_builtin());
         assert!(CommandKey::parse("Y").unwrap().conflicts_with_builtin());
+        assert!(CommandKey::parse("r").unwrap().conflicts_with_builtin());
         assert!(!CommandKey::parse("C").unwrap().conflicts_with_builtin());
     }
 

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -6,8 +8,8 @@ use crate::theme::Theme;
 
 use super::RAIL_MARKER;
 use super::file_summary::{
-    file_icon, format_file_stats, padding_before_stats, push_stat_spans, sidebar_file_label,
-    stage_display, stats_width, status_color, status_glyph,
+    file_icon, format_file_stats, padding_before_stats, push_stat_spans, reviewed_glyph,
+    sidebar_file_label, stage_display, stats_width, status_color, status_glyph,
 };
 use super::text::{color_style, display_width, muted_line, wrap_line, wrap_styled_spans};
 
@@ -24,6 +26,7 @@ pub(crate) struct SidebarRowsInput<'a> {
     pub(crate) content_width: usize,
     pub(crate) visible_height: usize,
     pub(crate) theme: Theme,
+    pub(crate) reviewed_files: &'a HashSet<String>,
 }
 
 pub(crate) struct RenderedSidebarRows {
@@ -63,12 +66,14 @@ pub(crate) fn sidebar_rows(input: SidebarRowsInput<'_>) -> RenderedSidebarRows {
             break;
         }
 
+        let is_reviewed = input.reviewed_files.contains(file.display_path());
         let entry_lines = render_file_entry(
             index,
             file,
             selected_file_index,
             input.content_width,
             input.can_stage,
+            is_reviewed,
             input.theme,
         );
         let visible_rows = entry_lines.len().min(remaining_height);
@@ -100,7 +105,19 @@ pub(crate) fn sidebar_row_counts(
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            render_file_entry(index, file, usize::MAX, content_width, can_stage, theme).len()
+            // Review state swaps the file-type icon for a check glyph of the
+            // same width, so row counts are unaffected; pass `false` to compute
+            // counts against the unreviewed layout.
+            render_file_entry(
+                index,
+                file,
+                usize::MAX,
+                content_width,
+                can_stage,
+                false,
+                theme,
+            )
+            .len()
         })
         .collect()
 }
@@ -185,6 +202,7 @@ fn render_file_entry(
     selected_index: usize,
     content_width: usize,
     can_stage: bool,
+    is_reviewed: bool,
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let is_selected = index == selected_index;
@@ -194,21 +212,33 @@ fn render_file_entry(
         theme.background
     };
     let base_style = color_style(theme.text, row_background);
+    let label_style = if is_reviewed {
+        color_style(theme.muted, row_background)
+    } else {
+        base_style
+    };
     let marker_style = if is_selected {
         color_style(theme.accent, row_background)
     } else {
         base_style
     };
     let status_style = color_style(status_color(file.status, theme), row_background);
-    let file_label = format!(
-        "{} {}",
-        file_icon(file.display_path()),
-        sidebar_file_label(file)
-    );
+    let icon = if is_reviewed {
+        reviewed_glyph()
+    } else {
+        file_icon(file.display_path())
+    };
+    let icon_style = if is_reviewed {
+        color_style(theme.added, row_background)
+    } else {
+        label_style
+    };
+    let file_name = sidebar_file_label(file);
     let stats = format_file_stats(file);
     let stats_width = stats_width(&stats);
     let gutter_width = sidebar_gutter_width(can_stage);
-    let used_width = gutter_width + display_width(&file_label) + stats_width;
+    let used_width =
+        gutter_width + display_width(icon) + 1 + display_width(&file_name) + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let rail = if is_selected { RAIL_MARKER } else { " " };
 
@@ -224,8 +254,10 @@ fn render_file_entry(
     line_prefix.push(Span::styled(status_glyph(file.status), status_style));
     line_prefix.push(Span::styled(" ", base_style));
     let mut content_spans = vec![
-        Span::styled(file_label, base_style),
-        Span::styled(padding, base_style),
+        Span::styled(icon, icon_style),
+        Span::styled(" ", label_style),
+        Span::styled(file_name, label_style),
+        Span::styled(padding, label_style),
     ];
     push_stat_spans(&mut content_spans, file, row_background, theme);
 
@@ -286,6 +318,8 @@ fn sidebar_gutter_width(can_stage: bool) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use ratatui::text::Line;
 
     use crate::model::{
@@ -311,6 +345,7 @@ mod tests {
             content_width,
             visible_height: 8,
             theme: Theme::github_dark(),
+            reviewed_files: &HashSet::new(),
         });
 
         assert!(rows.lines.len() > 1);
@@ -337,6 +372,7 @@ mod tests {
             content_width: 14,
             visible_height: 2,
             theme: Theme::github_dark(),
+            reviewed_files: &HashSet::new(),
         });
 
         assert_eq!(rows.sidebar_scroll, 1);
@@ -349,9 +385,64 @@ mod tests {
     #[test]
     fn review_mode_omits_sidebar_staging_affordances() {
         let file = diff_file_with_path("src/main.rs");
-        let sidebar = render_file_entry(0, &file, 0, 80, false, Theme::github_dark());
+        let sidebar = render_file_entry(0, &file, 0, 80, false, false, Theme::github_dark());
 
         assert!(!line_text(&sidebar[0]).contains("[ ]"));
+    }
+
+    #[test]
+    fn reviewed_files_render_with_check_glyph_and_muted_label() {
+        let file = diff_file_with_path("src/main.rs");
+        let theme = Theme::github_dark();
+        let sidebar = render_file_entry(0, &file, 0, 80, false, true, theme);
+
+        let check_glyph = reviewed_glyph();
+        let name_span = sidebar[0]
+            .spans
+            .iter()
+            .find(|span| span.content.contains("main.rs"))
+            .expect("file name span should render");
+        let icon_span = sidebar[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == check_glyph)
+            .expect("reviewed check glyph should render");
+
+        assert_eq!(name_span.style.fg, Some(theme.muted));
+        assert_eq!(icon_span.style.fg, Some(theme.added));
+    }
+
+    #[test]
+    fn unreviewed_files_keep_file_icon_and_text_color() {
+        let file = diff_file_with_path("src/main.rs");
+        let theme = Theme::github_dark();
+        let sidebar = render_file_entry(0, &file, 0, 80, false, false, theme);
+
+        let check_glyph = reviewed_glyph();
+        assert!(
+            !sidebar[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == check_glyph)
+        );
+
+        let name_span = sidebar[0]
+            .spans
+            .iter()
+            .find(|span| span.content.contains("main.rs"))
+            .expect("file name span should render");
+        assert_eq!(name_span.style.fg, Some(theme.text));
+    }
+
+    #[test]
+    fn reviewed_row_count_matches_unreviewed_row_count() {
+        let file = diff_file_with_path("src/components/extremely_long_file_name_component.rs");
+        let content_width = 16;
+        let theme = Theme::github_dark();
+        let unreviewed = render_file_entry(0, &file, 0, content_width, true, false, theme).len();
+        let reviewed = render_file_entry(0, &file, 0, content_width, true, true, theme).len();
+
+        assert_eq!(unreviewed, reviewed);
     }
 
     fn diff_file_with_path(path: &str) -> DiffFile {

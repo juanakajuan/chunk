@@ -80,6 +80,11 @@ pub(super) fn status_glyph(status: FileStatus) -> &'static str {
     }
 }
 
+/// Nerd Font glyph marking a file as reviewed in the sidebar.
+pub(super) fn reviewed_glyph() -> &'static str {
+    "\u{f00c}" // check
+}
+
 /// Nerd Font glyph hinting at a file's language or type from its path.
 pub(super) fn file_icon(path: &str) -> &'static str {
     let name = basename(path);
