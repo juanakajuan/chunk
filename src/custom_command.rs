@@ -9,10 +9,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::process::ProcessOutcome;
 
-const RESERVED_KEYS: [char; 18] = [
-    'q', '?', 'f', '/', 'j', 'k', 'n', 'N', 'g', 'G', ' ', 'd', 'e', 'a', 'x', 'y', 'Y', 'r',
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CustomCommandBinding {
     key: CommandKey,
@@ -77,8 +73,8 @@ impl CommandKey {
         Ok(Self { value })
     }
 
-    pub(crate) fn conflicts_with_builtin(self) -> bool {
-        RESERVED_KEYS.contains(&self.value)
+    pub(crate) fn char(self) -> char {
+        self.value
     }
 
     pub(crate) fn matches(self, key: KeyEvent) -> bool {
@@ -211,15 +207,11 @@ mod tests {
     }
 
     #[test]
-    fn detects_builtin_key_conflicts() {
-        assert!(CommandKey::parse("d").unwrap().conflicts_with_builtin());
-        assert!(CommandKey::parse("e").unwrap().conflicts_with_builtin());
-        assert!(CommandKey::parse("a").unwrap().conflicts_with_builtin());
-        assert!(CommandKey::parse("x").unwrap().conflicts_with_builtin());
-        assert!(CommandKey::parse("y").unwrap().conflicts_with_builtin());
-        assert!(CommandKey::parse("Y").unwrap().conflicts_with_builtin());
-        assert!(CommandKey::parse("r").unwrap().conflicts_with_builtin());
-        assert!(!CommandKey::parse("C").unwrap().conflicts_with_builtin());
+    fn exposes_raw_key_char_for_conflict_checks() {
+        // Built-in conflict checks now consult the configured KeybindMap; see
+        // `config::tests` and `keybind::tests`. CommandKey only reports its char.
+        assert_eq!(CommandKey::parse("d").unwrap().char(), 'd');
+        assert_eq!(CommandKey::parse("C").unwrap().char(), 'C');
     }
 
     #[test]

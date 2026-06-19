@@ -17,6 +17,7 @@ use crate::ask_ai::{AskAiContext, AskAiRequest};
 use crate::config::AppConfig;
 use crate::custom_command::CustomCommandBinding;
 use crate::editor::EditorRequest;
+use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::{Changeset, DiffFile, DiffHunk};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource};
@@ -106,6 +107,8 @@ pub(crate) struct App {
     overlay: Option<Overlay>,
     /// User-configured shell command bindings.
     custom_commands: Vec<CustomCommandBinding>,
+    /// User-configured built-in keybindings.
+    keybinds: KeybindMap,
     /// User-selected UI and syntax palette.
     theme: ThemeName,
     /// Deferred request for runtime to execute a configured shell command safely.
@@ -164,6 +167,7 @@ impl App {
             files_panel_visible: true,
             overlay: None,
             custom_commands: config.commands,
+            keybinds: config.keybinds,
             theme: config.theme,
             custom_command_request: None,
             ask_ai_request: None,
@@ -196,6 +200,10 @@ impl App {
 
     pub(crate) fn theme(&self) -> Theme {
         self.theme.theme()
+    }
+
+    pub(crate) fn keybinds(&self) -> KeybindMap {
+        self.keybinds
     }
 
     pub(crate) fn sidebar_rows(
@@ -258,19 +266,24 @@ impl App {
 
     pub(crate) fn keybind_bar_line(&self, theme: Theme) -> Line<'static> {
         if self.ask_ai_output().is_some() {
-            return rows::ask_ai_output_keybind_bar_line(theme);
+            return rows::ask_ai_output_keybind_bar_line(self.keybinds, theme);
         }
         if self.ask_ai_prompt().is_some() {
             return rows::ask_ai_prompt_keybind_bar_line(theme);
         }
         if self.ask_ai_running().is_some() {
-            return rows::ask_ai_running_keybind_bar_line(theme);
+            return rows::ask_ai_running_keybind_bar_line(self.keybinds, theme);
         }
         if self.command_output().is_some() {
-            return rows::custom_command_output_keybind_bar_line(theme);
+            return rows::custom_command_output_keybind_bar_line(self.keybinds, theme);
         }
 
-        rows::keybind_bar_line(self.files_panel_visible, self.stage_keybind_hint(), theme)
+        rows::keybind_bar_line(
+            self.files_panel_visible,
+            self.stage_keybind_hint(),
+            self.keybinds,
+            theme,
+        )
     }
 
     pub(crate) fn keybind_mode_tag_line(&self, theme: Theme) -> Option<Line<'static>> {
@@ -294,6 +307,7 @@ impl App {
             self.can_stage(),
             self.can_discard(),
             &self.custom_commands,
+            self.keybinds,
             content_width,
             theme,
         )
@@ -467,40 +481,46 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') if accepts_text_input(key) => return Ok(false),
-            KeyCode::Esc => self.clear_search_query(),
-            KeyCode::Char('?') if accepts_text_input(key) => self.toggle_help_overlay(),
-
             KeyCode::Tab => self.toggle_focus(),
-            KeyCode::Char('f') => self.toggle_files_panel(),
             KeyCode::Left if self.files_panel_visible => self.focus = FocusPane::Sidebar,
             KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
-
-            KeyCode::Char('/') if accepts_text_input(key) => self.open_search_prompt(),
-
-            KeyCode::Char('j') => self.move_by(VerticalDirection::Down),
-            KeyCode::Char('k') => self.move_by(VerticalDirection::Up),
-
-            KeyCode::Char('n') => self.jump_by(VerticalDirection::Down),
-            KeyCode::Char('N') => self.jump_by(VerticalDirection::Up),
-
-            KeyCode::Home | KeyCode::Char('g') => self.scroll_diff_to_top(),
-            KeyCode::End | KeyCode::Char('G') => self.scroll_diff_to_bottom(),
-
-            KeyCode::Char(' ') => self.toggle_selected_staging(),
-            KeyCode::Char('d') if accepts_text_input(key) => self.request_selected_discard(),
-            KeyCode::Char('e') => self.queue_selected_file_editor_request(),
-            KeyCode::Char('r') if accepts_text_input(key) => self.toggle_selected_file_reviewed(),
+            KeyCode::Esc => self.clear_search_query(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
             KeyCode::PageUp => self.scroll_diff_page(VerticalDirection::Up),
+            KeyCode::Home => self.scroll_diff_to_top(),
+            KeyCode::End => self.scroll_diff_to_bottom(),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll_diff_page(VerticalDirection::Down)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll_diff_page(VerticalDirection::Up)
             }
-            _ => {}
+            _ => match self.keybinds.action_for(key) {
+                Some(BuiltinAction::Quit) => return Ok(false),
+                Some(BuiltinAction::Help) => self.toggle_help_overlay(),
+                Some(BuiltinAction::ToggleFiles) => self.toggle_files_panel(),
+                Some(BuiltinAction::Search) => self.open_search_prompt(),
+                Some(BuiltinAction::MoveDown) => self.move_by(VerticalDirection::Down),
+                Some(BuiltinAction::MoveUp) => self.move_by(VerticalDirection::Up),
+                Some(BuiltinAction::NextMatch) => self.jump_by(VerticalDirection::Down),
+                Some(BuiltinAction::PrevMatch) => self.jump_by(VerticalDirection::Up),
+                Some(BuiltinAction::Top) => self.scroll_diff_to_top(),
+                Some(BuiltinAction::Bottom) => self.scroll_diff_to_bottom(),
+                Some(BuiltinAction::ToggleStaging) => self.toggle_selected_staging(),
+                Some(BuiltinAction::Discard) => self.request_selected_discard(),
+                Some(BuiltinAction::Editor) => self.queue_selected_file_editor_request(),
+                Some(BuiltinAction::ToggleReviewed) => self.toggle_selected_file_reviewed(),
+                // AskAi, ExplainCode, CopyFocused, and CopyFileDiff are
+                // dispatched earlier in this method, so they never reach here.
+                Some(
+                    BuiltinAction::AskAi
+                    | BuiltinAction::ExplainCode
+                    | BuiltinAction::CopyFocused
+                    | BuiltinAction::CopyFileDiff,
+                ) => {}
+                None => {}
+            },
         }
 
         self.ensure_scroll_bounds();
@@ -737,15 +757,13 @@ impl App {
     fn should_open_ask_ai_prompt(&self, key: KeyEvent) -> bool {
         self.overlay.is_none()
             && !self.search_prompt_open()
-            && key.code == KeyCode::Char('a')
-            && accepts_text_input(key)
+            && self.keybinds.action_for(key) == Some(BuiltinAction::AskAi)
     }
 
     fn should_queue_explain_code_request(&self, key: KeyEvent) -> bool {
         self.overlay.is_none()
             && !self.search_prompt_open()
-            && key.code == KeyCode::Char('x')
-            && accepts_text_input(key)
+            && self.keybinds.action_for(key) == Some(BuiltinAction::ExplainCode)
     }
 
     fn focused_ask_ai_context(&self) -> Option<AskAiContext> {
@@ -813,13 +831,11 @@ impl App {
     }
 
     fn queue_copy_for_key(&mut self, key: KeyEvent) -> bool {
-        if !accepts_text_input(key) {
-            return false;
-        }
-
-        match key.code {
-            KeyCode::Char('y') => self.queue_copy_action(CopyAction::FocusedTarget),
-            KeyCode::Char('Y') => self.queue_copy_action(CopyAction::SelectedFileDiff),
+        match self.keybinds.action_for(key) {
+            Some(BuiltinAction::CopyFocused) => self.queue_copy_action(CopyAction::FocusedTarget),
+            Some(BuiltinAction::CopyFileDiff) => {
+                self.queue_copy_action(CopyAction::SelectedFileDiff)
+            }
             _ => return false,
         }
 

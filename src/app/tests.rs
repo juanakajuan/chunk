@@ -1,6 +1,7 @@
 use super::*;
 use crate::ask_ai::{AskAiResult, AskAiReviewMode};
 use crate::custom_command::CustomCommandResult;
+use crate::keybind::{BuiltinAction, BuiltinKey, KeybindMap};
 use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
 use crate::theme::Theme;
 use crate::viewport::RenderedDiffLines;
@@ -597,6 +598,107 @@ fn custom_command_key_queues_command_request() {
 }
 
 #[test]
+fn remapped_quit_key_quits_and_default_does_not() {
+    let mut app = app_with_config(AppConfig {
+        keybinds: keybinds_with(&[(BuiltinAction::Quit, "Q")]),
+        ..AppConfig::default()
+    });
+
+    let keep_running = app
+        .handle_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(!keep_running, "remapped quit key Q should exit");
+
+    let keep_running = app
+        .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        keep_running,
+        "default quit key q should no longer exit once remapped"
+    );
+}
+
+#[test]
+fn remapped_quit_key_closes_help_overlay_and_default_does_not() {
+    let mut app = app_with_config(AppConfig {
+        keybinds: keybinds_with(&[(BuiltinAction::Quit, "Q")]),
+        ..AppConfig::default()
+    });
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.help_overlay_visible());
+
+    let keep_running = app
+        .handle_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(keep_running);
+    assert!(!app.help_overlay_visible());
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.help_overlay_visible());
+    let keep_running = app
+        .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(keep_running);
+    assert!(
+        app.help_overlay_visible(),
+        "default q should not close help once quit is remapped"
+    );
+}
+
+#[test]
+fn help_overlay_reflects_remapped_keys() {
+    let app = app_with_config(AppConfig {
+        keybinds: keybinds_with(&[(BuiltinAction::Quit, "Q"), (BuiltinAction::Help, "H")]),
+        ..AppConfig::default()
+    });
+    let theme = Theme::github_dark();
+
+    let help = app
+        .help_overlay_lines(80, theme)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(help.contains("H help/dismiss"), "help was: {help}");
+    assert!(help.contains("Q close help or quit"), "help was: {help}");
+    assert!(!help.contains("? help/dismiss"));
+}
+
+#[test]
+fn custom_command_runs_on_key_freed_by_remapped_builtin() {
+    let mut app = app_with_config(AppConfig {
+        keybinds: keybinds_with(&[(BuiltinAction::Quit, "Q")]),
+        commands: vec![custom_command("q", "quick", "true")],
+        ..AppConfig::default()
+    });
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = app
+        .take_custom_command_request()
+        .expect("freed default key should run the custom command");
+    assert_eq!(request.label(), "quick");
+}
+
+#[test]
+fn footer_reflects_remapped_move_keys() {
+    let app = app_with_config(AppConfig {
+        keybinds: keybinds_with(&[(BuiltinAction::MoveDown, "J"), (BuiltinAction::MoveUp, "K")]),
+        ..AppConfig::default()
+    });
+    let theme = Theme::github_dark();
+
+    let footer = line_text(&app.keybind_bar_line(theme));
+    assert!(footer.contains("J/K"), "footer was: {footer}");
+    assert!(!footer.contains("j/k"), "footer was: {footer}");
+}
+
+#[test]
 fn r_key_toggles_selected_file_review_state() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
     assert!(!app.is_selected_file_reviewed());
@@ -944,6 +1046,14 @@ fn custom_command(key: &str, label: &str, command: &str) -> CustomCommandBinding
         label.to_string(),
         command.to_string(),
     )
+}
+
+fn keybinds_with(overrides: &[(BuiltinAction, &str)]) -> KeybindMap {
+    let mut keybinds = KeybindMap::defaults();
+    for &(action, key) in overrides {
+        keybinds.set(action, BuiltinKey::parse(key).unwrap());
+    }
+    keybinds
 }
 
 fn enter_search_query(app: &mut App, query: &str) {

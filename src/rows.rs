@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 
 use crate::ask_ai::AskAiResult;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
+use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::Changeset;
 use crate::theme::Theme;
 
@@ -199,6 +200,7 @@ pub(crate) fn search_status_lines(
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
     stage_hint: Option<&'static str>,
+    keybinds: KeybindMap,
     theme: Theme,
 ) -> Line<'static> {
     let background = theme.background;
@@ -206,8 +208,9 @@ pub(crate) fn keybind_bar_line(
     let label_style = color_style(theme.muted, background);
     let separator_style = color_style(theme.border, background);
 
-    let mut hints: Vec<(&'static str, &'static str)> = vec![(
-        "f",
+    let move_keys = key_pair(keybinds, BuiltinAction::MoveDown, BuiltinAction::MoveUp);
+    let mut hints: Vec<(String, &'static str)> = vec![(
+        keybinds.display(BuiltinAction::ToggleFiles),
         if files_panel_visible {
             "hide files"
         } else {
@@ -215,15 +218,15 @@ pub(crate) fn keybind_bar_line(
         },
     )];
     if files_panel_visible {
-        hints.push(("Tab", "focus"));
+        hints.push(("Tab".to_string(), "focus"));
     }
     if let Some(stage_hint) = stage_hint {
-        hints.push(("Space", stage_hint));
+        hints.push((keybinds.display(BuiltinAction::ToggleStaging), stage_hint));
     }
-    hints.push(("/", "search"));
-    hints.push(("j/k", "move"));
-    hints.push(("?", "help"));
-    hints.push(("q", "quit"));
+    hints.push((keybinds.display(BuiltinAction::Search), "search"));
+    hints.push((move_keys, "move"));
+    hints.push((keybinds.display(BuiltinAction::Help), "help"));
+    hints.push((keybinds.display(BuiltinAction::Quit), "quit"));
 
     let mut spans = Vec::new();
 
@@ -250,7 +253,7 @@ pub(crate) fn keybind_mode_tag_line(can_stage: bool, theme: Theme) -> Line<'stat
     ])
 }
 
-fn keybind_key_span(key: &'static str, style: Style) -> Span<'static> {
+fn keybind_key_span(key: &str, style: Style) -> Span<'static> {
     Span::styled(format!(" {key} "), style)
 }
 
@@ -275,7 +278,7 @@ pub(crate) fn ask_ai_prompt_keybind_bar_line(theme: Theme) -> Line<'static> {
     ])
 }
 
-pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
+pub(crate) fn ask_ai_running_keybind_bar_line(keybinds: KeybindMap, theme: Theme) -> Line<'static> {
     let background = theme.background;
     let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
@@ -288,7 +291,10 @@ pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
         ),
         Span::styled("\u{e0b0}", color_style(theme.accent, background)),
         Span::styled("  ", label_style),
-        keybind_key_span("Esc/q", key_style),
+        keybind_key_span(
+            &format!("Esc/{}", keybinds.display(BuiltinAction::Quit)),
+            key_style,
+        ),
         Span::styled(" cancel", label_style),
         Span::styled("  \u{b7}  ", separator_style),
         keybind_key_span("Ctrl-c", key_style),
@@ -296,35 +302,42 @@ pub(crate) fn ask_ai_running_keybind_bar_line(theme: Theme) -> Line<'static> {
     ])
 }
 
-pub(crate) fn ask_ai_output_keybind_bar_line(theme: Theme) -> Line<'static> {
-    output_keybind_bar_line(" ASK AI ", true, theme)
+pub(crate) fn ask_ai_output_keybind_bar_line(keybinds: KeybindMap, theme: Theme) -> Line<'static> {
+    output_keybind_bar_line(" ASK AI ", true, keybinds, theme)
 }
 
-pub(crate) fn custom_command_output_keybind_bar_line(theme: Theme) -> Line<'static> {
-    output_keybind_bar_line(" COMMAND ", false, theme)
+pub(crate) fn custom_command_output_keybind_bar_line(
+    keybinds: KeybindMap,
+    theme: Theme,
+) -> Line<'static> {
+    output_keybind_bar_line(" COMMAND ", false, keybinds, theme)
 }
 
 fn output_keybind_bar_line(
     tag: &'static str,
     include_copy_hint: bool,
+    keybinds: KeybindMap,
     theme: Theme,
 ) -> Line<'static> {
-    let mut hints: Vec<(&'static str, &'static str)> = vec![
-        ("j/k", "scroll"),
-        ("Ctrl-d/Ctrl-u", "page"),
-        ("g/G", "top/bottom"),
+    let move_keys = key_pair(keybinds, BuiltinAction::MoveDown, BuiltinAction::MoveUp);
+    let top_bottom = key_pair(keybinds, BuiltinAction::Top, BuiltinAction::Bottom);
+    let close = format!("Esc/{}", keybinds.display(BuiltinAction::Quit));
+    let mut hints: Vec<(String, &'static str)> = vec![
+        (move_keys, "scroll"),
+        ("Ctrl-d/Ctrl-u".to_string(), "page"),
+        (top_bottom, "top/bottom"),
     ];
     if include_copy_hint {
-        hints.push(("y", "copy"));
+        hints.push((keybinds.display(BuiltinAction::CopyFocused), "copy"));
     }
-    hints.push(("Esc/q", "close"));
+    hints.push((close, "close"));
 
     tagged_keybind_bar_line(tag, &hints, theme)
 }
 
 fn tagged_keybind_bar_line(
     tag: &'static str,
-    hints: &[(&'static str, &'static str)],
+    hints: &[(String, &'static str)],
     theme: Theme,
 ) -> Line<'static> {
     let background = theme.background;
@@ -352,22 +365,28 @@ fn tagged_keybind_bar_line(
     Line::from(spans)
 }
 
+fn key_pair(keybinds: KeybindMap, first: BuiltinAction, second: BuiltinAction) -> String {
+    format!("{}/{}", keybinds.display(first), keybinds.display(second))
+}
+
 pub(crate) fn help_overlay_lines(
     can_stage: bool,
     can_discard: bool,
     custom_commands: &[CustomCommandBinding],
+    keybinds: KeybindMap,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
+    let cmd = |action| HelpSegment::command(keybinds.display(action));
     let mut lines = Vec::new();
 
     push_help_section(&mut lines, "Global", theme);
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("?"),
+            cmd(BuiltinAction::Help),
             HelpSegment::text(" help/dismiss   "),
-            HelpSegment::command("q"),
+            cmd(BuiltinAction::Quit),
             HelpSegment::text(" close help or quit   "),
             HelpSegment::command("Ctrl-c"),
             HelpSegment::text(" quit"),
@@ -378,7 +397,7 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("f"),
+            cmd(BuiltinAction::ToggleFiles),
             HelpSegment::text(" files   "),
             HelpSegment::command("Tab"),
             HelpSegment::text("/"),
@@ -395,7 +414,7 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("/"),
+            cmd(BuiltinAction::Search),
             HelpSegment::text(" search, "),
             HelpSegment::command("Enter"),
             HelpSegment::text(" apply, "),
@@ -408,15 +427,15 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("n"),
+            cmd(BuiltinAction::NextMatch),
             HelpSegment::text("/"),
-            HelpSegment::command("N"),
+            cmd(BuiltinAction::PrevMatch),
             HelpSegment::text(" next or previous match/hunk   "),
-            HelpSegment::command("g"),
+            cmd(BuiltinAction::Top),
             HelpSegment::text("/"),
             HelpSegment::command("Home"),
             HelpSegment::text(" top   "),
-            HelpSegment::command("G"),
+            cmd(BuiltinAction::Bottom),
             HelpSegment::text("/"),
             HelpSegment::command("End"),
             HelpSegment::text(" bottom"),
@@ -431,9 +450,9 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("j"),
+            cmd(BuiltinAction::MoveDown),
             HelpSegment::text("/"),
-            HelpSegment::command("k"),
+            cmd(BuiltinAction::MoveUp),
             HelpSegment::text(" select file"),
         ],
         content_width,
@@ -442,7 +461,7 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("r"),
+            cmd(BuiltinAction::ToggleReviewed),
             HelpSegment::text(" toggle reviewed for selected file"),
         ],
         content_width,
@@ -451,7 +470,7 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("y"),
+            cmd(BuiltinAction::CopyFocused),
             HelpSegment::text(" copy selected file path"),
         ],
         content_width,
@@ -462,9 +481,9 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("j"),
+            cmd(BuiltinAction::MoveDown),
             HelpSegment::text("/"),
-            HelpSegment::command("k"),
+            cmd(BuiltinAction::MoveUp),
             HelpSegment::text(" scroll row   "),
             HelpSegment::command("Ctrl-d"),
             HelpSegment::text("/"),
@@ -481,9 +500,9 @@ pub(crate) fn help_overlay_lines(
             HelpSegment::text("/"),
             HelpSegment::command("Ctrl-u"),
             HelpSegment::text(" page   "),
-            HelpSegment::command("n"),
+            cmd(BuiltinAction::NextMatch),
             HelpSegment::text("/"),
-            HelpSegment::command("N"),
+            cmd(BuiltinAction::PrevMatch),
             HelpSegment::text(" next or previous hunk"),
         ],
         content_width,
@@ -492,7 +511,7 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("a"),
+            cmd(BuiltinAction::AskAi),
             HelpSegment::text(" Ask AI about focused file or hunk, "),
             HelpSegment::command("Enter"),
             HelpSegment::text(" submit, "),
@@ -505,7 +524,7 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("x"),
+            cmd(BuiltinAction::ExplainCode),
             HelpSegment::text(" Explain focused file or hunk with Ask AI"),
         ],
         content_width,
@@ -514,9 +533,9 @@ pub(crate) fn help_overlay_lines(
     push_help_line(
         &mut lines,
         &[
-            HelpSegment::command("y"),
+            cmd(BuiltinAction::CopyFocused),
             HelpSegment::text(" copy selected hunk diff   "),
-            HelpSegment::command("Y"),
+            cmd(BuiltinAction::CopyFileDiff),
             HelpSegment::text(" copy selected file diff"),
         ],
         content_width,
@@ -562,7 +581,7 @@ pub(crate) fn help_overlay_lines(
             push_help_line(
                 &mut lines,
                 &[
-                    HelpSegment::command("Space"),
+                    cmd(BuiltinAction::ToggleStaging),
                     HelpSegment::text(" stage/unstage focused file or hunk"),
                 ],
                 content_width,
@@ -573,7 +592,7 @@ pub(crate) fn help_overlay_lines(
             push_help_line(
                 &mut lines,
                 &[
-                    HelpSegment::command("d"),
+                    cmd(BuiltinAction::Discard),
                     HelpSegment::text(" discard focused file or hunk, "),
                     HelpSegment::command("y"),
                     HelpSegment::text("/"),
@@ -587,7 +606,7 @@ pub(crate) fn help_overlay_lines(
         push_help_line(
             &mut lines,
             &[
-                HelpSegment::command("e"),
+                cmd(BuiltinAction::Editor),
                 HelpSegment::text(" open selected file in $EDITOR"),
             ],
             content_width,
@@ -639,16 +658,16 @@ fn push_help_section(lines: &mut Vec<Line<'static>>, title: &'static str, theme:
     ));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HelpSegment {
-    Command(&'static str),
+    Command(String),
     Text(&'static str),
     Muted(&'static str),
 }
 
 impl HelpSegment {
-    const fn command(text: &'static str) -> Self {
-        Self::Command(text)
+    fn command(text: impl Into<String>) -> Self {
+        Self::Command(text.into())
     }
 
     const fn text(text: &'static str) -> Self {
@@ -694,10 +713,10 @@ fn push_custom_command_help_line(
 fn help_line(segments: &[HelpSegment], theme: Theme) -> Line<'static> {
     let spans: Vec<Span<'static>> = segments
         .iter()
-        .map(|segment| match *segment {
-            HelpSegment::Command(text) => Span::styled(text, help_command_style(theme)),
-            HelpSegment::Text(text) => Span::styled(text, help_style(theme.text, theme)),
-            HelpSegment::Muted(text) => Span::styled(text, help_style(theme.muted, theme)),
+        .map(|segment| match segment {
+            HelpSegment::Command(text) => Span::styled(text.clone(), help_command_style(theme)),
+            HelpSegment::Text(text) => Span::styled(*text, help_style(theme.text, theme)),
+            HelpSegment::Muted(text) => Span::styled(*text, help_style(theme.muted, theme)),
         })
         .collect();
 
@@ -992,7 +1011,7 @@ mod tests {
     #[test]
     fn keybind_bar_colors_key_tokens_with_accent_fill() {
         let theme = Theme::github_dark();
-        let line = keybind_bar_line(true, Some("stage file"), theme);
+        let line = keybind_bar_line(true, Some("stage file"), KeybindMap::defaults(), theme);
         let key_span = line
             .spans
             .iter()
@@ -1005,11 +1024,18 @@ mod tests {
     }
 
     fn help_text(can_stage: bool) -> String {
-        help_overlay_lines(can_stage, can_stage, &[], 80, Theme::github_dark())
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n")
+        help_overlay_lines(
+            can_stage,
+            can_stage,
+            &[],
+            KeybindMap::defaults(),
+            80,
+            Theme::github_dark(),
+        )
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
     }
 
     fn line_text(line: &Line<'_>) -> String {

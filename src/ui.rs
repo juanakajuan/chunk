@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::app::{App, FocusPane};
+use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::theme::Theme;
 use crate::viewport::DiffScrollbar;
 
@@ -160,6 +161,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
     app.clamp_help_overlay_scroll(lines.len(), visible_content_height);
     let total_rows = lines.len();
     let scroll = app.help_overlay_scroll();
+    let keybinds = app.keybinds();
     let area = centered_rect(area, width, height);
     let lines = app.selectable_lines(
         Rect {
@@ -174,7 +176,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
         theme,
     );
     let block = Block::default()
-        .title(help_overlay_title(theme, overflow))
+        .title(help_overlay_title(theme, overflow, keybinds))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(
@@ -204,7 +206,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
     }
 }
 
-fn help_overlay_title(theme: Theme, scrollable: bool) -> Line<'static> {
+fn help_overlay_title(theme: Theme, scrollable: bool, keybinds: KeybindMap) -> Line<'static> {
     let mut spans = vec![
         Span::styled("─ ", color_style(theme.border_active, theme.background_alt)),
         Span::styled(
@@ -212,13 +214,21 @@ fn help_overlay_title(theme: Theme, scrollable: bool) -> Line<'static> {
             color_style(theme.accent, theme.background_alt).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  ?/Esc/q closes ",
+            format!(
+                "  {}/Esc/{} closes ",
+                keybinds.display(BuiltinAction::Help),
+                keybinds.display(BuiltinAction::Quit)
+            ),
             color_style(theme.muted, theme.background_alt),
         ),
     ];
     if scrollable {
         spans.push(Span::styled(
-            " j/k scroll ",
+            format!(
+                " {}/{} scroll ",
+                keybinds.display(BuiltinAction::MoveDown),
+                keybinds.display(BuiltinAction::MoveUp)
+            ),
             color_style(theme.muted, theme.background_alt),
         ));
     }
@@ -444,6 +454,7 @@ mod tests {
         let mut app = app_with_config(AppConfig {
             theme: ThemeName::GithubDark,
             commands: Vec::new(),
+            ..AppConfig::default()
         });
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();

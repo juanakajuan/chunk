@@ -10,6 +10,7 @@ mod config;
 mod custom_command;
 mod editor;
 mod git;
+mod keybind;
 mod model;
 mod patch;
 mod process;

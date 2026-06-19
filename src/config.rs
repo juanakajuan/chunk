@@ -1,6 +1,6 @@
 //! User configuration loading.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -10,12 +10,14 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::Deserialize;
 
 use crate::custom_command::{CommandKey, CustomCommandBinding};
+use crate::keybind::{BuiltinKey, KeybindMap, parse_action_name};
 use crate::theme::ThemeName;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AppConfig {
     pub(crate) theme: ThemeName,
     pub(crate) commands: Vec<CustomCommandBinding>,
+    pub(crate) keybinds: KeybindMap,
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +26,8 @@ struct RawConfig {
     theme: Option<String>,
     #[serde(default)]
     commands: Vec<RawCommand>,
+    #[serde(default)]
+    keybinds: RawKeybinds,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +37,11 @@ struct RawCommand {
     label: String,
     command: String,
 }
+
+/// Raw `[keybinds]` table: action name -> key string. Unknown action names are
+/// rejected during parsing, not by `serde`, so the error can list valid names.
+#[derive(Debug, Default, Deserialize)]
+struct RawKeybinds(HashMap<String, String>);
 
 pub(crate) fn load() -> Result<AppConfig> {
     let Some(path) = config_path() else {
@@ -67,12 +76,13 @@ fn config_path_from_env(config_home: Option<OsString>, home: Option<OsString>) -
 fn parse(source: &str) -> Result<AppConfig> {
     let raw: RawConfig = toml::from_str(source)?;
     let theme = parse_theme(raw.theme.as_deref())?;
+    let keybinds = parse_keybinds(raw.keybinds)?;
     let mut keys = HashSet::new();
     let mut commands = Vec::with_capacity(raw.commands.len());
 
     for raw_command in raw.commands {
         let key = CommandKey::parse(&raw_command.key)?;
-        validate_command(&raw_command, key, &mut keys)?;
+        validate_command(&raw_command, key, &mut keys, &keybinds)?;
         commands.push(CustomCommandBinding::new(
             key,
             raw_command.label,
@@ -80,7 +90,11 @@ fn parse(source: &str) -> Result<AppConfig> {
         ));
     }
 
-    Ok(AppConfig { theme, commands })
+    Ok(AppConfig {
+        theme,
+        commands,
+        keybinds,
+    })
 }
 
 fn parse_theme(theme: Option<&str>) -> Result<ThemeName> {
@@ -97,12 +111,24 @@ fn parse_theme(theme: Option<&str>) -> Result<ThemeName> {
     })
 }
 
+fn parse_keybinds(raw: RawKeybinds) -> Result<KeybindMap> {
+    let mut map = KeybindMap::defaults();
+    for (name, raw_key) in raw.0 {
+        let action = parse_action_name(&name)?;
+        let key = BuiltinKey::parse(&raw_key)?;
+        map.set(action, key);
+    }
+    map.validate()?;
+    Ok(map)
+}
+
 fn validate_command(
     command: &RawCommand,
     key: CommandKey,
     keys: &mut HashSet<CommandKey>,
+    keybinds: &KeybindMap,
 ) -> Result<()> {
-    if key.conflicts_with_builtin() {
+    if keybinds.contains_char(key.char()) {
         return Err(eyre!(
             "custom command key `{}` conflicts with a built-in keybind",
             command.key
@@ -127,6 +153,8 @@ fn validate_command(
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::keybind::BuiltinAction;
 
     use super::*;
 
@@ -250,6 +278,150 @@ mod tests {
     }
 
     #[test]
+    fn parses_keybind_overlays_on_top_of_defaults() {
+        let config = parse(
+            r#"
+            [keybinds]
+            quit = "Q"
+            discard = "D"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(key_char(&config, BuiltinAction::Quit), 'Q');
+        assert_eq!(key_char(&config, BuiltinAction::Discard), 'D');
+        // Untouched actions keep their defaults.
+        assert_eq!(key_char(&config, BuiltinAction::Help), '?');
+    }
+
+    #[test]
+    fn parses_keybind_space_token() {
+        let config = parse(
+            r#"
+            [keybinds]
+            toggle_staging = "S"
+            quit = " "
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(key_char(&config, BuiltinAction::Quit), ' ');
+        assert_eq!(key_char(&config, BuiltinAction::ToggleStaging), 'S');
+    }
+
+    #[test]
+    fn rejects_unknown_keybind_action() {
+        let error = parse(
+            r#"
+            [keybinds]
+            nuke = "Q"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown keybind action `nuke`"));
+        assert!(error.to_string().contains("quit"));
+        assert!(error.to_string().contains("toggle_reviewed"));
+    }
+
+    #[test]
+    fn rejects_invalid_keybind_keys() {
+        let empty = parse(
+            r#"
+            [keybinds]
+            quit = ""
+            "#,
+        )
+        .unwrap_err();
+        assert!(empty.to_string().contains("keybind key cannot be empty"));
+
+        let multi = parse(
+            r#"
+            [keybinds]
+            quit = "ab"
+            "#,
+        )
+        .unwrap_err();
+        assert!(multi.to_string().contains("single character"));
+
+        let control = parse(
+            r#"
+            [keybinds]
+            quit = "\u007F"
+            "#,
+        )
+        .unwrap_err();
+        assert!(control.to_string().contains("control character"));
+    }
+
+    #[test]
+    fn rejects_duplicate_keybind_keys() {
+        let error = parse(
+            r#"
+            [keybinds]
+            quit = "d"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("bound to both"));
+        assert!(error.to_string().contains("quit"));
+        assert!(error.to_string().contains("discard"));
+    }
+
+    #[test]
+    fn accepts_keybind_swaps() {
+        let config = parse(
+            r#"
+            [keybinds]
+            quit = "d"
+            discard = "q"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(key_char(&config, BuiltinAction::Quit), 'd');
+        assert_eq!(key_char(&config, BuiltinAction::Discard), 'q');
+    }
+
+    #[test]
+    fn custom_command_conflicts_with_configured_builtin_not_only_defaults() {
+        // `quit` is remapped to `Q`, freeing `q` for custom commands.
+        let freed = parse(
+            r#"
+            [keybinds]
+            quit = "Q"
+
+            [[commands]]
+            key = "q"
+            label = "quick"
+            command = "true"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(freed.commands.len(), 1);
+
+        // `quit` is remapped to `Q`, so `Q` is now reserved for a built-in.
+        let reserved = parse(
+            r#"
+            [keybinds]
+            quit = "Q"
+
+            [[commands]]
+            key = "Q"
+            label = "quick"
+            command = "true"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            reserved
+                .to_string()
+                .contains("conflicts with a built-in keybind")
+        );
+    }
+
+    #[test]
     fn config_path_prefers_xdg_config_home_over_home() {
         assert_eq!(
             config_path_from_env(
@@ -314,5 +486,9 @@ mod tests {
         let root = env::temp_dir().join(format!("chunk-config-test-{now}"));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn key_char(config: &AppConfig, action: BuiltinAction) -> char {
+        config.keybinds.key(action).char()
     }
 }

@@ -3,6 +3,7 @@ use ratatui::text::Line;
 
 use crate::ask_ai::{AskAiContext, AskAiRequest, AskAiResult};
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
+use crate::keybind::BuiltinAction;
 use crate::rows;
 use crate::scroll_text::ScrollText;
 use crate::theme::Theme;
@@ -291,13 +292,14 @@ impl App {
     }
 
     fn handle_help_overlay_key(&mut self, key: KeyEvent) {
-        if closes_help_overlay(key) {
+        if closes_help_overlay(key, self.keybinds) {
             self.overlay = None;
             return;
         }
 
+        let keybinds = self.keybinds;
         if let Some(scroll) = self.help_scroll_mut() {
-            apply_scroll_key(scroll, key, HELP_OVERLAY_SCROLL_PAGE);
+            apply_scroll_key(scroll, key, HELP_OVERLAY_SCROLL_PAGE, keybinds);
         }
     }
 
@@ -320,14 +322,15 @@ impl App {
     }
 
     fn handle_command_output_key(&mut self, key: KeyEvent) {
-        if closes_command_output(key) {
+        if closes_command_output(key, self.keybinds) {
             self.overlay = None;
             return;
         }
 
+        let keybinds = self.keybinds;
         if let Some(output) = self.command_output_mut() {
             let page = output.scroll.page();
-            apply_scroll_key(&mut output.scroll, key, page);
+            apply_scroll_key(&mut output.scroll, key, page, keybinds);
         }
     }
 
@@ -358,7 +361,7 @@ impl App {
     }
 
     fn handle_ask_ai_running_key(&mut self, key: KeyEvent) {
-        if !closes_ask_ai_running(key) {
+        if !closes_ask_ai_running(key, self.keybinds) {
             return;
         }
 
@@ -375,19 +378,20 @@ impl App {
     }
 
     fn handle_ask_ai_output_key(&mut self, key: KeyEvent) {
-        if closes_ask_ai_output(key) {
+        let keybinds = self.keybinds;
+        if closes_ask_ai_output(key, keybinds) {
             self.overlay = None;
             return;
         }
 
-        if key.code == KeyCode::Char('y') && accepts_text_input(key) {
+        if keybinds.action_for(key) == Some(BuiltinAction::CopyFocused) {
             self.queue_ask_ai_answer_copy();
             return;
         }
 
         if let Some(output) = self.ask_ai_output_mut() {
             let page = output.scroll.page();
-            apply_scroll_key(&mut output.scroll, key, page);
+            apply_scroll_key(&mut output.scroll, key, page, keybinds);
         }
     }
 

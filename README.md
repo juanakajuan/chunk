@@ -42,6 +42,9 @@ It does not live-refresh, stage files, or discard worktree changes.
 
 ## Controls
 
+The keys below are the defaults and can be remapped in `[keybinds]` (except
+for the special keys and `Ctrl-*` combos noted inline).
+
 - `j` / `k`: move down or up in the focused pane; in the file list this changes
   files, in the diff pane this scrolls by one row
 - `Tab`: switch focus between file list and diff
@@ -102,6 +105,10 @@ exists.
 ```toml
 theme = "github-dark"
 
+[keybinds]
+quit = "Q"
+discard = "D"
+
 [[commands]]
 key = "C"
 label = "commit and push"
@@ -111,9 +118,36 @@ command = "git add . && com && git push"
 The `theme` setting is optional. Supported values are `gruvbox` (default) and
 `github-dark`.
 
-Custom command keys are single characters. Built-in key conflicts and duplicate
-custom keys are rejected at startup. Commands run from the Git repository root
-through the user shell, and `chunk` reloads the review source after completion.
+### Built-in keybinds
+
+The `[keybinds]` table remaps selected built-in actions. Each value is a single
+character (use a literal space for `Space`). Unknown action names, invalid
+keys, and keys shared by two actions are rejected at startup. Special keys
+(`Tab`, `Enter`, `Esc`, arrows, `PageUp`/`PageDown`, `Home`/`End`) and
+`Ctrl-*` combos stay fixed and are not listed here.
+
+| Action           | Default | Action           | Default |
+| ---------------- | ------- | ---------------- | ------- |
+| `quit`           | `q`     | `toggle_staging` | `Space` |
+| `help`           | `?`     | `discard`        | `d`     |
+| `toggle_files`   | `f`     | `editor`         | `e`     |
+| `search`         | `/`     | `ask_ai`         | `a`     |
+| `move_down`      | `j`     | `explain_code`   | `x`     |
+| `move_up`        | `k`     | `copy_focused`   | `y`     |
+| `next_match`     | `n`     | `copy_file_diff` | `Y`     |
+| `prev_match`     | `N`     | `toggle_reviewed`| `r`     |
+| `top`            | `g`     |                  |         |
+| `bottom`         | `G`     |                  |         |
+
+Remapping a built-in frees its default key for custom commands, and the help
+overlay, keymap bar, and overlay close keys all follow the configured keys.
+
+### Custom commands
+
+Custom command keys are single characters. Custom command keys conflicting
+with any configured built-in keybind, and duplicate custom keys, are rejected
+at startup. Commands run from the Git repository root through the user shell,
+and `chunk` reloads the review source after completion.
 
 ## Themes
 
@@ -133,6 +167,7 @@ Code map:
 
 - `src/main.rs`: CLI parsing and review source selection
 - `src/config.rs`: user config loading and validation
+- `src/keybind.rs`: configurable built-in keybind map and validation
 - `src/ask_ai.rs`: read-only OpenCode request and prompt boundary
 - `src/custom_command.rs`: configured shell command bindings and execution
 - `src/editor.rs`: external editor command resolution
