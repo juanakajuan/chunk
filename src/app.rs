@@ -29,6 +29,7 @@ use crate::theme::{Theme, ThemeName};
 use crate::viewport::{DiffScrollbar, DiffScrollbarDrag, RenderedViewport, ViewportScrollInput};
 
 mod diff_frame;
+mod focused_review_target;
 mod keys;
 mod overlay;
 mod reload;
@@ -36,6 +37,7 @@ mod search;
 
 pub(crate) use keys::accepts_text_input;
 
+use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
 use reload::{bounded_hunk_index, initial_selected_hunk_index};
@@ -59,6 +61,12 @@ enum PendingLeftClick {
 enum CopyAction {
     FocusedTarget,
     SelectedFileDiff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StagingRequest {
+    File { path: String },
+    Hunk { file: DiffFile, hunk_index: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,11 +334,7 @@ impl App {
             return None;
         }
 
-        match self.focus {
-            FocusPane::Sidebar if self.files_panel_visible => Some("stage file"),
-            FocusPane::Diff => Some("stage hunk"),
-            FocusPane::Sidebar => None,
-        }
+        self.focused_review_target().stage_keybind_hint()
     }
 
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
@@ -351,6 +355,16 @@ impl App {
 
     fn selected_hunk(&self) -> Option<&DiffHunk> {
         self.selected_file()?.hunks.get(self.selected_hunk_index?)
+    }
+
+    fn focused_review_target(&self) -> FocusedReviewTarget<'_> {
+        FocusedReviewTarget::new(
+            &self.changeset.files,
+            self.selected_file_index,
+            self.selected_hunk_index,
+            self.focus,
+            self.files_panel_visible,
+        )
     }
 
     fn ensure_scroll_bounds(&mut self) {
@@ -766,35 +780,32 @@ impl App {
             && self.keybinds.action_for(key) == Some(BuiltinAction::ExplainCode)
     }
 
-    fn focused_ask_ai_context(&self) -> Option<AskAiContext> {
-        let file_context = self.focus == FocusPane::Sidebar && self.files_panel_visible;
-        let hunk_index = if file_context {
-            None
-        } else {
-            self.selected_hunk_index
-        };
-        let selected_text = if file_context {
-            None
-        } else {
-            self.text_selection.selected_text()
-        };
+    fn focused_ask_ai_context(
+        &self,
+        missing_file_message: &'static str,
+    ) -> Result<AskAiContext, &'static str> {
+        let target = self
+            .focused_review_target()
+            .ask_ai(self.text_selection.selected_text(), missing_file_message)
+            .map_err(|error| error.message())?;
 
-        let file = self.selected_file()?;
-
-        Some(AskAiContext::focused(
+        Ok(AskAiContext::focused(
             self.source.ask_ai_review_mode(),
             self.changeset.title.clone(),
             self.changeset.source_label.clone(),
-            file,
-            hunk_index,
-            selected_text,
+            target.file,
+            target.hunk_index,
+            target.selected_text,
         ))
     }
 
     fn open_ask_ai_prompt(&mut self) {
-        let Some(context) = self.focused_ask_ai_context() else {
-            self.live_error = Some("no selected file to ask about".to_string());
-            return;
+        let context = match self.focused_ask_ai_context("no selected file to ask about") {
+            Ok(context) => context,
+            Err(message) => {
+                self.live_error = Some(message.to_string());
+                return;
+            }
         };
 
         self.focus = FocusPane::Diff;
@@ -820,9 +831,12 @@ impl App {
     }
 
     fn queue_explain_code_request(&mut self) {
-        let Some(context) = self.focused_ask_ai_context() else {
-            self.live_error = Some("no selected file to explain".to_string());
-            return;
+        let context = match self.focused_ask_ai_context("no selected file to explain") {
+            Ok(context) => context,
+            Err(message) => {
+                self.live_error = Some(message.to_string());
+                return;
+            }
         };
 
         self.focus = FocusPane::Diff;
@@ -850,50 +864,37 @@ impl App {
     }
 
     fn queue_focused_target_copy(&mut self) {
-        match self.focus {
-            FocusPane::Sidebar if self.files_panel_visible => self.queue_selected_file_path_copy(),
-            FocusPane::Diff => self.queue_selected_hunk_diff_copy(),
-            FocusPane::Sidebar => self.set_copy_error("no visible file path to copy"),
+        let copy = match self.focused_review_target().copy() {
+            Ok(FocusedCopyTarget::FilePath(target)) => Ok((
+                target.file.display_path().to_string(),
+                "copied selected file path",
+            )),
+            Ok(FocusedCopyTarget::HunkDiff(target)) => {
+                patch::selected_hunk_patch(target.file, target.hunk_index)
+                    .map(|text| (text, "copied selected hunk diff"))
+                    .ok_or("no selected hunk diff to copy")
+            }
+            Err(error) => Err(error.message()),
+        };
+
+        match copy {
+            Ok((text, success_message)) => self.queue_clipboard_text(text, success_message),
+            Err(message) => self.set_copy_error(message),
         }
     }
 
-    fn queue_selected_file_path_copy(&mut self) {
-        let Some(file) = self.selected_file() else {
-            self.set_copy_error("no selected file path to copy");
-            return;
-        };
-
-        self.queue_clipboard_text(file.display_path().to_string(), "copied selected file path");
-    }
-
-    fn queue_selected_hunk_diff_copy(&mut self) {
-        let Some(hunk_index) = self.focused_hunk_index() else {
-            self.set_copy_error("no selected hunk to copy");
-            return;
-        };
-        let Some(file) = self.selected_file() else {
-            self.set_copy_error("no selected file to copy");
-            return;
-        };
-        let Some(text) = patch::selected_hunk_patch(file, hunk_index) else {
-            self.set_copy_error("no selected hunk diff to copy");
-            return;
-        };
-
-        self.queue_clipboard_text(text, "copied selected hunk diff");
-    }
-
     fn queue_selected_file_diff_copy(&mut self) {
-        let Some(file) = self.selected_file() else {
-            self.set_copy_error("no selected file to copy");
-            return;
-        };
-        let Some(text) = patch::file_patch(file) else {
-            self.set_copy_error("no selected file diff to copy");
-            return;
+        let copy = match self.focused_review_target().file_diff_copy() {
+            Ok(target) => patch::file_patch(target.file)
+                .map(|text| (text, "copied selected file diff"))
+                .ok_or("no selected file diff to copy"),
+            Err(error) => Err(error.message()),
         };
 
-        self.queue_clipboard_text(text, "copied selected file diff");
+        match copy {
+            Ok((text, success_message)) => self.queue_clipboard_text(text, success_message),
+            Err(message) => self.set_copy_error(message),
+        }
     }
 
     fn queue_ask_ai_answer_copy(&mut self) {
@@ -1049,25 +1050,44 @@ impl App {
             return;
         }
 
-        match self.focus {
-            FocusPane::Sidebar if self.files_panel_visible => self.toggle_selected_file_staging(),
-            FocusPane::Diff => self.toggle_selected_hunk_staging(),
-            FocusPane::Sidebar => {}
+        let request = match self.focused_review_target().staging() {
+            Ok(Some(FocusedMutationTarget::File(target))) => StagingRequest::File {
+                path: target.file.display_path().to_string(),
+            },
+            Ok(Some(FocusedMutationTarget::Hunk(target))) => StagingRequest::Hunk {
+                file: target.file.clone(),
+                hunk_index: target.hunk_index,
+            },
+            Ok(None) => return,
+            Err(error) => {
+                self.live_error = Some(error.message().to_string());
+                return;
+            }
+        };
+
+        match request {
+            StagingRequest::File { path } => self.toggle_file_staging(&path),
+            StagingRequest::Hunk { file, hunk_index } => {
+                self.toggle_hunk_staging(&file, hunk_index)
+            }
         }
     }
 
-    fn toggle_selected_file_staging(&mut self) {
-        let Some(file) = self.selected_file() else {
-            return;
-        };
-
-        let path = file.display_path().to_string();
-        match self.source.toggle_staging_for_file(&path) {
+    fn toggle_file_staging(&mut self, path: &str) {
+        match self.source.toggle_staging_for_file(path) {
             Ok(Some(reloaded_changeset)) => {
                 self.apply_reloaded_changeset(reloaded_changeset, false)
             }
             Ok(None) => {}
             Err(error) => self.live_error = Some(format!("staging failed: {error}")),
+        }
+    }
+
+    fn toggle_hunk_staging(&mut self, file: &DiffFile, hunk_index: usize) {
+        match self.source.toggle_staging_for_hunk(file, hunk_index) {
+            Ok(Some(reloaded_changeset)) => self.apply_reloaded_changeset(reloaded_changeset, true),
+            Ok(None) => {}
+            Err(error) => self.live_error = Some(format!("hunk staging failed: {error}")),
         }
     }
 
@@ -1089,77 +1109,30 @@ impl App {
             .unwrap_or(false)
     }
 
-    fn toggle_selected_hunk_staging(&mut self) {
-        let Some(hunk_index) = self.focused_hunk_index() else {
-            self.live_error = Some("no selected hunk to stage".to_string());
-            return;
-        };
-        let Some(file) = self.selected_file().cloned() else {
-            self.live_error = Some("no selected file to stage".to_string());
-            return;
-        };
-
-        match self.source.toggle_staging_for_hunk(&file, hunk_index) {
-            Ok(Some(reloaded_changeset)) => self.apply_reloaded_changeset(reloaded_changeset, true),
-            Ok(None) => {}
-            Err(error) => self.live_error = Some(format!("hunk staging failed: {error}")),
-        }
-    }
-
-    fn focused_hunk_index(&self) -> Option<usize> {
-        let file = self.selected_file()?;
-        let index = self.selected_hunk_index?;
-
-        (index < file.hunks.len()).then_some(index)
-    }
-
     fn request_selected_discard(&mut self) {
         if !self.can_discard() {
             return;
         }
 
-        match self.focus {
-            FocusPane::Sidebar if self.files_panel_visible => self.request_selected_file_discard(),
-            FocusPane::Diff => self.request_selected_hunk_discard(),
-            FocusPane::Sidebar => {}
-        }
-    }
-
-    fn request_selected_file_discard(&mut self) {
-        let Some(file) = self.selected_file() else {
-            self.live_error = Some("no selected file to discard".to_string());
-            return;
+        let target = match self.focused_review_target().discard() {
+            Ok(Some(FocusedMutationTarget::File(target))) => DiscardTarget::File {
+                file_index: target.file_index,
+                path: target.file.display_path().to_string(),
+            },
+            Ok(Some(FocusedMutationTarget::Hunk(target))) => DiscardTarget::Hunk {
+                file_index: target.file_index,
+                hunk_index: target.hunk_index,
+                path: target.file.display_path().to_string(),
+            },
+            Ok(None) => return,
+            Err(error) => {
+                self.live_error = Some(error.message().to_string());
+                return;
+            }
         };
-        let path = file.display_path().to_string();
 
         self.live_error = None;
-        self.overlay = Some(Overlay::Discard(DiscardConfirmation {
-            target: DiscardTarget::File {
-                file_index: self.selected_file_index,
-                path,
-            },
-        }));
-    }
-
-    fn request_selected_hunk_discard(&mut self) {
-        let Some(hunk_index) = self.focused_hunk_index() else {
-            self.live_error = Some("no selected hunk to discard".to_string());
-            return;
-        };
-        let Some(file) = self.selected_file() else {
-            self.live_error = Some("no selected file to discard".to_string());
-            return;
-        };
-        let path = file.display_path().to_string();
-
-        self.live_error = None;
-        self.overlay = Some(Overlay::Discard(DiscardConfirmation {
-            target: DiscardTarget::Hunk {
-                file_index: self.selected_file_index,
-                hunk_index,
-                path,
-            },
-        }));
+        self.overlay = Some(Overlay::Discard(DiscardConfirmation { target }));
     }
 
     fn execute_pending_discard(&mut self) {
@@ -1210,12 +1183,15 @@ impl App {
 
     fn queue_selected_file_editor_request(&mut self) {
         self.editor_request = None;
-        let Some(file) = self.selected_file() else {
-            self.live_error = Some("no selected file to open".to_string());
-            return;
+        let request = match self.focused_review_target().editor() {
+            Ok(target) => self.source.editor_request(target.file),
+            Err(error) => {
+                self.live_error = Some(error.message().to_string());
+                return;
+            }
         };
 
-        match self.source.editor_request(file) {
+        match request {
             Ok(request) => {
                 self.live_error = None;
                 self.editor_request = Some(request);
