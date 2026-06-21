@@ -1,4 +1,5 @@
 use crate::model::{Changeset, DiffFile, DiffHunk};
+use crate::rows::SidebarRowTarget;
 
 use super::{App, overlay::Overlay};
 
@@ -6,6 +7,7 @@ pub(super) fn apply_changeset(app: &mut App, changeset: Changeset, preserve_scro
     let previous_identity = app.selected_file().map(file_identity);
     let previous_hunk_identity = app.selected_hunk().map(hunk_identity);
     let previous_hunk_index = app.selected_hunk_index;
+    let previous_sidebar_target = app.sidebar_cursor_target.clone();
     let previous_index = app.selected_file_index;
     let previous_scroll = app.diff_scroll;
     let reselected_file_index = previous_identity
@@ -22,6 +24,7 @@ pub(super) fn apply_changeset(app: &mut App, changeset: Changeset, preserve_scro
     }
     app.text_selection.clear();
     app.selected_file_index = selected_file_index;
+    app.sidebar_cursor_target = reloaded_sidebar_target(previous_sidebar_target, &app.changeset);
     app.selected_hunk_index = reloaded_hunk_index(
         app.changeset.files.get(selected_file_index),
         kept_selection,
@@ -111,4 +114,28 @@ fn find_file_index(changeset: &Changeset, identity: &str) -> Option<usize> {
         .files
         .iter()
         .position(|file| file.display_path() == identity)
+}
+
+fn reloaded_sidebar_target(
+    previous_target: Option<SidebarRowTarget>,
+    changeset: &Changeset,
+) -> Option<SidebarRowTarget> {
+    match previous_target {
+        Some(SidebarRowTarget::Folder(path)) if folder_exists(changeset, &path) => {
+            Some(SidebarRowTarget::Folder(path))
+        }
+        _ => None,
+    }
+}
+
+fn folder_exists(changeset: &Changeset, folder_path: &str) -> bool {
+    changeset
+        .files
+        .iter()
+        .any(|file| path_is_inside_folder(file.display_path(), folder_path))
+}
+
+fn path_is_inside_folder(path: &str, folder_path: &str) -> bool {
+    path.strip_prefix(folder_path)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }

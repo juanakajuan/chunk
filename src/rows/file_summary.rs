@@ -7,7 +7,6 @@ use crate::theme::Theme;
 use super::text::{color_style, display_width};
 
 pub(super) struct StageDisplay {
-    pub(super) checkbox: &'static str,
     pub(super) suffix: &'static str,
     pub(super) style: Style,
 }
@@ -69,17 +68,6 @@ pub(super) fn file_status_suffix(status: FileStatus) -> &'static str {
     }
 }
 
-/// Nerd Font octicon glyph conveying the Git status of a file.
-pub(super) fn status_glyph(status: FileStatus) -> &'static str {
-    match status {
-        FileStatus::Added => "\u{f457}",    // diff-added
-        FileStatus::Deleted => "\u{f458}",  // diff-removed
-        FileStatus::Modified => "\u{f459}", // diff-modified
-        FileStatus::Renamed => "\u{f45a}",  // diff-renamed
-        FileStatus::Copied => "\u{f0c5}",   // copy
-    }
-}
-
 /// Nerd Font glyph marking a file as reviewed in the sidebar.
 pub(super) fn reviewed_glyph() -> &'static str {
     "\u{f00c}" // check
@@ -125,17 +113,14 @@ pub(super) fn file_icon(path: &str) -> &'static str {
 pub(super) fn stage_display(stage: FileStage, background: Color, theme: Theme) -> StageDisplay {
     match stage {
         FileStage::Unstaged => StageDisplay {
-            checkbox: "\u{f10c}",
             suffix: "  \u{f10c} unstaged",
             style: color_style(theme.muted, background),
         },
         FileStage::Staged => StageDisplay {
-            checkbox: "\u{f058}",
             suffix: "  \u{f058} staged",
             style: color_style(theme.added, background).add_modifier(Modifier::BOLD),
         },
         FileStage::Mixed => StageDisplay {
-            checkbox: "\u{f056}",
             suffix: "  \u{f056} mixed",
             style: color_style(theme.accent, background).add_modifier(Modifier::BOLD),
         },

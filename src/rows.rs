@@ -21,8 +21,8 @@ mod sidebar;
 mod text;
 
 pub(crate) use diff::{diff_layout_counts, diff_lines_until, selected_hunk_header_rows};
-pub(crate) use sidebar::SidebarRowsInput;
-pub(crate) use sidebar::{sidebar_row_counts, sidebar_rows};
+pub(crate) use sidebar::{SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
+pub(crate) use sidebar::{sidebar_row_counts, sidebar_rows, visible_sidebar_targets};
 
 use text::{color_style, muted_line, wrap_line};
 
@@ -593,7 +593,7 @@ pub(crate) fn help_overlay_lines(
                 &mut lines,
                 &[
                     cmd(BuiltinAction::Discard),
-                    HelpSegment::text(" discard focused file or hunk, "),
+                    HelpSegment::text(" discard focused file, folder, or hunk, "),
                     HelpSegment::command("y"),
                     HelpSegment::text("/"),
                     HelpSegment::command("Enter"),
@@ -990,13 +990,13 @@ mod tests {
         let pr_help = help_text(false);
 
         assert!(worktree_help.contains("Space stage/unstage focused file or hunk"));
-        assert!(worktree_help.contains("d discard focused file or hunk"));
+        assert!(worktree_help.contains("d discard focused file, folder, or hunk"));
         assert!(worktree_help.contains("e open selected file in $EDITOR"));
         assert!(worktree_help.contains("a Ask AI about focused file or hunk"));
         assert!(worktree_help.contains("x Explain focused file or hunk with Ask AI"));
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
-        assert!(!pr_help.contains("d discard focused file or hunk"));
+        assert!(!pr_help.contains("d discard focused file, folder, or hunk"));
     }
 
     #[test]

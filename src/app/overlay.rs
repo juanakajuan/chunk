@@ -43,6 +43,10 @@ pub(super) enum DiscardTarget {
         file_index: usize,
         path: String,
     },
+    Folder {
+        path: String,
+        file_paths: Vec<String>,
+    },
     Hunk {
         file_index: usize,
         hunk_index: usize,
@@ -55,6 +59,11 @@ impl DiscardConfirmation {
         match &self.target {
             DiscardTarget::File { path, .. } => {
                 format!("Discard worktree changes in {path}?")
+            }
+            DiscardTarget::Folder { path, file_paths } => {
+                let file_count = file_paths.len();
+                let noun = if file_count == 1 { "file" } else { "files" };
+                format!("Discard worktree changes in {path}/ ({file_count} {noun})?")
             }
             DiscardTarget::Hunk {
                 hunk_index, path, ..

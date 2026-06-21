@@ -1,9 +1,9 @@
 # chunk
 
 `chunk` is a compact terminal diff reviewer for Git repositories. It renders a
-file list and a syntax-highlighted unified diff in the terminal, with keyboard
-and mouse navigation, live worktree refresh, file/hunk staging, and guarded
-worktree discard actions.
+tree file list and a syntax-highlighted unified diff in the terminal, with
+keyboard and mouse navigation, live worktree refresh, file/hunk staging, and
+guarded worktree discard actions.
 
 ## Requirements
 
@@ -74,18 +74,19 @@ for the special keys and `Ctrl-*` combos noted inline).
   long as the file path stays the same
 - `Space`: in `diff` mode, stage or unstage the selected file when the file list
   is focused, or the selected hunk when the diff pane is focused
-- `d`: in `diff` mode, discard unstaged worktree changes for the selected file
-  or hunk after confirmation; untracked files can be discarded from the file list
+- `d`: in `diff` mode, discard unstaged worktree changes for the focused file,
+  folder, or hunk after confirmation; untracked files can be discarded from the
+  file list
 - `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
   mode
 - Custom command keys from config: run the configured shell command from the Git
   root, then show stdout, stderr, and exit status in a command pane
 - `q` / `Ctrl-c`: quit
 
-Mouse hover changes focus. Click a file to select it, or click a hunk in the
-diff pane to select it. Wheel scrolling moves through files in the sidebar and
-scrolls the diff in the diff pane. Drag visible text to copy the selected text
-to the clipboard.
+Mouse hover changes focus. In the Files panel, `j` / `k` and wheel scrolling
+move through files and folders. Click a file to select it, click a folder in
+tree view to collapse or expand it, or click a hunk in the diff pane to select
+it. Drag visible text to copy the selected text to the clipboard.
 
 In the command output pane, use `j` / `k` or the mouse wheel to scroll,
 `PageDown` / `PageUp` to page, `g` / `G` to jump, and `Esc` / `q` to return to
@@ -118,6 +119,8 @@ command = "git add . && com && git push"
 The `theme` setting is optional. Supported values are `gruvbox` (default) and
 `github-dark`.
 
+The Files panel groups changed files under collapsible parent directories.
+
 ### Built-in keybinds
 
 The `[keybinds]` table remaps selected built-in actions. Each value is a single
@@ -131,11 +134,12 @@ keys, and keys shared by two actions are rejected at startup. Special keys
 | `quit`           | `q`     | `toggle_staging` | `Space` |
 | `help`           | `?`     | `discard`        | `d`     |
 | `toggle_files`   | `f`     | `editor`         | `e`     |
-| `search`         | `/`     | `ask_ai`         | `a`     |
-| `move_down`      | `j`     | `explain_code`   | `x`     |
-| `move_up`        | `k`     | `copy_focused`   | `y`     |
-| `next_match`     | `n`     | `copy_file_diff` | `Y`     |
-| `prev_match`     | `N`     | `toggle_reviewed`| `r`     |
+| `ask_ai`         | `a`     | `explain_code`   | `x`     |
+| `search`         | `/`     | `copy_focused`   | `y`     |
+| `move_down`      | `j`     | `copy_file_diff` | `Y`     |
+| `move_up`        | `k`     | `toggle_reviewed` | `r`     |
+| `next_match`     | `n`     |                  |         |
+| `prev_match`     | `N`     |                  |         |
 | `top`            | `g`     |                  |         |
 | `bottom`         | `G`     |                  |         |
 

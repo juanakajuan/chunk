@@ -86,6 +86,28 @@ pub(crate) fn toggle_staging_for_file(path: &str) -> Result<()> {
     }
 }
 
+pub(crate) fn stage_files(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut command = Command::new("git");
+    command.args(["add", "--"]);
+    command.args(paths);
+    checked_output(&mut command, "git add failed").map(|_| ())
+}
+
+pub(crate) fn unstage_files(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut command = Command::new("git");
+    command.args(["restore", "--staged", "--"]);
+    command.args(paths);
+    checked_output(&mut command, "git restore --staged failed").map(|_| ())
+}
+
 pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Result<()> {
     let hunk = file.hunks.get(hunk_index).ok_or_else(|| {
         eyre!(
@@ -105,7 +127,30 @@ pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Res
 
 pub(crate) fn discard_worktree_file(path: &str) -> Result<()> {
     let untracked_paths = untracked_paths()?;
-    if is_untracked_path(&untracked_paths, path) {
+    discard_worktree_file_with_untracked(path, &untracked_paths)
+}
+
+pub(crate) fn discard_worktree_files(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Err(eyre!("no files to discard"));
+    }
+
+    let untracked_paths = untracked_paths()?;
+    for path in paths {
+        if !is_untracked_path(&untracked_paths, path) && !is_file_unstaged(path)? {
+            return Err(eyre!("no unstaged changes to discard in {path}"));
+        }
+    }
+
+    for path in paths {
+        discard_worktree_file_with_untracked(path, &untracked_paths)?;
+    }
+
+    Ok(())
+}
+
+fn discard_worktree_file_with_untracked(path: &str, untracked_paths: &[String]) -> Result<()> {
+    if is_untracked_path(untracked_paths, path) {
         return remove_untracked_file(path);
     }
 
@@ -924,6 +969,126 @@ mod tests {
         discard_worktree_file("new.txt").unwrap();
 
         assert!(!Path::new("new.txt").exists());
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discard_files_reverts_multiple_worktree_paths() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::create_dir_all("src").unwrap();
+        fs::write("src/a.txt", "a base\n").unwrap();
+        fs::write("src/b.txt", "b base\n").unwrap();
+        fs::write("outside.txt", "outside base\n").unwrap();
+        run_git(["add", "."]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("src/a.txt", "a changed\n").unwrap();
+        fs::write("src/b.txt", "b changed\n").unwrap();
+        fs::write("src/new.txt", "new\n").unwrap();
+        fs::write("outside.txt", "outside changed\n").unwrap();
+
+        discard_worktree_files(&[
+            "src/a.txt".to_string(),
+            "src/b.txt".to_string(),
+            "src/new.txt".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(fs::read_to_string("src/a.txt").unwrap(), "a base\n");
+        assert_eq!(fs::read_to_string("src/b.txt").unwrap(), "b base\n");
+        assert!(!Path::new("src/new.txt").exists());
+        assert_eq!(
+            fs::read_to_string("outside.txt").unwrap(),
+            "outside changed\n"
+        );
+        assert!(git_output(["diff", "--", "src/a.txt", "src/b.txt"]).is_empty());
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stage_files_stages_multiple_worktree_paths() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::create_dir_all("src").unwrap();
+        fs::write("src/a.txt", "a base\n").unwrap();
+        fs::write("src/b.txt", "b base\n").unwrap();
+        fs::write("outside.txt", "outside base\n").unwrap();
+        run_git(["add", "."]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("src/a.txt", "a changed\n").unwrap();
+        fs::write("src/b.txt", "b changed\n").unwrap();
+        fs::write("src/new.txt", "new\n").unwrap();
+        fs::write("outside.txt", "outside changed\n").unwrap();
+
+        stage_files(&[
+            "src/a.txt".to_string(),
+            "src/b.txt".to_string(),
+            "src/new.txt".to_string(),
+        ])
+        .unwrap();
+
+        let staged = git_output(["diff", "--cached", "--name-only"]);
+        assert!(staged.contains("src/a.txt"));
+        assert!(staged.contains("src/b.txt"));
+        assert!(staged.contains("src/new.txt"));
+        assert!(!staged.contains("outside.txt"));
+
+        let unstaged = git_output(["diff", "--name-only"]);
+        assert!(!unstaged.contains("src/a.txt"));
+        assert!(!unstaged.contains("src/b.txt"));
+        assert!(unstaged.contains("outside.txt"));
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unstage_files_unstages_multiple_worktree_paths() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::create_dir_all("src").unwrap();
+        fs::write("src/a.txt", "a base\n").unwrap();
+        fs::write("src/b.txt", "b base\n").unwrap();
+        fs::write("outside.txt", "outside base\n").unwrap();
+        run_git(["add", "."]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write("src/a.txt", "a changed\n").unwrap();
+        fs::write("src/b.txt", "b changed\n").unwrap();
+        fs::write("outside.txt", "outside changed\n").unwrap();
+        run_git(["add", "src/a.txt", "src/b.txt", "outside.txt"]);
+
+        unstage_files(&["src/a.txt".to_string(), "src/b.txt".to_string()]).unwrap();
+
+        let staged = git_output(["diff", "--cached", "--name-only"]);
+        assert!(!staged.contains("src/a.txt"));
+        assert!(!staged.contains("src/b.txt"));
+        assert!(staged.contains("outside.txt"));
+
+        let unstaged = git_output(["diff", "--name-only"]);
+        assert!(unstaged.contains("src/a.txt"));
+        assert!(unstaged.contains("src/b.txt"));
 
         drop(cwd);
         fs::remove_dir_all(root).unwrap();

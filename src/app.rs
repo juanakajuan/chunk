@@ -18,10 +18,10 @@ use crate::config::AppConfig;
 use crate::custom_command::CustomCommandBinding;
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
-use crate::model::{Changeset, DiffFile, DiffHunk};
+use crate::model::{Changeset, DiffFile, DiffHunk, FileStage};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource};
-use crate::rows::{self, SidebarRowsInput};
+use crate::rows::{self, SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
 use crate::scroll_text::VerticalDirection;
 use crate::search::Search;
 use crate::selection::TextSelection;
@@ -51,9 +51,9 @@ pub(crate) enum FocusPane {
     Diff,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingLeftClick {
-    Sidebar { index: usize },
+    Sidebar { target: SidebarRowTarget },
     Diff { hunk_index: Option<usize> },
 }
 
@@ -65,8 +65,24 @@ enum CopyAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StagingRequest {
-    File { path: String },
-    Hunk { file: DiffFile, hunk_index: usize },
+    File {
+        path: String,
+    },
+    Folder {
+        path: String,
+        file_paths: Vec<String>,
+        action: FolderStagingAction,
+    },
+    Hunk {
+        file: DiffFile,
+        hunk_index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderStagingAction {
+    Stage,
+    Unstage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +147,10 @@ pub(crate) struct App {
     diff_scroll: usize,
     /// First file index considered for sidebar rendering.
     sidebar_scroll: usize,
+    /// Collapsed tree directory paths in the current session.
+    collapsed_tree_dirs: HashSet<String>,
+    /// Active Files-panel tree row, if it differs from the selected file fallback.
+    sidebar_cursor_target: Option<SidebarRowTarget>,
     /// Rendered viewport geometry, row mapping, and render caches.
     viewport: RenderedViewport,
     /// Visible text rows and active drag-to-copy selection.
@@ -183,6 +203,8 @@ impl App {
             clipboard_request: None,
             diff_scroll: 0,
             sidebar_scroll: 0,
+            collapsed_tree_dirs: HashSet::new(),
+            sidebar_cursor_target: None,
             viewport: RenderedViewport::new(file_count),
             text_selection: TextSelection::default(),
             pending_left_click: None,
@@ -224,18 +246,18 @@ impl App {
         self.viewport.begin_sidebar(area, visible_height);
         self.ensure_scroll_bounds();
 
-        let can_stage = self.can_stage();
-        let row_counts = self
-            .viewport
-            .cached_sidebar_row_counts(content_width, can_stage, self.changeset.files.len(), || {
-                rows::sidebar_row_counts(&self.changeset.files, content_width, can_stage, theme)
-            })
-            .to_vec();
+        let row_counts_input = SidebarRowCountsInput {
+            files: &self.changeset.files,
+            collapsed_dirs: &self.collapsed_tree_dirs,
+            content_width,
+            theme,
+        };
+        let row_counts = rows::sidebar_row_counts(row_counts_input);
 
         let rendered_rows = rows::sidebar_rows(SidebarRowsInput {
             files: &self.changeset.files,
             empty_message: self.empty_sidebar_message(),
-            can_stage,
+            collapsed_dirs: &self.collapsed_tree_dirs,
             selected_file_index: self.selected_file_index,
             sidebar_scroll: self.sidebar_scroll,
             row_counts: &row_counts,
@@ -243,12 +265,13 @@ impl App {
             visible_height,
             theme,
             reviewed_files: &self.reviewed_files,
+            active_target: self.sidebar_cursor_target.as_ref(),
         });
         self.sidebar_scroll = rendered_rows.sidebar_scroll;
         self.viewport.begin_sidebar_rows();
         for record in rendered_rows.row_records {
             self.viewport
-                .record_sidebar_rows(record.index, record.row_count);
+                .record_sidebar_rows(record.target, record.row_count);
         }
 
         self.text_selection.decorate_visible_lines(
@@ -646,9 +669,12 @@ impl App {
 
     fn apply_pending_left_click(&mut self, target: PendingLeftClick) {
         match target {
-            PendingLeftClick::Sidebar { index } => {
+            PendingLeftClick::Sidebar { target } => {
                 self.focus = FocusPane::Sidebar;
-                self.select_file(index);
+                match target {
+                    SidebarRowTarget::File(index) => self.select_file(index),
+                    SidebarRowTarget::Folder(path) => self.toggle_tree_folder(&path),
+                }
             }
             PendingLeftClick::Diff { hunk_index } => {
                 self.focus = FocusPane::Diff;
@@ -670,8 +696,8 @@ impl App {
     }
 
     fn pending_left_click_at(&self, column: u16, row: u16) -> Option<PendingLeftClick> {
-        if let Some(index) = self.sidebar_index_at(column, row) {
-            return Some(PendingLeftClick::Sidebar { index });
+        if let Some(target) = self.sidebar_target_at(column, row) {
+            return Some(PendingLeftClick::Sidebar { target });
         }
 
         if self.is_diff_at(column, row) {
@@ -698,8 +724,13 @@ impl App {
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) {
-        if let Some(focus) = self.pane_at(column, row) {
-            self.focus = focus;
+        if self.sidebar_target_at(column, row).is_some() {
+            self.focus = FocusPane::Sidebar;
+            return;
+        }
+
+        if self.is_diff_at(column, row) {
+            self.focus = FocusPane::Diff;
         }
     }
 
@@ -708,7 +739,7 @@ impl App {
         self.focus = focus;
 
         match focus {
-            FocusPane::Sidebar => self.select_file_by(direction, MOUSE_WHEEL_STEP),
+            FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, MOUSE_WHEEL_STEP),
             FocusPane::Diff => self.scroll_diff_by(direction, MOUSE_WHEEL_STEP),
         }
     }
@@ -721,9 +752,8 @@ impl App {
         self.is_diff_at(column, row).then_some(FocusPane::Diff)
     }
 
-    fn sidebar_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        self.viewport
-            .sidebar_index_at(column, row, self.changeset.files.len())
+    fn sidebar_target_at(&self, column: u16, row: u16) -> Option<SidebarRowTarget> {
+        self.viewport.sidebar_target_at(column, row)
     }
 
     fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
@@ -761,11 +791,20 @@ impl App {
 
     fn toggle_files_panel(&mut self) {
         self.files_panel_visible = !self.files_panel_visible;
+        if !self.files_panel_visible {
+            self.sidebar_cursor_target = None;
+        }
         self.focus = if self.files_panel_visible {
             FocusPane::Sidebar
         } else {
             FocusPane::Diff
         };
+    }
+
+    fn toggle_tree_folder(&mut self, path: &str) {
+        if !self.collapsed_tree_dirs.insert(path.to_string()) {
+            self.collapsed_tree_dirs.remove(path);
+        }
     }
 
     fn should_open_ask_ai_prompt(&self, key: KeyEvent) -> bool {
@@ -939,15 +978,49 @@ impl App {
 
     fn move_by(&mut self, direction: VerticalDirection) {
         match self.focus {
-            FocusPane::Sidebar => self.select_file_by(direction, 1),
+            FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, 1),
             FocusPane::Diff => self.scroll_diff_by(direction, 1),
         }
     }
 
-    fn select_file_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let max_index = self.changeset.files.len().saturating_sub(1);
-        let index = direction.shift_clamped(self.selected_file_index, amount, max_index);
-        self.select_file(index);
+    fn move_sidebar_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let visible_targets =
+            rows::visible_sidebar_targets(&self.changeset.files, &self.collapsed_tree_dirs);
+        if visible_targets.is_empty() {
+            return;
+        }
+
+        let current_target = self.current_sidebar_target();
+        let target_position = match current_target.as_ref().and_then(|target| {
+            visible_targets
+                .iter()
+                .position(|candidate| candidate == target)
+        }) {
+            Some(current_position) => {
+                direction.shift_clamped(current_position, amount, visible_targets.len() - 1)
+            }
+            None => fallback_sidebar_target_position(
+                &visible_targets,
+                self.selected_file_index,
+                direction,
+            ),
+        };
+        let target = visible_targets[target_position].clone();
+        self.apply_sidebar_cursor_target(target);
+    }
+
+    fn current_sidebar_target(&self) -> Option<SidebarRowTarget> {
+        self.sidebar_cursor_target.clone().or_else(|| {
+            (!self.changeset.files.is_empty())
+                .then_some(SidebarRowTarget::File(self.selected_file_index))
+        })
+    }
+
+    fn apply_sidebar_cursor_target(&mut self, target: SidebarRowTarget) {
+        self.sidebar_cursor_target = Some(target.clone());
+        if let SidebarRowTarget::File(index) = target {
+            self.select_file(index);
+        }
     }
 
     fn select_file(&mut self, index: usize) {
@@ -956,6 +1029,7 @@ impl App {
         }
 
         self.selected_file_index = index.min(self.changeset.files.len() - 1);
+        self.sidebar_cursor_target = Some(SidebarRowTarget::File(self.selected_file_index));
         self.selected_hunk_index = self
             .selected_file()
             .and_then(|file| bounded_hunk_index(file, None));
@@ -1050,23 +1124,30 @@ impl App {
             return;
         }
 
-        let request = match self.focused_review_target().staging() {
-            Ok(Some(FocusedMutationTarget::File(target))) => StagingRequest::File {
-                path: target.file.display_path().to_string(),
-            },
-            Ok(Some(FocusedMutationTarget::Hunk(target))) => StagingRequest::Hunk {
-                file: target.file.clone(),
-                hunk_index: target.hunk_index,
-            },
-            Ok(None) => return,
-            Err(error) => {
-                self.live_error = Some(error.message().to_string());
-                return;
+        let request = if let Some(request) = self.active_folder_staging_request() {
+            request
+        } else {
+            match self.focused_review_target().staging() {
+                Ok(Some(FocusedMutationTarget::File(target))) => StagingRequest::File {
+                    path: target.file.display_path().to_string(),
+                },
+                Ok(Some(FocusedMutationTarget::Hunk(target))) => StagingRequest::Hunk {
+                    file: target.file.clone(),
+                    hunk_index: target.hunk_index,
+                },
+                Ok(None) => return,
+                Err(error) => {
+                    self.live_error = Some(error.message().to_string());
+                    return;
+                }
             }
         };
 
         match request {
             StagingRequest::File { path } => self.toggle_file_staging(&path),
+            StagingRequest::Folder {
+                file_paths, action, ..
+            } => self.toggle_folder_staging(&file_paths, action),
             StagingRequest::Hunk { file, hunk_index } => {
                 self.toggle_hunk_staging(&file, hunk_index)
             }
@@ -1075,6 +1156,21 @@ impl App {
 
     fn toggle_file_staging(&mut self, path: &str) {
         match self.source.toggle_staging_for_file(path) {
+            Ok(Some(reloaded_changeset)) => {
+                self.apply_reloaded_changeset(reloaded_changeset, false)
+            }
+            Ok(None) => {}
+            Err(error) => self.live_error = Some(format!("staging failed: {error}")),
+        }
+    }
+
+    fn toggle_folder_staging(&mut self, paths: &[String], action: FolderStagingAction) {
+        let result = match action {
+            FolderStagingAction::Stage => self.source.stage_files(paths),
+            FolderStagingAction::Unstage => self.source.unstage_files(paths),
+        };
+
+        match result {
             Ok(Some(reloaded_changeset)) => {
                 self.apply_reloaded_changeset(reloaded_changeset, false)
             }
@@ -1114,25 +1210,135 @@ impl App {
             return;
         }
 
-        let target = match self.focused_review_target().discard() {
-            Ok(Some(FocusedMutationTarget::File(target))) => DiscardTarget::File {
-                file_index: target.file_index,
-                path: target.file.display_path().to_string(),
-            },
-            Ok(Some(FocusedMutationTarget::Hunk(target))) => DiscardTarget::Hunk {
-                file_index: target.file_index,
-                hunk_index: target.hunk_index,
-                path: target.file.display_path().to_string(),
-            },
-            Ok(None) => return,
-            Err(error) => {
-                self.live_error = Some(error.message().to_string());
+        let target = if let Some(target) = self.active_folder_discard_target() {
+            target
+        } else {
+            let Some(target) = self.focused_discard_target() else {
                 return;
-            }
+            };
+            target
         };
 
         self.live_error = None;
         self.overlay = Some(Overlay::Discard(DiscardConfirmation { target }));
+    }
+
+    fn active_folder_staging_request(&mut self) -> Option<StagingRequest> {
+        if self.focus != FocusPane::Sidebar || !self.files_panel_visible {
+            return None;
+        }
+
+        let Some(SidebarRowTarget::Folder(path)) = self.sidebar_cursor_target.as_ref() else {
+            return None;
+        };
+        let file_paths = self.current_folder_paths(path);
+        if file_paths.is_empty() {
+            self.live_error = Some(format!("no changed files in folder {path}"));
+            return None;
+        }
+
+        Some(StagingRequest::Folder {
+            path: path.clone(),
+            file_paths,
+            action: self.folder_staging_action(path),
+        })
+    }
+
+    fn folder_staging_action(&self, folder_path: &str) -> FolderStagingAction {
+        if self
+            .changeset
+            .files
+            .iter()
+            .filter(|file| folder_contains_path(folder_path, file.display_path()))
+            .all(|file| file.stage == FileStage::Staged)
+        {
+            FolderStagingAction::Unstage
+        } else {
+            FolderStagingAction::Stage
+        }
+    }
+
+    fn active_folder_discard_target(&mut self) -> Option<DiscardTarget> {
+        if self.focus != FocusPane::Sidebar || !self.files_panel_visible {
+            return None;
+        }
+
+        let Some(SidebarRowTarget::Folder(path)) = self.sidebar_cursor_target.as_ref() else {
+            return None;
+        };
+        let file_paths = self.folder_discard_paths(path);
+        if file_paths.is_empty() {
+            self.live_error = Some(format!("no unstaged worktree changes in folder {path}"));
+            return None;
+        }
+
+        Some(DiscardTarget::Folder {
+            path: path.clone(),
+            file_paths,
+        })
+    }
+
+    fn folder_discard_paths(&self, folder_path: &str) -> Vec<String> {
+        self.changeset
+            .files
+            .iter()
+            .filter(|file| {
+                folder_contains_path(folder_path, file.display_path())
+                    && matches!(file.stage, FileStage::Unstaged | FileStage::Mixed)
+            })
+            .map(|file| file.display_path().to_string())
+            .collect()
+    }
+
+    fn current_folder_paths(&self, folder_path: &str) -> Vec<String> {
+        self.changeset
+            .files
+            .iter()
+            .filter(|file| folder_contains_path(folder_path, file.display_path()))
+            .map(|file| file.display_path().to_string())
+            .collect()
+    }
+
+    fn confirmed_folder_paths(
+        &mut self,
+        path: &str,
+        file_paths: Vec<String>,
+    ) -> Option<Vec<String>> {
+        if file_paths.is_empty() {
+            self.live_error = Some("discard failed: selected folder has no files".to_string());
+            return None;
+        }
+
+        let current_paths = self.current_folder_paths(path);
+        let all_still_present = file_paths
+            .iter()
+            .all(|file_path| current_paths.iter().any(|current| current == file_path));
+        if !all_still_present {
+            self.live_error =
+                Some("discard failed: selected folder changed before confirmation".to_string());
+            return None;
+        }
+
+        Some(file_paths)
+    }
+
+    fn focused_discard_target(&mut self) -> Option<DiscardTarget> {
+        match self.focused_review_target().discard() {
+            Ok(Some(FocusedMutationTarget::File(target))) => Some(DiscardTarget::File {
+                file_index: target.file_index,
+                path: target.file.display_path().to_string(),
+            }),
+            Ok(Some(FocusedMutationTarget::Hunk(target))) => Some(DiscardTarget::Hunk {
+                file_index: target.file_index,
+                hunk_index: target.hunk_index,
+                path: target.file.display_path().to_string(),
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                self.live_error = Some(error.message().to_string());
+                None
+            }
+        }
     }
 
     fn execute_pending_discard(&mut self) {
@@ -1146,6 +1352,12 @@ impl App {
                     return;
                 }
                 self.source.discard_file(&path)
+            }
+            DiscardTarget::Folder { path, file_paths } => {
+                let Some(file_paths) = self.confirmed_folder_paths(&path, file_paths) else {
+                    return;
+                };
+                self.source.discard_files(&file_paths)
             }
             DiscardTarget::Hunk {
                 file_index,
@@ -1212,6 +1424,32 @@ fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Re
         width: saturating_u16(content_width),
         height: saturating_u16(visible_height),
     }
+}
+
+fn fallback_sidebar_target_position(
+    visible_targets: &[SidebarRowTarget],
+    selected_file_index: usize,
+    direction: VerticalDirection,
+) -> usize {
+    match direction {
+        VerticalDirection::Down => visible_targets
+            .iter()
+            .position(|target| {
+                matches!(target, SidebarRowTarget::File(index) if *index > selected_file_index)
+            })
+            .unwrap_or(visible_targets.len() - 1),
+        VerticalDirection::Up => visible_targets
+            .iter()
+            .rposition(|target| {
+                matches!(target, SidebarRowTarget::File(index) if *index < selected_file_index)
+            })
+            .unwrap_or(0),
+    }
+}
+
+fn folder_contains_path(folder_path: &str, path: &str) -> bool {
+    path.strip_prefix(folder_path)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(test)]

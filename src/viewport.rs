@@ -6,6 +6,7 @@
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+use crate::rows::SidebarRowTarget;
 use crate::theme::SyntaxPalette;
 
 #[derive(Debug)]
@@ -23,10 +24,8 @@ pub struct RenderedViewport {
     /// Live-status rows stacked above the diff rows, used to map mouse events
     /// back to diff rows. Produced by the diff frame, read by hit-testing.
     diff_status_rows: usize,
-    /// Rendered sidebar row to file index mapping for click handling.
-    sidebar_row_indices: Vec<usize>,
-    /// Cached sidebar row counts for the current sidebar layout.
-    sidebar_row_counts_cache: Option<SidebarRowCountsCache>,
+    /// Rendered sidebar row to file or folder target mapping for click handling.
+    sidebar_row_targets: Vec<SidebarRowTarget>,
     /// Cached wrapped and highlighted diff lines by file index.
     diff_lines_cache: Vec<Option<RenderedDiffLines>>,
     /// Cached full diff row metrics by file index.
@@ -120,16 +119,6 @@ struct CachedDiffLayoutMetrics {
     metrics: DiffLayoutMetrics,
 }
 
-#[derive(Debug, Clone)]
-struct SidebarRowCountsCache {
-    /// Width used to wrap cached sidebar entries.
-    content_width: usize,
-    /// Whether row counts include staging controls.
-    can_stage: bool,
-    /// Wrapped row count for each file index.
-    row_counts: Vec<usize>,
-}
-
 impl RenderedViewport {
     pub fn new(file_count: usize) -> Self {
         Self {
@@ -139,8 +128,7 @@ impl RenderedViewport {
             diff_area: None,
             diff_scrollbar: None,
             diff_status_rows: 0,
-            sidebar_row_indices: Vec::new(),
-            sidebar_row_counts_cache: None,
+            sidebar_row_targets: Vec::new(),
             diff_lines_cache: vec![None; file_count],
             diff_layout_cache: vec![None; file_count],
         }
@@ -150,11 +138,10 @@ impl RenderedViewport {
         self.sidebar_area = None;
         self.diff_area = None;
         self.diff_scrollbar = None;
-        self.sidebar_row_indices.clear();
+        self.sidebar_row_targets.clear();
     }
 
     pub fn clear_render_caches(&mut self, file_count: usize) {
-        self.sidebar_row_counts_cache = None;
         self.diff_lines_cache = vec![None; file_count];
         self.diff_layout_cache = vec![None; file_count];
         self.diff_scrollbar = None;
@@ -167,7 +154,7 @@ impl RenderedViewport {
     pub fn begin_sidebar(&mut self, area: Rect, height: usize) {
         self.sidebar_area = Some(area);
         self.sidebar_view_height = height.max(1);
-        self.sidebar_row_indices.clear();
+        self.sidebar_row_targets.clear();
     }
 
     pub fn begin_diff(&mut self, area: Rect, height: usize) {
@@ -192,25 +179,22 @@ impl RenderedViewport {
     }
 
     pub fn begin_sidebar_rows(&mut self) {
-        self.sidebar_row_indices.clear();
+        self.sidebar_row_targets.clear();
     }
 
-    pub fn record_sidebar_rows(&mut self, index: usize, row_count: usize) {
-        self.sidebar_row_indices
-            .extend(std::iter::repeat_n(index, row_count));
+    pub fn record_sidebar_rows(&mut self, target: SidebarRowTarget, row_count: usize) {
+        self.sidebar_row_targets
+            .extend(std::iter::repeat_n(target, row_count));
     }
 
-    pub fn sidebar_index_at(&self, column: u16, row: u16, file_count: usize) -> Option<usize> {
+    pub fn sidebar_target_at(&self, column: u16, row: u16) -> Option<SidebarRowTarget> {
         let area = self.sidebar_area?;
         if !rect_inner_contains(area, column, row) {
             return None;
         }
 
         let row_offset = row.saturating_sub(area.y + 1) as usize;
-        self.sidebar_row_indices
-            .get(row_offset)
-            .copied()
-            .filter(|index| *index < file_count)
+        self.sidebar_row_targets.get(row_offset).cloned()
     }
 
     pub fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
@@ -233,13 +217,12 @@ impl RenderedViewport {
     }
 
     pub fn clamped_scrolls(&self, input: ViewportScrollInput<'_>) -> ViewportScrollState {
-        let selected_file_index = input
-            .selected_file_index
-            .min(input.file_count.saturating_sub(1));
         let diff_scroll = input.diff_scroll.min(self.max_diff_scroll(input));
-        let sidebar_scroll = input.sidebar_scroll.min(input.file_count.saturating_sub(1));
-        let sidebar_scroll =
-            self.sidebar_scroll_with_selected_visible(sidebar_scroll, selected_file_index);
+        let sidebar_scroll = if input.file_count == 0 {
+            0
+        } else {
+            input.sidebar_scroll
+        };
 
         ViewportScrollState {
             diff_scroll,
@@ -274,23 +257,6 @@ impl RenderedViewport {
             .max(layout_scroll)
             .max(hunk_scroll)
             .max(scrollbar_scroll)
-    }
-
-    fn sidebar_scroll_with_selected_visible(
-        &self,
-        sidebar_scroll: usize,
-        selected_file_index: usize,
-    ) -> usize {
-        if selected_file_index < sidebar_scroll {
-            return selected_file_index;
-        }
-
-        let visible_offset = self.sidebar_view_height.saturating_sub(1);
-        if selected_file_index > sidebar_scroll + visible_offset {
-            return selected_file_index.saturating_sub(visible_offset);
-        }
-
-        sidebar_scroll
     }
 
     fn rendered_diff_line_count(
@@ -443,31 +409,6 @@ impl RenderedViewport {
                 .unwrap_or(0)
                 .min(hunk_count - 1),
         )
-    }
-
-    pub fn cached_sidebar_row_counts(
-        &mut self,
-        content_width: usize,
-        can_stage: bool,
-        file_count: usize,
-        compute: impl FnOnce() -> Vec<usize>,
-    ) -> &[usize] {
-        let cache_matches = self
-            .sidebar_row_counts_cache
-            .as_ref()
-            .is_some_and(|cache| cache.matches(content_width, can_stage, file_count));
-
-        if !cache_matches {
-            self.sidebar_row_counts_cache = Some(SidebarRowCountsCache {
-                content_width,
-                can_stage,
-                row_counts: compute(),
-            });
-        }
-
-        self.sidebar_row_counts_cache
-            .as_ref()
-            .map_or(&[], |cache| cache.row_counts.as_slice())
     }
 
     fn diff_lines_cache(&self, file_index: usize) -> Option<&RenderedDiffLines> {
@@ -714,14 +655,6 @@ fn next_diff_cache_target(current_rows: usize, requested_rows: usize) -> usize {
         .max(current_rows.saturating_add(1))
 }
 
-impl SidebarRowCountsCache {
-    fn matches(&self, content_width: usize, can_stage: bool, file_count: usize) -> bool {
-        self.content_width == content_width
-            && self.can_stage == can_stage
-            && self.row_counts.len() == file_count
-    }
-}
-
 fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x
         && column < area.x.saturating_add(area.width)
@@ -760,6 +693,7 @@ fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rows::SidebarRowTarget;
     use crate::theme::Theme;
 
     #[test]
@@ -791,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn clamped_scrolls_keep_selected_sidebar_file_visible() {
+    fn clamped_scrolls_leave_sidebar_scroll_for_sidebar_renderer() {
         let mut viewport = RenderedViewport::new(6);
         viewport.begin_sidebar(Rect::default(), 3);
 
@@ -803,28 +737,34 @@ mod tests {
             selected_file_id: None,
             selected_file_line_count: 0,
         });
-        assert_eq!(scrolls.sidebar_scroll, 2);
+        assert_eq!(scrolls.sidebar_scroll, 0);
 
         let scrolls = viewport.clamped_scrolls(ViewportScrollInput {
             diff_scroll: 0,
-            sidebar_scroll: 3,
+            sidebar_scroll: 99,
             selected_file_index: 1,
             file_count: 6,
             selected_file_id: None,
             selected_file_line_count: 0,
         });
-        assert_eq!(scrolls.sidebar_scroll, 1);
+        assert_eq!(scrolls.sidebar_scroll, 99);
     }
 
     #[test]
     fn sidebar_row_mapping_records_visible_rows() {
         let mut viewport = RenderedViewport::new(4);
         viewport.begin_sidebar(Rect::new(0, 0, 12, 5), 3);
-        viewport.record_sidebar_rows(2, 3);
+        viewport.record_sidebar_rows(SidebarRowTarget::File(2), 3);
 
-        assert_eq!(viewport.sidebar_index_at(1, 1, 4), Some(2));
-        assert_eq!(viewport.sidebar_index_at(1, 3, 4), Some(2));
-        assert_eq!(viewport.sidebar_index_at(1, 4, 4), None);
+        assert_eq!(
+            viewport.sidebar_target_at(1, 1),
+            Some(SidebarRowTarget::File(2))
+        );
+        assert_eq!(
+            viewport.sidebar_target_at(1, 3),
+            Some(SidebarRowTarget::File(2))
+        );
+        assert_eq!(viewport.sidebar_target_at(1, 4), None);
     }
 
     #[test]

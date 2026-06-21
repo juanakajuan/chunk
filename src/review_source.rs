@@ -110,6 +110,20 @@ impl ReviewSource {
         }
     }
 
+    pub(crate) fn stage_files(&self, paths: &[String]) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.stage_files(paths).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn unstage_files(&self, paths: &[String]) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.unstage_files(paths).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn toggle_staging_for_hunk(
         &self,
         file: &DiffFile,
@@ -124,6 +138,13 @@ impl ReviewSource {
     pub(crate) fn discard_file(&self, path: &str) -> Result<Option<Changeset>> {
         match self {
             Self::Worktree(source) => source.discard_file(path).map(Some),
+            Self::PullRequest(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn discard_files(&self, paths: &[String]) -> Result<Option<Changeset>> {
+        match self {
+            Self::Worktree(source) => source.discard_files(paths).map(Some),
             Self::PullRequest(_) => Ok(None),
         }
     }
@@ -196,12 +217,24 @@ impl WorktreeReviewSource {
         self.reload_after(|| git::toggle_staging_for_file(path))
     }
 
+    fn stage_files(self, paths: &[String]) -> Result<Changeset> {
+        self.reload_after(|| git::stage_files(paths))
+    }
+
+    fn unstage_files(self, paths: &[String]) -> Result<Changeset> {
+        self.reload_after(|| git::unstage_files(paths))
+    }
+
     fn toggle_staging_for_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
         self.reload_after(|| git::toggle_staging_for_hunk(file, hunk_index))
     }
 
     fn discard_file(self, path: &str) -> Result<Changeset> {
         self.reload_after(|| git::discard_worktree_file(path))
+    }
+
+    fn discard_files(self, paths: &[String]) -> Result<Changeset> {
+        self.reload_after(|| git::discard_worktree_files(paths))
     }
 
     fn discard_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
@@ -277,6 +310,14 @@ mod tests {
         assert!(!source.can_discard());
         assert_eq!(source.live_watch_root().unwrap(), None);
         assert_eq!(source.toggle_staging_for_file("src/lib.rs").unwrap(), None);
+        assert_eq!(
+            source.stage_files(&["src/lib.rs".to_string()]).unwrap(),
+            None
+        );
+        assert_eq!(
+            source.unstage_files(&["src/lib.rs".to_string()]).unwrap(),
+            None
+        );
         assert_eq!(source.toggle_staging_for_hunk(&file, 0).unwrap(), None);
         assert_eq!(source.discard_file("src/lib.rs").unwrap(), None);
         assert_eq!(source.discard_hunk(&file, 0).unwrap(), None);

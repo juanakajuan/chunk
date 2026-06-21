@@ -133,6 +133,81 @@ fn showing_files_panel_moves_focus_to_sidebar() {
 }
 
 #[test]
+fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    app.collapsed_tree_dirs.insert("src/bin".to_string());
+    app.selected_file_index = 0;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("src/config.rs")
+    );
+
+    app.selected_file_index = 1;
+    app.sidebar_cursor_target = None;
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("src/config.rs")
+    );
+}
+
+#[test]
+fn clicking_tree_file_selects_corresponding_diff() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    app.selected_file_index = 1;
+    render_sidebar(&mut app);
+
+    app.handle_left_down(1, 4);
+    app.handle_left_up(1, 4);
+
+    assert_eq!(app.focus, FocusPane::Sidebar);
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("src/app.rs")
+    );
+}
+
+#[test]
+fn clicking_tree_folder_collapses_without_losing_selected_file() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    app.selected_file_index = 1;
+    render_sidebar(&mut app);
+
+    app.handle_left_down(1, 2);
+    app.handle_left_up(1, 2);
+
+    assert!(app.collapsed_tree_dirs.contains("src/bin"));
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("src/bin/chunk.rs")
+    );
+
+    let lines = render_sidebar(&mut app);
+    let sidebar = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(sidebar.contains("bin/"));
+    assert!(!sidebar.contains("chunk.rs"));
+}
+
+#[test]
 fn question_mark_toggles_help_overlay() {
     let mut app = app_with(changeset_with_one_file());
 
@@ -464,6 +539,126 @@ fn discard_key_requires_confirmation() {
 }
 
 #[test]
+fn files_panel_hover_changes_pane_focus_without_changing_tree_focus() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    app.focus = FocusPane::Diff;
+    app.selected_file_index = 3;
+    render_sidebar(&mut app);
+
+    app.handle_hover(1, 1);
+    assert_eq!(app.focus, FocusPane::Sidebar);
+    assert_eq!(app.sidebar_cursor_target, None);
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some("README.md")
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(matches!(
+        app.discard_target(),
+        Some(DiscardTarget::File { path, .. }) if path == "README.md"
+    ));
+}
+
+#[test]
+fn keyboard_tree_navigation_can_discard_focused_folder() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    render_sidebar(&mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        .unwrap();
+
+    let target = app
+        .discard_target()
+        .expect("focused folder discard should request confirmation");
+    let DiscardTarget::Folder { path, file_paths } = target else {
+        panic!("expected folder discard target, got {target:?}");
+    };
+    assert_eq!(path, "src/bin");
+    assert_eq!(file_paths, &vec!["src/bin/chunk.rs".to_string()]);
+}
+
+#[test]
+fn keyboard_tree_navigation_stages_focused_folder_paths() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    render_sidebar(&mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = app
+        .active_folder_staging_request()
+        .expect("focused folder should stage child paths");
+    let StagingRequest::Folder {
+        path,
+        file_paths,
+        action,
+    } = request
+    else {
+        panic!("expected folder staging request, got {request:?}");
+    };
+    assert_eq!(path, "src/bin");
+    assert_eq!(file_paths, vec!["src/bin/chunk.rs".to_string()]);
+    assert_eq!(action, FolderStagingAction::Stage);
+}
+
+#[test]
+fn keyboard_tree_navigation_unstages_focused_staged_folder_paths() {
+    let mut changeset = changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]);
+    changeset.files[1].stage = crate::model::FileStage::Staged;
+    let mut app = app_with(changeset);
+    render_sidebar(&mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = app
+        .active_folder_staging_request()
+        .expect("focused staged folder should unstage child paths");
+    let StagingRequest::Folder {
+        path,
+        file_paths,
+        action,
+    } = request
+    else {
+        panic!("expected folder staging request, got {request:?}");
+    };
+    assert_eq!(path, "src/bin");
+    assert_eq!(file_paths, vec!["src/bin/chunk.rs".to_string()]);
+    assert_eq!(action, FolderStagingAction::Unstage);
+}
+
+#[test]
 fn search_prompt_applies_query_scrolls_to_first_match_and_highlights_it() {
     let theme = Theme::github_dark();
     let mut app = app_with(changeset_with_file(diff_file_with_contents([
@@ -750,6 +945,27 @@ fn review_state_survives_reload_by_path_identity() {
 }
 
 #[test]
+fn focused_folder_survives_reload_when_folder_still_exists() {
+    let mut app = app_with(changeset_with_paths([
+        "src/app.rs",
+        "src/bin/chunk.rs",
+        "src/config.rs",
+        "README.md",
+    ]));
+    app.sidebar_cursor_target = Some(SidebarRowTarget::Folder("src/bin".to_string()));
+
+    app.apply_reloaded_changeset(
+        changeset_with_paths(["README.md", "src/bin/chunk.rs", "src/app.rs"]),
+        false,
+    );
+
+    assert_eq!(
+        app.sidebar_cursor_target,
+        Some(SidebarRowTarget::Folder("src/bin".to_string()))
+    );
+}
+
+#[test]
 fn r_key_works_from_diff_pane_focus() {
     let mut app = app_with(changeset_with_one_file());
     app.focus = FocusPane::Diff;
@@ -797,7 +1013,7 @@ fn footer_keeps_secondary_actions_in_help_only() {
     assert!(!footer.contains("discard"), "footer was {footer:?}");
     assert!(!footer.contains("ask AI"), "footer was {footer:?}");
     assert!(!footer.contains("explain"), "footer was {footer:?}");
-    assert!(help.contains("d discard focused file or hunk"));
+    assert!(help.contains("d discard focused file, folder, or hunk"));
     assert!(help.contains("a Ask AI about focused file or hunk"));
     assert!(help.contains("x Explain focused file or hunk with Ask AI"));
     assert!(help.contains("y copy selected hunk diff"));
@@ -1110,6 +1326,10 @@ fn assert_explain_code_question(question: &str) {
 
 fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {
     app.diff_pane_rows(Rect::new(0, 0, 80, 8), 80, 6, theme)
+}
+
+fn render_sidebar(app: &mut App) -> Vec<Line<'static>> {
+    app.sidebar_rows(Rect::new(0, 0, 40, 8), 38, 6, Theme::github_dark())
 }
 
 fn pane_text(pane: &DiffPaneRows) -> String {
