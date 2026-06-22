@@ -10,8 +10,9 @@ guarded worktree discard actions.
 - Rust 2024 toolchain
 - Git
 - [OpenCode](https://opencode.ai/) for the Ask AI action
-- A [Nerd Font](https://www.nerdfonts.com/) for the file-type, status, and
-  staging glyphs in the sidebar and bottom bar
+- A [Nerd Font](https://www.nerdfonts.com/) for the colored file-type, status,
+  and staging glyphs in the sidebar and bottom bar. Without a Nerd Font these
+  glyphs may render as a generic fallback box, but the file list stays usable.
 
 ## Usage
 
@@ -119,7 +120,10 @@ command = "git add . && com && git push"
 The `theme` setting is optional. Supported values are `gruvbox` (default) and
 `github-dark`.
 
-The Files panel groups changed files under collapsible parent directories.
+The Files panel groups changed files under collapsible parent directories. Each
+file row shows a colored, file-type icon based on its extension (with a generic
+icon for unknown or extensionless files) so files are easier to scan by type.
+Reviewed files swap the type icon for a check glyph.
 
 ### Built-in keybinds
 

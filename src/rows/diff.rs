@@ -10,8 +10,8 @@ use crate::theme::Theme;
 
 use super::RAIL_MARKER;
 use super::file_summary::{
-    file_header_label, file_icon, file_status_suffix, format_file_stats, padding_before_stats,
-    push_stat_spans, stage_display, stats_width,
+    file_header_label, file_icon, file_icon_color, file_status_suffix, format_file_stats,
+    padding_before_stats, push_stat_spans, stage_display, stats_width,
 };
 use super::intraline::{
     emphasize_spans, intraline_block_end, intraline_ranges_for_block, is_intraline_candidate,
@@ -542,11 +542,9 @@ fn render_file_header(
     can_stage: bool,
     theme: Theme,
 ) -> Line<'static> {
-    let label = format!(
-        "{} {}",
-        file_icon(file.display_path()),
-        file_header_label(file)
-    );
+    let display_path = file.display_path();
+    let icon = file_icon(display_path);
+    let label = format!(" {}", file_header_label(file));
     let suffix = file_status_suffix(file.status);
     let stage_affordance = can_stage.then(|| stage_display(file.stage, theme.background, theme));
     let stats = format_file_stats(file);
@@ -554,13 +552,18 @@ fn render_file_header(
     let stage_affordance_width = stage_affordance
         .as_ref()
         .map_or(0, |stage_affordance| display_width(stage_affordance.suffix));
-    let used_width =
-        display_width(&label) + display_width(suffix) + stage_affordance_width + stats_width;
+    let used_width = display_width(icon)
+        + display_width(&label)
+        + display_width(suffix)
+        + stage_affordance_width
+        + stats_width;
     let padding = padding_before_stats(content_width, used_width, stats_width);
     let style = color_style(theme.text, theme.background);
     let muted_style = color_style(theme.muted, theme.background);
+    let icon_style = color_style(file_icon_color(display_path, theme), theme.background);
 
     let mut spans = vec![
+        Span::styled(icon, icon_style),
         Span::styled(label, style),
         Span::styled(suffix.to_string(), muted_style),
     ];
@@ -822,6 +825,26 @@ mod tests {
         let header = render_file_header(&file, 80, false, Theme::github_dark());
 
         assert!(!line_text(&header).contains("[unstaged]"));
+    }
+
+    #[test]
+    fn diff_header_icon_uses_file_type_color() {
+        let theme = Theme::github_dark();
+        let mut file = diff_file_with_line(DiffLineKind::Context, "short");
+        file.old_path = "src/main.rs".to_string();
+        file.path = "src/main.rs".to_string();
+        let header = render_file_header(&file, 80, false, theme);
+
+        let icon = file_icon("src/main.rs");
+        let icon_span = header
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == icon)
+            .expect("type icon span should render");
+        assert_eq!(
+            icon_span.style.fg,
+            Some(file_icon_color("src/main.rs", theme))
+        );
     }
 
     #[test]

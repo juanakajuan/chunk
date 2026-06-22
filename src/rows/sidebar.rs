@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::model::{DiffFile, FileStage};
+use crate::model::{DiffFile, FileStage, FileStatus};
 use crate::theme::Theme;
 
 use super::file_summary::{
-    file_icon, format_file_stats, push_stat_spans, reviewed_glyph, sidebar_file_label, stats_width,
-    status_color,
+    file_icon, file_icon_color, format_file_stats, push_stat_spans, reviewed_glyph,
+    sidebar_file_label, stats_width,
 };
 use super::text::{color_style, display_width, muted_line};
 
@@ -500,24 +500,14 @@ fn render_file_entry(input: FileEntryRenderInput<'_>) -> Vec<Line<'static>> {
     } else {
         theme.background
     };
-    let base_style = color_style(theme.text, row_background);
-    let label_style = if is_reviewed {
-        color_style(theme.muted, row_background)
-    } else {
-        base_style
-    };
+    let label_style = color_style(
+        if is_reviewed { theme.muted } else { theme.text },
+        row_background,
+    );
     let file_name_style = if is_reviewed {
         label_style
     } else {
-        match file.stage {
-            FileStage::Staged => {
-                color_style(theme.added, row_background).add_modifier(Modifier::BOLD)
-            }
-            FileStage::Mixed => {
-                color_style(theme.accent, row_background).add_modifier(Modifier::BOLD)
-            }
-            FileStage::Unstaged => label_style,
-        }
+        sidebar_file_name_style(file, row_background, theme)
     };
     let icon = if is_reviewed {
         reviewed_glyph()
@@ -527,7 +517,7 @@ fn render_file_entry(input: FileEntryRenderInput<'_>) -> Vec<Line<'static>> {
     let icon_style = if is_reviewed {
         color_style(theme.added, row_background)
     } else {
-        color_style(status_color(file.status, theme), row_background)
+        color_style(file_icon_color(file.display_path(), theme), row_background)
     };
     let tree_prefix = tree_file_prefix(depth);
     let file_name = sidebar_file_label(file);
@@ -569,6 +559,26 @@ fn render_file_entry(input: FileEntryRenderInput<'_>) -> Vec<Line<'static>> {
     push_stat_spans(&mut content_spans, file, row_background, theme);
 
     vec![Line::from(content_spans)]
+}
+
+fn sidebar_file_name_style(file: &DiffFile, row_background: Color, theme: Theme) -> Style {
+    let (color, is_bold) = match (file.stage, file.status) {
+        (FileStage::Staged, _) => (theme.added, true),
+        (FileStage::Mixed, _) => (theme.accent, true),
+        (FileStage::Unstaged, FileStatus::Added) => (theme.added, false),
+        (FileStage::Unstaged, FileStatus::Deleted) => (theme.removed, false),
+        (FileStage::Unstaged, FileStatus::Renamed | FileStatus::Copied) => {
+            (theme.file_renamed, false)
+        }
+        (FileStage::Unstaged, FileStatus::Modified) => (theme.text, false),
+    };
+
+    let style = color_style(color, row_background);
+    if is_bold {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn render_folder_entry(
@@ -678,7 +688,7 @@ fn truncate_to_width(text: &str, max_width: usize) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use ratatui::text::Line;
+    use ratatui::text::{Line, Span};
 
     use crate::model::{
         DiffFile, DiffHunk, DiffLine, DiffLineKind, FileStage, FileStatus, SourceSnapshot,
@@ -813,6 +823,41 @@ mod tests {
             .find(|span| span.content.contains("main.rs"))
             .expect("file name span should render");
         assert_eq!(name_span.style.fg, Some(theme.text));
+    }
+
+    #[test]
+    fn unreviewed_icon_uses_file_type_color_not_status() {
+        let theme = Theme::github_dark();
+        let rust = render_test_file_entry(&diff_file_with_path("src/main.rs"), 80, false, theme);
+        let markdown = render_test_file_entry(&diff_file_with_path("README.md"), 80, false, theme);
+
+        let rust_icon_span = span_with_content(&rust[0], file_icon("src/main.rs"));
+        let md_icon_span = span_with_content(&markdown[0], file_icon("README.md"));
+
+        // Both files share the same git status (Modified); coloring by type
+        // means their icon colors must differ.
+        assert_ne!(rust_icon_span.style.fg, md_icon_span.style.fg);
+        assert_eq!(
+            rust_icon_span.style.fg,
+            Some(file_icon_color("src/main.rs", theme))
+        );
+    }
+
+    #[test]
+    fn file_status_style_stays_separate_from_type_icon_color() {
+        let theme = Theme::github_dark();
+        let mut file = diff_file_with_path("src/new.rs");
+        file.status = FileStatus::Added;
+        let sidebar = render_test_file_entry(&file, 80, false, theme);
+
+        let icon_span = span_with_content(&sidebar[0], file_icon("src/new.rs"));
+        let name_span = span_containing(&sidebar[0], "new.rs");
+
+        assert_eq!(
+            icon_span.style.fg,
+            Some(file_icon_color("src/new.rs", theme))
+        );
+        assert_eq!(name_span.style.fg, Some(theme.added));
     }
 
     #[test]
@@ -1068,6 +1113,26 @@ mod tests {
             depth: 0,
             theme,
         })
+    }
+
+    fn span_with_content<'line, 'text>(
+        line: &'line Line<'text>,
+        content: &str,
+    ) -> &'line Span<'text> {
+        line.spans
+            .iter()
+            .find(|span| span.content.as_ref() == content)
+            .unwrap_or_else(|| panic!("span {content:?} should render"))
+    }
+
+    fn span_containing<'line, 'text>(
+        line: &'line Line<'text>,
+        content: &str,
+    ) -> &'line Span<'text> {
+        line.spans
+            .iter()
+            .find(|span| span.content.contains(content))
+            .unwrap_or_else(|| panic!("span containing {content:?} should render"))
     }
 
     fn diff_file_with_path(path: &str) -> DiffFile {
