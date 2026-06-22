@@ -863,15 +863,25 @@ fn help_overlay_reflects_remapped_keys() {
     });
     let theme = Theme::github_dark();
 
-    let help = app
+    let help_lines = app
         .help_overlay_lines(80, theme)
         .iter()
         .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    let help = help_lines.join("\n");
 
-    assert!(help.contains("H help/dismiss"), "help was: {help}");
-    assert!(help.contains("Q close help or quit"), "help was: {help}");
+    assert!(
+        help_lines
+            .iter()
+            .any(|line| line.starts_with("H ") && line.contains("help/dismiss")),
+        "help was: {help}"
+    );
+    assert!(
+        help_lines
+            .iter()
+            .any(|line| line.starts_with("Q ") && line.contains("close help or quit")),
+        "help was: {help}"
+    );
     assert!(!help.contains("? help/dismiss"));
 }
 
@@ -1006,7 +1016,7 @@ fn custom_commands_are_help_only_not_footer_hints() {
 
     assert!(!footer.contains("publish"), "footer was {footer:?}");
     assert!(help.contains("Custom commands"));
-    assert!(help.contains("P publish  git push"));
+    assert!(help.contains("P  publish  git push"));
 }
 
 #[test]
@@ -1025,11 +1035,11 @@ fn footer_keeps_secondary_actions_in_help_only() {
     assert!(!footer.contains("discard"), "footer was {footer:?}");
     assert!(!footer.contains("ask AI"), "footer was {footer:?}");
     assert!(!footer.contains("explain"), "footer was {footer:?}");
-    assert!(help.contains("d discard focused file, folder, or hunk"));
-    assert!(help.contains("a Ask AI about focused file or hunk"));
-    assert!(help.contains("x Explain focused file or hunk with Ask AI"));
-    assert!(help.contains("y copy selected hunk diff"));
-    assert!(help.contains("Y copy selected file diff"));
+    assert!(help.contains("discard focused file, folder, or hunk"));
+    assert!(help.contains("Ask AI about focused file or hunk"));
+    assert!(help.contains("Explain focused file or hunk with Ask AI"));
+    assert!(help.contains("copy selected hunk diff"));
+    assert!(help.contains("copy selected file diff"));
 }
 
 #[test]

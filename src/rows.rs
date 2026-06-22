@@ -24,7 +24,7 @@ pub(crate) use diff::{diff_layout_counts, diff_lines_until, selected_hunk_header
 pub(crate) use sidebar::{SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
 pub(crate) use sidebar::{sidebar_row_counts, sidebar_rows, visible_sidebar_targets};
 
-use text::{color_style, muted_line, wrap_line};
+use text::{color_style, display_width, muted_line, wrap_line, wrap_styled_spans};
 
 pub(crate) const DIFF_PREFETCH_ROWS: usize = 120;
 const CUSTOM_COMMAND_SPINNER_FRAMES: [&str; 10] =
@@ -377,68 +377,37 @@ pub(crate) fn help_overlay_lines(
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let cmd = |action| HelpSegment::command(keybinds.display(action));
+    let action_entry =
+        |action, description| HelpEntry::text(command_key(keybinds.display(action)), description);
     let mut lines = Vec::new();
 
-    push_help_section(&mut lines, "Global", theme);
-    push_help_line(
+    push_help_entries(
         &mut lines,
+        "Global",
         &[
-            cmd(BuiltinAction::Help),
-            HelpSegment::text(" help/dismiss   "),
-            cmd(BuiltinAction::Quit),
-            HelpSegment::text(" close help or quit   "),
-            HelpSegment::command("Ctrl-c"),
-            HelpSegment::text(" quit"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::ToggleFiles),
-            HelpSegment::text(" files   "),
-            HelpSegment::command("Tab"),
-            HelpSegment::text("/"),
-            HelpSegment::command("Left"),
-            HelpSegment::text("/"),
-            HelpSegment::command("Right"),
-            HelpSegment::text("/"),
-            HelpSegment::command("Enter"),
-            HelpSegment::text(" focus panes"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::Search),
-            HelpSegment::text(" search, "),
-            HelpSegment::command("Enter"),
-            HelpSegment::text(" apply, "),
-            HelpSegment::command("Esc"),
-            HelpSegment::text(" cancel or clear"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::NextMatch),
-            HelpSegment::text("/"),
-            cmd(BuiltinAction::PrevMatch),
-            HelpSegment::text(" next or previous match/hunk   "),
-            cmd(BuiltinAction::Top),
-            HelpSegment::text("/"),
-            HelpSegment::command("Home"),
-            HelpSegment::text(" top   "),
-            cmd(BuiltinAction::Bottom),
-            HelpSegment::text("/"),
-            HelpSegment::command("End"),
-            HelpSegment::text(" bottom"),
+            action_entry(BuiltinAction::Help, "help/dismiss"),
+            action_entry(BuiltinAction::Quit, "close help or quit"),
+            HelpEntry::text(command_key("Ctrl-c"), "quit"),
+            action_entry(BuiltinAction::ToggleFiles, "show or hide files"),
+            HelpEntry::text(key_names(["Tab", "Left", "Right", "Enter"]), "focus panes"),
+            action_entry(BuiltinAction::Search, "search"),
+            HelpEntry::text(command_key("Enter"), "apply search"),
+            HelpEntry::text(command_key("Esc"), "cancel or clear search"),
+            HelpEntry::text(
+                action_keys(
+                    keybinds,
+                    [BuiltinAction::NextMatch, BuiltinAction::PrevMatch],
+                ),
+                "next or previous match/hunk",
+            ),
+            HelpEntry::text(
+                key_names([keybinds.display(BuiltinAction::Top), "Home".to_string()]),
+                "top",
+            ),
+            HelpEntry::text(
+                key_names([keybinds.display(BuiltinAction::Bottom), "End".to_string()]),
+                "bottom",
+            ),
         ],
         content_width,
         theme,
@@ -446,176 +415,105 @@ pub(crate) fn help_overlay_lines(
 
     push_custom_commands_section(&mut lines, custom_commands, content_width, theme);
 
-    push_help_section(&mut lines, "Sidebar", theme);
-    push_help_line(
+    push_help_entries(
         &mut lines,
+        "Sidebar",
         &[
-            cmd(BuiltinAction::MoveDown),
-            HelpSegment::text("/"),
-            cmd(BuiltinAction::MoveUp),
-            HelpSegment::text(" select file"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::ToggleReviewed),
-            HelpSegment::text(" toggle reviewed for selected file"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::CopyFocused),
-            HelpSegment::text(" copy selected file path"),
+            HelpEntry::text(
+                action_keys(keybinds, [BuiltinAction::MoveDown, BuiltinAction::MoveUp]),
+                "select file",
+            ),
+            action_entry(
+                BuiltinAction::ToggleReviewed,
+                "toggle reviewed for selected file",
+            ),
+            action_entry(BuiltinAction::CopyFocused, "copy selected file path"),
         ],
         content_width,
         theme,
     );
 
-    push_help_section(&mut lines, "Diff", theme);
-    push_help_line(
+    push_help_entries(
         &mut lines,
+        "Diff",
         &[
-            cmd(BuiltinAction::MoveDown),
-            HelpSegment::text("/"),
-            cmd(BuiltinAction::MoveUp),
-            HelpSegment::text(" scroll row   "),
-            HelpSegment::command("Ctrl-d"),
-            HelpSegment::text("/"),
-            HelpSegment::command("Ctrl-u"),
-            HelpSegment::text(" page"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            HelpSegment::command("Ctrl-d"),
-            HelpSegment::text("/"),
-            HelpSegment::command("Ctrl-u"),
-            HelpSegment::text(" page   "),
-            cmd(BuiltinAction::NextMatch),
-            HelpSegment::text("/"),
-            cmd(BuiltinAction::PrevMatch),
-            HelpSegment::text(" next or previous hunk"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::AskAi),
-            HelpSegment::text(" Ask AI about focused file or hunk, "),
-            HelpSegment::command("Enter"),
-            HelpSegment::text(" submit, "),
-            HelpSegment::command("Esc"),
-            HelpSegment::text(" cancel"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::ExplainCode),
-            HelpSegment::text(" Explain focused file or hunk with Ask AI"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            cmd(BuiltinAction::CopyFocused),
-            HelpSegment::text(" copy selected hunk diff   "),
-            cmd(BuiltinAction::CopyFileDiff),
-            HelpSegment::text(" copy selected file diff"),
-        ],
-        content_width,
-        theme,
-    );
-
-    push_help_section(&mut lines, "Mouse", theme);
-    push_help_line(
-        &mut lines,
-        &[
-            HelpSegment::command("hover"),
-            HelpSegment::text(" focus pane   "),
-            HelpSegment::command("click file"),
-            HelpSegment::text(" select"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            HelpSegment::command("click hunk"),
-            HelpSegment::text(" select   "),
-            HelpSegment::command("wheel"),
-            HelpSegment::text(" scroll pointed pane"),
-        ],
-        content_width,
-        theme,
-    );
-    push_help_line(
-        &mut lines,
-        &[
-            HelpSegment::command("drag text"),
-            HelpSegment::text(" copy selection"),
-        ],
-        content_width,
-        theme,
-    );
-
-    push_help_section(&mut lines, "Worktree-only", theme);
-    if can_stage || can_discard {
-        if can_stage {
-            push_help_line(
-                &mut lines,
-                &[
-                    cmd(BuiltinAction::ToggleStaging),
-                    HelpSegment::text(" stage/unstage focused file or hunk"),
+            HelpEntry::text(
+                action_keys(keybinds, [BuiltinAction::MoveDown, BuiltinAction::MoveUp]),
+                "scroll row",
+            ),
+            HelpEntry::text(key_names(["Ctrl-d", "Ctrl-u"]), "page"),
+            HelpEntry::text(
+                action_keys(
+                    keybinds,
+                    [BuiltinAction::NextMatch, BuiltinAction::PrevMatch],
+                ),
+                "next or previous hunk",
+            ),
+            HelpEntry::new(
+                command_key(keybinds.display(BuiltinAction::AskAi)),
+                [
+                    HelpSegment::text("Ask AI about focused file or hunk; "),
+                    HelpSegment::command("Enter"),
+                    HelpSegment::text(" submit; "),
+                    HelpSegment::command("Esc"),
+                    HelpSegment::text(" cancel"),
                 ],
-                content_width,
-                theme,
-            );
+            ),
+            action_entry(
+                BuiltinAction::ExplainCode,
+                "Explain focused file or hunk with Ask AI",
+            ),
+            action_entry(BuiltinAction::CopyFocused, "copy selected hunk diff"),
+            action_entry(BuiltinAction::CopyFileDiff, "copy selected file diff"),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_entries(
+        &mut lines,
+        "Mouse",
+        &[
+            HelpEntry::text(command_key("hover"), "focus pane"),
+            HelpEntry::text(command_key("click file"), "select file"),
+            HelpEntry::text(command_key("click hunk"), "select hunk"),
+            HelpEntry::text(command_key("wheel"), "scroll pointed pane"),
+            HelpEntry::text(command_key("drag text"), "copy selection"),
+        ],
+        content_width,
+        theme,
+    );
+
+    if can_stage || can_discard {
+        let mut entries = Vec::new();
+        if can_stage {
+            entries.push(action_entry(
+                BuiltinAction::ToggleStaging,
+                "stage/unstage focused file or hunk",
+            ));
         }
         if can_discard {
-            push_help_line(
-                &mut lines,
-                &[
-                    cmd(BuiltinAction::Discard),
-                    HelpSegment::text(" discard focused file, folder, or hunk, "),
+            entries.push(HelpEntry::new(
+                command_key(keybinds.display(BuiltinAction::Discard)),
+                [
+                    HelpSegment::text("discard focused file, folder, or hunk; "),
                     HelpSegment::command("y"),
-                    HelpSegment::text("/"),
+                    HelpSegment::text(" / "),
                     HelpSegment::command("Enter"),
                     HelpSegment::text(" confirm"),
                 ],
-                content_width,
-                theme,
-            );
+            ));
         }
-        push_help_line(
-            &mut lines,
-            &[
-                cmd(BuiltinAction::Editor),
-                HelpSegment::text(" open selected file in $EDITOR"),
-            ],
-            content_width,
-            theme,
-        );
+        entries.push(action_entry(
+            BuiltinAction::Editor,
+            "open selected file in $EDITOR",
+        ));
+        push_help_entries(&mut lines, "Worktree-only", &entries, content_width, theme);
     } else {
-        push_help_line(
+        push_help_section(&mut lines, "Worktree-only", theme);
+        push_help_message(
             &mut lines,
-            &[HelpSegment::muted(
+            [HelpSegment::muted(
                 "Worktree actions unavailable in PR mode",
             )],
             content_width,
@@ -632,18 +530,28 @@ fn push_custom_commands_section(
     content_width: usize,
     theme: Theme,
 ) {
-    push_help_section(lines, "Custom commands", theme);
     if custom_commands.is_empty() {
-        push_help_line(
+        push_help_section(lines, "Custom commands", theme);
+        push_help_message(
             lines,
-            &[HelpSegment::muted("No custom commands configured")],
+            [HelpSegment::muted("No custom commands configured")],
             content_width,
             theme,
         );
     } else {
-        for command in custom_commands {
-            push_custom_command_help_line(lines, command, content_width, theme);
-        }
+        let entries = custom_commands
+            .iter()
+            .map(|command| {
+                HelpEntry::new(
+                    command_key(command.key_display()),
+                    [
+                        HelpSegment::text(command.label()),
+                        HelpSegment::muted(format!("  {}", command.command())),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        push_help_entries(lines, "Custom commands", &entries, content_width, theme);
     }
 }
 
@@ -652,17 +560,14 @@ fn push_help_section(lines: &mut Vec<Line<'static>>, title: &'static str, theme:
         lines.push(Line::styled("", help_style(theme.text, theme)));
     }
 
-    lines.push(Line::styled(
-        title,
-        help_style(theme.accent, theme).add_modifier(Modifier::BOLD),
-    ));
+    lines.push(Line::styled(title, help_section_style(theme)));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HelpSegment {
     Command(String),
-    Text(&'static str),
-    Muted(&'static str),
+    Text(String),
+    Muted(String),
 }
 
 impl HelpSegment {
@@ -670,61 +575,179 @@ impl HelpSegment {
         Self::Command(text.into())
     }
 
-    const fn text(text: &'static str) -> Self {
-        Self::Text(text)
+    fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
     }
 
-    const fn muted(text: &'static str) -> Self {
-        Self::Muted(text)
+    fn muted(text: impl Into<String>) -> Self {
+        Self::Muted(text.into())
     }
 }
 
-fn push_help_line(
-    lines: &mut Vec<Line<'static>>,
-    segments: &[HelpSegment],
-    content_width: usize,
-    theme: Theme,
-) {
-    lines.extend(wrap_line(help_line(segments, theme), content_width));
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HelpEntry {
+    keys: Vec<HelpSegment>,
+    description: Vec<HelpSegment>,
 }
 
-fn push_custom_command_help_line(
+impl HelpEntry {
+    fn new(keys: impl Into<Vec<HelpSegment>>, description: impl Into<Vec<HelpSegment>>) -> Self {
+        Self {
+            keys: keys.into(),
+            description: description.into(),
+        }
+    }
+
+    fn text(keys: impl Into<Vec<HelpSegment>>, description: impl Into<String>) -> Self {
+        Self::new(keys, [HelpSegment::text(description)])
+    }
+}
+
+const HELP_COLUMN_GAP: usize = 2;
+const HELP_MIN_DESCRIPTION_WIDTH: usize = 18;
+
+fn push_help_entries(
     lines: &mut Vec<Line<'static>>,
-    command: &CustomCommandBinding,
+    title: &'static str,
+    entries: &[HelpEntry],
     content_width: usize,
     theme: Theme,
 ) {
-    lines.extend(wrap_line(
-        Line::from(vec![
-            Span::styled(command.key_display(), help_command_style(theme)),
-            Span::styled(
-                format!(" {}", command.label()),
+    push_help_section(lines, title, theme);
+    let key_width = entries
+        .iter()
+        .map(|entry| segments_width(&entry.keys))
+        .max()
+        .unwrap_or(0);
+
+    let align_columns = content_width >= key_width + HELP_COLUMN_GAP + HELP_MIN_DESCRIPTION_WIDTH;
+
+    for entry in entries {
+        push_help_entry(lines, entry, key_width, align_columns, content_width, theme);
+    }
+}
+
+fn push_help_entry(
+    lines: &mut Vec<Line<'static>>,
+    entry: &HelpEntry,
+    key_width: usize,
+    align_columns: bool,
+    content_width: usize,
+    theme: Theme,
+) {
+    if !align_columns {
+        let mut spans = help_spans(&entry.keys, theme);
+        spans.push(Span::styled(" ", help_style(theme.text, theme)));
+        spans.extend(help_spans(&entry.description, theme));
+        lines.extend(wrap_line(Line::from(spans), content_width));
+        return;
+    }
+
+    let desc_column = key_width + HELP_COLUMN_GAP;
+    let desc_width = content_width.saturating_sub(desc_column).max(1);
+    let mut desc_rows = wrap_styled_spans(help_spans(&entry.description, theme), desc_width);
+    if desc_rows.is_empty() {
+        desc_rows.push(Vec::new());
+    }
+
+    for (index, desc_spans) in desc_rows.into_iter().enumerate() {
+        let mut spans = Vec::new();
+        if index == 0 {
+            spans.extend(padded_help_key_spans(&entry.keys, key_width, theme));
+            spans.push(Span::styled(
+                " ".repeat(HELP_COLUMN_GAP),
                 help_style(theme.text, theme),
-            ),
-            Span::styled(
-                format!("  {}", command.command()),
-                help_style(theme.muted, theme),
-            ),
-        ]),
+            ));
+        } else {
+            spans.push(Span::styled(
+                " ".repeat(desc_column),
+                help_style(theme.text, theme),
+            ));
+        }
+        spans.extend(desc_spans);
+        lines.push(Line::from(spans));
+    }
+}
+
+fn push_help_message(
+    lines: &mut Vec<Line<'static>>,
+    segments: impl Into<Vec<HelpSegment>>,
+    content_width: usize,
+    theme: Theme,
+) {
+    let segments = segments.into();
+    lines.extend(wrap_line(
+        Line::from(help_spans(&segments, theme)),
         content_width,
     ));
 }
 
-fn help_line(segments: &[HelpSegment], theme: Theme) -> Line<'static> {
-    let spans: Vec<Span<'static>> = segments
+fn help_spans(segments: &[HelpSegment], theme: Theme) -> Vec<Span<'static>> {
+    segments
         .iter()
         .map(|segment| match segment {
             HelpSegment::Command(text) => Span::styled(text.clone(), help_command_style(theme)),
-            HelpSegment::Text(text) => Span::styled(*text, help_style(theme.text, theme)),
-            HelpSegment::Muted(text) => Span::styled(*text, help_style(theme.muted, theme)),
+            HelpSegment::Text(text) => Span::styled(text.clone(), help_style(theme.text, theme)),
+            HelpSegment::Muted(text) => Span::styled(text.clone(), help_style(theme.muted, theme)),
         })
-        .collect();
+        .collect()
+}
 
-    Line::from(spans)
+fn padded_help_key_spans(
+    key_segments: &[HelpSegment],
+    key_width: usize,
+    theme: Theme,
+) -> Vec<Span<'static>> {
+    let mut spans = help_spans(key_segments, theme);
+    let padding = key_width.saturating_sub(segments_width(key_segments));
+    if padding > 0 {
+        spans.push(Span::styled(
+            " ".repeat(padding),
+            help_style(theme.text, theme),
+        ));
+    }
+    spans
+}
+
+fn segments_width(segments: &[HelpSegment]) -> usize {
+    segments
+        .iter()
+        .map(|segment| match segment {
+            HelpSegment::Command(text) | HelpSegment::Text(text) | HelpSegment::Muted(text) => {
+                display_width(text)
+            }
+        })
+        .sum()
+}
+
+fn key_names(names: impl IntoIterator<Item = impl Into<String>>) -> Vec<HelpSegment> {
+    let mut segments = Vec::new();
+    for (index, name) in names.into_iter().enumerate() {
+        if index > 0 {
+            segments.push(HelpSegment::text(" / "));
+        }
+        segments.push(HelpSegment::command(name));
+    }
+    segments
+}
+
+fn command_key(key: impl Into<String>) -> [HelpSegment; 1] {
+    [HelpSegment::command(key)]
+}
+
+fn action_keys(
+    keybinds: KeybindMap,
+    actions: impl IntoIterator<Item = BuiltinAction>,
+) -> Vec<HelpSegment> {
+    key_names(actions.into_iter().map(|action| keybinds.display(action)))
 }
 
 fn help_command_style(theme: Theme) -> Style {
     help_style(theme.accent, theme).add_modifier(Modifier::BOLD)
+}
+
+fn help_section_style(theme: Theme) -> Style {
+    help_style(theme.text, theme).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
 fn help_style(foreground: Color, theme: Theme) -> Style {
@@ -989,14 +1012,16 @@ mod tests {
         let worktree_help = help_text(true);
         let pr_help = help_text(false);
 
-        assert!(worktree_help.contains("Space stage/unstage focused file or hunk"));
-        assert!(worktree_help.contains("d discard focused file, folder, or hunk"));
-        assert!(worktree_help.contains("e open selected file in $EDITOR"));
-        assert!(worktree_help.contains("a Ask AI about focused file or hunk"));
-        assert!(worktree_help.contains("x Explain focused file or hunk with Ask AI"));
+        assert!(worktree_help.contains("Space  stage/unstage focused file or hunk"));
+        assert!(worktree_help.contains("d      discard focused file, folder, or hunk"));
+        assert!(worktree_help.contains("e      open selected file in $EDITOR"));
+        assert!(worktree_help.contains("a                Ask AI about focused file or hunk"));
+        assert!(
+            worktree_help.contains("x                Explain focused file or hunk with Ask AI")
+        );
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
-        assert!(!pr_help.contains("Space stage/unstage focused file or hunk"));
-        assert!(!pr_help.contains("d discard focused file, folder, or hunk"));
+        assert!(!pr_help.contains("stage/unstage focused file or hunk"));
+        assert!(!pr_help.contains("discard focused file, folder, or hunk"));
     }
 
     #[test]
@@ -1004,8 +1029,86 @@ mod tests {
         let worktree_help = help_text(true);
         let pr_help = help_text(false);
 
-        assert!(worktree_help.contains("r toggle reviewed for selected file"));
-        assert!(pr_help.contains("r toggle reviewed for selected file"));
+        assert!(worktree_help.contains("r      toggle reviewed for selected file"));
+        assert!(pr_help.contains("r      toggle reviewed for selected file"));
+    }
+
+    #[test]
+    fn help_overlay_uses_distinct_header_and_key_colors() {
+        let theme = Theme::github_dark();
+
+        assert_eq!(help_section_style(theme).fg, Some(theme.text));
+        assert_eq!(help_command_style(theme).fg, Some(theme.accent));
+        assert_ne!(help_section_style(theme).fg, help_command_style(theme).fg);
+        assert!(
+            help_section_style(theme)
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
+    }
+
+    #[test]
+    fn help_overlay_aligns_descriptions_by_section() {
+        let lines = help_lines(true, 80);
+        let texts = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        let help_column = column_of(&texts, "help/dismiss");
+        assert_eq!(column_of(&texts, "close help or quit"), help_column);
+        assert_eq!(column_of(&texts, "focus panes"), help_column);
+
+        let diff_column = column_of(&texts, "scroll row");
+        assert_eq!(column_of(&texts, "page"), diff_column);
+        assert_eq!(column_of(&texts, "copy selected file diff"), diff_column);
+    }
+
+    #[test]
+    fn help_overlay_aligns_custom_commands() {
+        let commands = [
+            custom_command("P", "publish", "git push"),
+            custom_command("B", "build release", "cargo build --release"),
+        ];
+        let lines = help_overlay_lines(
+            true,
+            true,
+            &commands,
+            KeybindMap::defaults(),
+            80,
+            Theme::github_dark(),
+        );
+        let texts = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        let label_column = column_of(&texts, "publish");
+        assert_eq!(column_of(&texts, "build release"), label_column);
+        assert!(
+            texts
+                .iter()
+                .any(|line| line.contains("P  publish  git push"))
+        );
+    }
+
+    #[test]
+    fn help_overlay_wraps_cleanly_in_narrow_widths() {
+        let lines = help_overlay_lines(
+            true,
+            true,
+            &[],
+            KeybindMap::defaults(),
+            24,
+            Theme::github_dark(),
+        );
+        let help = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        for line in &lines {
+            assert!(
+                line.width() <= 24,
+                "line exceeded content width: {:?}",
+                line_text(line)
+            );
+        }
+        assert!(help.contains("help/dismiss"));
+        assert!(help.contains("close help or quit"));
+        assert!(help.contains("stage/unstage"));
+        assert!(help.contains("focused file or hunk"));
     }
 
     #[test]
@@ -1024,18 +1127,37 @@ mod tests {
     }
 
     fn help_text(can_stage: bool) -> String {
+        help_lines(can_stage, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn help_lines(can_stage: bool, content_width: usize) -> Vec<Line<'static>> {
         help_overlay_lines(
             can_stage,
             can_stage,
             &[],
             KeybindMap::defaults(),
-            80,
+            content_width,
             Theme::github_dark(),
         )
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n")
+    }
+
+    fn custom_command(key: &str, label: &str, command: &str) -> CustomCommandBinding {
+        CustomCommandBinding::new(
+            crate::custom_command::CommandKey::parse(key).unwrap(),
+            label.to_string(),
+            command.to_string(),
+        )
+    }
+
+    fn column_of(lines: &[String], needle: &str) -> usize {
+        lines
+            .iter()
+            .find_map(|line| line.find(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?} in {lines:#?}"))
     }
 
     fn line_text(line: &Line<'_>) -> String {

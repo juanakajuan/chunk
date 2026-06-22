@@ -444,7 +444,7 @@ mod tests {
         let buffer = buffer_text(terminal.backend().buffer());
 
         assert!(
-            buffer.contains("P publish  git push"),
+            buffer.contains("P  publish  git push"),
             "buffer was {buffer}"
         );
     }
