@@ -568,6 +568,18 @@ fn files_panel_hover_changes_pane_focus_without_changing_tree_focus() {
 }
 
 #[test]
+fn files_panel_hover_changes_focus_on_empty_panel_space() {
+    let mut app = app_with(changeset_with_one_file());
+    app.focus = FocusPane::Diff;
+    render_sidebar(&mut app);
+
+    app.handle_hover(1, 6);
+
+    assert_eq!(app.focus, FocusPane::Sidebar);
+    assert_eq!(app.sidebar_cursor_target, None);
+}
+
+#[test]
 fn keyboard_tree_navigation_can_discard_focused_folder() {
     let mut app = app_with(changeset_with_paths([
         "src/app.rs",

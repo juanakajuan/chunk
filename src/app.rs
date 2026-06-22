@@ -724,13 +724,8 @@ impl App {
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) {
-        if self.sidebar_target_at(column, row).is_some() {
-            self.focus = FocusPane::Sidebar;
-            return;
-        }
-
-        if self.is_diff_at(column, row) {
-            self.focus = FocusPane::Diff;
+        if let Some(focus) = self.pane_at(column, row) {
+            self.focus = focus;
         }
     }
 
