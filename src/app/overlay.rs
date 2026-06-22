@@ -382,7 +382,7 @@ impl App {
             && !*cancelling
         {
             *cancelling = true;
-            self.ask_ai_cancel_request = true;
+            self.queue_ask_ai_cancel_effect();
         }
     }
 

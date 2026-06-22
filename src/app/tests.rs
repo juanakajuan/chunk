@@ -423,9 +423,8 @@ fn text_drag_requests_clipboard_copy() {
         modifiers: KeyModifiers::NONE,
     });
 
-    let request = app
-        .take_clipboard_request()
-        .expect("text drag should request clipboard copy");
+    let request =
+        take_clipboard_request(&mut app).expect("text drag should request clipboard copy");
     assert_eq!(request.text(), "bcd");
     assert_eq!(request.success_message(), "copied selected text");
 }
@@ -439,9 +438,7 @@ fn sidebar_y_copies_selected_file_path() {
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
 
-    let request = app
-        .take_clipboard_request()
-        .expect("selected file path should be copied");
+    let request = take_clipboard_request(&mut app).expect("selected file path should be copied");
     assert_eq!(request.text(), "b.txt");
     assert_eq!(request.success_message(), "copied selected file path");
 }
@@ -453,9 +450,8 @@ fn diff_copy_keys_copy_hunk_or_file_diff() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
-    let hunk_request = app
-        .take_clipboard_request()
-        .expect("selected hunk diff should be copied");
+    let hunk_request =
+        take_clipboard_request(&mut app).expect("selected hunk diff should be copied");
     assert!(
         hunk_request
             .text()
@@ -467,9 +463,8 @@ fn diff_copy_keys_copy_hunk_or_file_diff() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
         .unwrap();
-    let file_request = app
-        .take_clipboard_request()
-        .expect("selected file diff should be copied");
+    let file_request =
+        take_clipboard_request(&mut app).expect("selected file diff should be copied");
     assert!(file_request.text().contains("@@ -1,8 +1,8 @@"));
     assert!(file_request.text().contains("@@ -20 +20 @@"));
     assert_eq!(file_request.success_message(), "copied selected file diff");
@@ -797,9 +792,7 @@ fn custom_command_key_queues_command_request() {
     app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT))
         .unwrap();
 
-    let request = app
-        .take_custom_command_request()
-        .expect("custom command should be queued");
+    let request = take_custom_command_request(&mut app).expect("custom command should be queued");
     assert_eq!(request.label(), "commit");
     assert_eq!(request.command(), "git commit");
 }
@@ -896,8 +889,7 @@ fn custom_command_runs_on_key_freed_by_remapped_builtin() {
     app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .unwrap();
 
-    let request = app
-        .take_custom_command_request()
+    let request = take_custom_command_request(&mut app)
         .expect("freed default key should run the custom command");
     assert_eq!(request.label(), "quick");
 }
@@ -1120,9 +1112,7 @@ fn ask_ai_key_from_files_panel_queues_file_context() {
 
     enter_ask_ai_question(&mut app, "Why changed?");
 
-    let request = app
-        .take_ask_ai_request()
-        .expect("Ask AI request should be queued");
+    let request = take_ask_ai_request(&mut app).expect("Ask AI request should be queued");
     assert_eq!(request.question(), "Why changed?");
     assert_eq!(request.context().summary(), "sample.txt");
     assert!(app.overlay.is_none());
@@ -1145,9 +1135,7 @@ fn ask_ai_key_from_diff_pane_queues_hunk_context() {
 
     enter_ask_ai_question(&mut app, "Why changed?");
 
-    let request = app
-        .take_ask_ai_request()
-        .expect("Ask AI request should be queued");
+    let request = take_ask_ai_request(&mut app).expect("Ask AI request should be queued");
     assert_eq!(request.question(), "Why changed?");
     assert_eq!(request.context().summary(), "sample.txt hunk 1");
     assert!(app.overlay.is_none());
@@ -1163,9 +1151,7 @@ fn explain_code_key_from_files_panel_queues_file_context() {
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
         .unwrap();
 
-    let request = app
-        .take_ask_ai_request()
-        .expect("Explain Code request should be queued");
+    let request = take_ask_ai_request(&mut app).expect("Explain Code request should be queued");
     assert_explain_code_question(request.question());
     assert_eq!(request.context().summary(), "sample.txt");
     assert!(app.overlay.is_none());
@@ -1182,9 +1168,7 @@ fn explain_code_key_from_diff_pane_queues_hunk_context() {
     app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
         .unwrap();
 
-    let request = app
-        .take_ask_ai_request()
-        .expect("Explain Code request should be queued");
+    let request = take_ask_ai_request(&mut app).expect("Explain Code request should be queued");
     assert_explain_code_question(request.question());
     assert_eq!(request.context().summary(), "sample.txt hunk 1");
     assert!(app.overlay.is_none());
@@ -1211,8 +1195,8 @@ fn ask_ai_running_can_be_cancelled() {
             ..
         })
     ));
-    assert!(app.take_ask_ai_cancel_request());
-    assert!(!app.take_ask_ai_cancel_request());
+    assert!(take_ask_ai_cancel_request(&mut app));
+    assert!(!take_ask_ai_cancel_request(&mut app));
 }
 
 #[test]
@@ -1258,9 +1242,7 @@ fn ask_ai_output_y_copies_answer_text() {
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
 
-    let request = app
-        .take_clipboard_request()
-        .expect("Ask AI answer should be copied");
+    let request = take_clipboard_request(&mut app).expect("Ask AI answer should be copied");
     assert_eq!(request.text(), "answer\n");
     assert_eq!(request.success_message(), "copied Ask AI answer");
     assert!(app.ask_ai_output().is_some());
@@ -1272,6 +1254,39 @@ fn ask_ai_output_y_copies_answer_text() {
 
 fn app_with(changeset: Changeset) -> App {
     App::new(LoadedReview::worktree(changeset))
+}
+
+fn take_clipboard_request(app: &mut App) -> Option<ClipboardRequest> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::CopyToClipboard(request) => Some(request),
+            _ => None,
+        })
+}
+
+fn take_custom_command_request(app: &mut App) -> Option<CustomCommandBinding> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::RunCustomCommand(command) => Some(command),
+            _ => None,
+        })
+}
+
+fn take_ask_ai_request(app: &mut App) -> Option<AskAiRequest> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::RunAskAi(request) => Some(request),
+            _ => None,
+        })
+}
+
+fn take_ask_ai_cancel_request(app: &mut App) -> bool {
+    app.take_effects()
+        .into_iter()
+        .any(|effect| matches!(effect, AppEffect::CancelAskAi))
 }
 
 fn app_with_config(config: AppConfig) -> App {

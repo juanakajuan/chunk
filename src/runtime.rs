@@ -19,7 +19,7 @@ use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::app::App;
+use crate::app::{App, AppEffect, ClipboardRequest};
 use crate::ask_ai::{self, AskAiRequest, AskAiResult};
 use crate::clipboard;
 use crate::custom_command::{self, CustomCommandBinding, CustomCommandResult};
@@ -202,7 +202,7 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
             Event::Key(_) => {}
             Event::Mouse(mouse) => {
                 app.handle_mouse(mouse);
-                write_clipboard_request(app);
+                handle_app_effects(terminal, app, &mut custom_command_task, &mut ask_ai_task)?;
             }
             _ => {}
         }
@@ -222,34 +222,39 @@ fn handle_key_event(
         return Ok(false);
     }
 
-    if let Some(request) = app.take_editor_request() {
-        open_requested_editor(terminal, app, &request)?;
-    }
-
-    if let Some(command) = app.take_custom_command_request() {
-        start_requested_custom_command(terminal, app, command, custom_command_task)?;
-    }
-
-    if app.take_ask_ai_cancel_request()
-        && let Some(task) = ask_ai_task.as_ref()
-    {
-        task.request_cancel();
-    }
-
-    if let Some(request) = app.take_ask_ai_request() {
-        start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
-    }
-
-    write_clipboard_request(app);
+    handle_app_effects(terminal, app, custom_command_task, ask_ai_task)?;
 
     Ok(true)
 }
 
-fn write_clipboard_request(app: &mut App) {
-    let Some(request) = app.take_clipboard_request() else {
-        return;
-    };
+fn handle_app_effects(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    custom_command_task: &mut Option<BackgroundTask<CustomCommandResult>>,
+    ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
+) -> Result<()> {
+    for effect in app.take_effects() {
+        match effect {
+            AppEffect::OpenEditor(request) => open_requested_editor(terminal, app, &request)?,
+            AppEffect::RunCustomCommand(command) => {
+                start_requested_custom_command(terminal, app, command, custom_command_task)?;
+            }
+            AppEffect::RunAskAi(request) => {
+                start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
+            }
+            AppEffect::CancelAskAi => {
+                if let Some(task) = ask_ai_task.as_ref() {
+                    task.request_cancel();
+                }
+            }
+            AppEffect::CopyToClipboard(request) => write_clipboard_request(app, &request),
+        }
+    }
 
+    Ok(())
+}
+
+fn write_clipboard_request(app: &mut App, request: &ClipboardRequest) {
     if let Err(error) = clipboard::write_text(request.text()) {
         app.set_live_error(format!("copy failed: {error}"));
     } else {

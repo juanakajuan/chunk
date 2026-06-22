@@ -5,7 +5,7 @@
 //! live in `runtime`; rendered row preparation lives here while `ui` draws
 //! Ratatui widgets.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
@@ -108,6 +108,15 @@ impl ClipboardRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AppEffect {
+    OpenEditor(EditorRequest),
+    RunCustomCommand(CustomCommandBinding),
+    RunAskAi(AskAiRequest),
+    CancelAskAi,
+    CopyToClipboard(ClipboardRequest),
+}
+
 #[derive(Debug)]
 pub(crate) struct App {
     /// Review source behavior for this session.
@@ -135,14 +144,8 @@ pub(crate) struct App {
     keybinds: KeybindMap,
     /// User-selected UI and syntax palette.
     theme: ThemeName,
-    /// Deferred request for runtime to execute a configured shell command safely.
-    custom_command_request: Option<CustomCommandBinding>,
-    /// Deferred request for runtime to invoke OpenCode in read-only mode.
-    ask_ai_request: Option<AskAiRequest>,
-    /// Deferred request for runtime to cancel the active Ask AI task.
-    ask_ai_cancel_request: bool,
-    /// Deferred request for runtime to write explicit copied text.
-    clipboard_request: Option<ClipboardRequest>,
+    /// Deferred runtime effects requested by application behavior.
+    effects: VecDeque<AppEffect>,
     /// First rendered diff row visible in the diff pane.
     diff_scroll: usize,
     /// First file index considered for sidebar rendering.
@@ -159,8 +162,6 @@ pub(crate) struct App {
     pending_left_click: Option<PendingLeftClick>,
     /// Active mouse drag against the rendered diff scrollbar.
     diff_scrollbar_drag: Option<DiffScrollbarDrag>,
-    /// Deferred request for runtime to open an external editor safely.
-    editor_request: Option<EditorRequest>,
     /// Literal search prompt, query, matches, and active match.
     search: Search,
     /// Display paths marked reviewed in this session. Keyed by `display_path`
@@ -197,10 +198,7 @@ impl App {
             custom_commands: config.commands,
             keybinds: config.keybinds,
             theme: config.theme,
-            custom_command_request: None,
-            ask_ai_request: None,
-            ask_ai_cancel_request: false,
-            clipboard_request: None,
+            effects: VecDeque::new(),
             diff_scroll: 0,
             sidebar_scroll: 0,
             collapsed_tree_dirs: HashSet::new(),
@@ -209,7 +207,6 @@ impl App {
             text_selection: TextSelection::default(),
             pending_left_click: None,
             diff_scrollbar_drag: None,
-            editor_request: None,
             search: Search::default(),
             reviewed_files: HashSet::new(),
         }
@@ -428,30 +425,54 @@ impl App {
         self.live_notice = Some(notice);
     }
 
-    pub(crate) fn take_editor_request(&mut self) -> Option<EditorRequest> {
-        self.editor_request.take()
+    pub(crate) fn take_effects(&mut self) -> Vec<AppEffect> {
+        let has_clipboard_effect = self
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, AppEffect::CopyToClipboard(_)));
+        let mut effects = self.effects.drain(..).collect::<Vec<_>>();
+
+        if !has_clipboard_effect && let Some(text) = self.text_selection.take_clipboard_request() {
+            effects.push(AppEffect::CopyToClipboard(ClipboardRequest::new(
+                text,
+                "copied selected text",
+            )));
+        }
+
+        effects
     }
 
-    pub(crate) fn take_custom_command_request(&mut self) -> Option<CustomCommandBinding> {
-        self.custom_command_request.take()
+    fn queue_editor_effect(&mut self, request: EditorRequest) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::OpenEditor(_)));
+        self.effects.push_back(AppEffect::OpenEditor(request));
     }
 
-    pub(crate) fn take_ask_ai_request(&mut self) -> Option<AskAiRequest> {
-        self.ask_ai_request.take()
+    fn queue_custom_command_effect(&mut self, command: CustomCommandBinding) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::RunCustomCommand(_)));
+        self.effects.push_back(AppEffect::RunCustomCommand(command));
     }
 
-    pub(crate) fn take_ask_ai_cancel_request(&mut self) -> bool {
-        let requested = self.ask_ai_cancel_request;
-        self.ask_ai_cancel_request = false;
-        requested
+    fn queue_ask_ai_request_effect(&mut self, request: AskAiRequest) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::RunAskAi(_)));
+        self.effects.push_back(AppEffect::RunAskAi(request));
     }
 
-    pub(crate) fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
-        self.clipboard_request.take().or_else(|| {
-            self.text_selection
-                .take_clipboard_request()
-                .map(|text| ClipboardRequest::new(text, "copied selected text"))
-        })
+    fn queue_ask_ai_cancel_effect(&mut self) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::CancelAskAi));
+        self.effects.push_back(AppEffect::CancelAskAi);
+    }
+
+    fn queue_clipboard_effect(&mut self, request: ClipboardRequest) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::CopyToClipboard(_)));
+        self.effects.push_back(AppEffect::CopyToClipboard(request));
+    }
+
+    fn clear_clipboard_effect(&mut self) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::CopyToClipboard(_)));
+    }
+
+    fn clear_effects(&mut self, mut should_clear: impl FnMut(&AppEffect) -> bool) {
+        self.effects.retain(|effect| !should_clear(effect));
     }
 
     pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
@@ -861,7 +882,7 @@ impl App {
             return;
         }
 
-        self.ask_ai_request = Some(AskAiRequest::new(question, prompt.context));
+        self.queue_ask_ai_request_effect(AskAiRequest::new(question, prompt.context));
     }
 
     fn queue_explain_code_request(&mut self) {
@@ -875,7 +896,7 @@ impl App {
 
         self.focus = FocusPane::Diff;
         self.live_error = None;
-        self.ask_ai_request = Some(AskAiRequest::explain_code(context));
+        self.queue_ask_ai_request_effect(AskAiRequest::explain_code(context));
     }
 
     fn queue_copy_for_key(&mut self, key: KeyEvent) -> bool {
@@ -947,11 +968,11 @@ impl App {
     fn queue_clipboard_text(&mut self, text: String, success_message: &'static str) {
         self.live_error = None;
         self.live_notice = None;
-        self.clipboard_request = Some(ClipboardRequest::new(text, success_message));
+        self.queue_clipboard_effect(ClipboardRequest::new(text, success_message));
     }
 
     fn set_copy_error(&mut self, message: &'static str) {
-        self.clipboard_request = None;
+        self.clear_clipboard_effect();
         self.live_notice = None;
         self.live_error = Some(message.to_string());
     }
@@ -967,7 +988,7 @@ impl App {
         };
 
         self.live_error = None;
-        self.custom_command_request = Some(command);
+        self.queue_custom_command_effect(command);
         true
     }
 
@@ -1389,7 +1410,7 @@ impl App {
     }
 
     fn queue_selected_file_editor_request(&mut self) {
-        self.editor_request = None;
+        self.clear_effects(|effect| matches!(effect, AppEffect::OpenEditor(_)));
         let request = match self.focused_review_target().editor() {
             Ok(target) => self.source.editor_request(target.file),
             Err(error) => {
@@ -1401,7 +1422,7 @@ impl App {
         match request {
             Ok(request) => {
                 self.live_error = None;
-                self.editor_request = Some(request);
+                self.queue_editor_effect(request);
             }
             Err(error) => self.live_error = Some(format!("edit failed: {error}")),
         }
