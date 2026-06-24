@@ -6,10 +6,10 @@ use super::{App, overlay::Overlay};
 pub(super) fn apply_changeset(app: &mut App, changeset: Changeset, preserve_scroll: bool) {
     let previous_identity = app.selected_file().map(file_identity);
     let previous_hunk_identity = app.selected_hunk().map(hunk_identity);
-    let previous_hunk_index = app.selected_hunk_index;
+    let previous_hunk_index = app.diff_pane.selected_hunk_index();
     let previous_sidebar_target = app.sidebar_cursor_target.clone();
     let previous_index = app.selected_file_index;
-    let previous_scroll = app.diff_scroll;
+    let previous_scroll = app.diff_pane.scroll();
     let reselected_file_index = previous_identity
         .as_deref()
         .and_then(|identity| find_file_index(&changeset, identity));
@@ -25,35 +25,21 @@ pub(super) fn apply_changeset(app: &mut App, changeset: Changeset, preserve_scro
     app.text_selection.clear();
     app.selected_file_index = selected_file_index;
     app.sidebar_cursor_target = reloaded_sidebar_target(previous_sidebar_target, &app.changeset);
-    app.selected_hunk_index = reloaded_hunk_index(
+    app.diff_pane.set_selected_hunk_index(reloaded_hunk_index(
         app.changeset.files.get(selected_file_index),
         kept_selection,
         previous_hunk_identity,
         previous_hunk_index,
-    );
-    app.diff_scroll = if preserve_scroll && kept_selection {
-        previous_scroll
-    } else {
-        0
-    };
+    ));
+    app.diff_pane
+        .set_scroll(if preserve_scroll && kept_selection {
+            previous_scroll
+        } else {
+            0
+        });
     app.clear_render_caches();
     app.invalidate_search_matches();
     app.ensure_scroll_bounds();
-}
-
-pub(super) fn initial_selected_hunk_index(changeset: &Changeset) -> Option<usize> {
-    changeset
-        .files
-        .first()
-        .and_then(|file| bounded_hunk_index(file, None))
-}
-
-pub(super) fn bounded_hunk_index(file: &DiffFile, index: Option<usize>) -> Option<usize> {
-    if file.hunks.is_empty() {
-        None
-    } else {
-        Some(index.unwrap_or(0).min(file.hunks.len() - 1))
-    }
 }
 
 fn file_identity(file: &DiffFile) -> String {

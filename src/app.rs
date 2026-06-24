@@ -23,12 +23,12 @@ use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource};
 use crate::rows::{self, SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
 use crate::scroll_text::VerticalDirection;
-use crate::search::Search;
 use crate::selection::TextSelection;
 use crate::theme::{Theme, ThemeName};
 use crate::viewport::{DiffScrollbar, DiffScrollbarDrag, RenderedViewport, ViewportScrollInput};
 
 mod diff_frame;
+mod diff_pane;
 mod focused_review_target;
 mod keys;
 mod overlay;
@@ -37,10 +37,10 @@ mod search;
 
 pub(crate) use keys::accepts_text_input;
 
+use diff_pane::DiffPaneState;
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
-use reload::{bounded_hunk_index, initial_selected_hunk_index};
 
 const MOUSE_WHEEL_STEP: usize = 3;
 const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
@@ -131,8 +131,8 @@ pub(crate) struct App {
     live_notice: Option<String>,
     /// Index into `changeset.files`.
     selected_file_index: usize,
-    /// Index into the selected file's hunks.
-    selected_hunk_index: Option<usize>,
+    /// Diff-pane scroll, hunk selection, search, and render-derived navigation state.
+    diff_pane: DiffPaneState,
     /// Pane receiving keyboard and mouse wheel actions.
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
@@ -148,8 +148,6 @@ pub(crate) struct App {
     theme: ThemeName,
     /// Deferred runtime effects requested by application behavior.
     effects: VecDeque<AppEffect>,
-    /// First rendered diff row visible in the diff pane.
-    diff_scroll: usize,
     /// First file index considered for sidebar rendering.
     sidebar_scroll: usize,
     /// Collapsed tree directory paths in the current session.
@@ -164,8 +162,6 @@ pub(crate) struct App {
     pending_left_click: Option<PendingLeftClick>,
     /// Active mouse drag against the rendered diff scrollbar.
     diff_scrollbar_drag: Option<DiffScrollbarDrag>,
-    /// Literal search prompt, query, matches, and active match.
-    search: Search,
     /// Display paths marked reviewed in this session. Keyed by `display_path`
     /// so review state survives reloads as long as file identity stays stable.
     reviewed_files: HashSet<String>,
@@ -186,14 +182,14 @@ impl App {
     pub(crate) fn with_config(review: LoadedReview, config: AppConfig) -> Self {
         let LoadedReview { source, changeset } = review;
         let file_count = changeset.files.len();
-        let selected_hunk_index = initial_selected_hunk_index(&changeset);
+        let diff_pane = DiffPaneState::new(&changeset);
         Self {
             source,
             changeset,
             live_error: None,
             live_notice: None,
             selected_file_index: 0,
-            selected_hunk_index,
+            diff_pane,
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             overlay: None,
@@ -201,7 +197,6 @@ impl App {
             keybinds: config.keybinds,
             theme: config.theme,
             effects: VecDeque::new(),
-            diff_scroll: 0,
             sidebar_scroll: 0,
             collapsed_tree_dirs: HashSet::new(),
             sidebar_cursor_target: None,
@@ -209,7 +204,6 @@ impl App {
             text_selection: TextSelection::default(),
             pending_left_click: None,
             diff_scrollbar_drag: None,
-            search: Search::default(),
             reviewed_files: HashSet::new(),
         }
     }
@@ -379,45 +373,33 @@ impl App {
     }
 
     fn selected_hunk(&self) -> Option<&DiffHunk> {
-        self.selected_file()?.hunks.get(self.selected_hunk_index?)
+        self.diff_pane.selected_hunk(self.selected_file())
     }
 
     fn focused_review_target(&self) -> FocusedReviewTarget<'_> {
         FocusedReviewTarget::new(
             &self.changeset.files,
             self.selected_file_index,
-            self.selected_hunk_index,
+            self.diff_pane.selected_hunk_index(),
             self.focus,
             self.files_panel_visible,
         )
     }
 
     fn ensure_scroll_bounds(&mut self) {
-        self.ensure_selected_hunk_bounds();
-        let scrolls = self.viewport.clamped_scrolls(self.viewport_scroll_input());
-        self.diff_scroll = scrolls.diff_scroll;
-        self.sidebar_scroll = scrolls.sidebar_scroll;
-    }
-
-    fn ensure_selected_hunk_bounds(&mut self) {
-        let Some(file) = self.selected_file() else {
-            self.selected_hunk_index = None;
-            return;
-        };
-
-        self.selected_hunk_index = bounded_hunk_index(file, self.selected_hunk_index);
-    }
-
-    fn viewport_scroll_input(&self) -> ViewportScrollInput<'_> {
-        let selected_file = self.selected_file();
-        ViewportScrollInput {
-            diff_scroll: self.diff_scroll,
+        let selected_file = self.changeset.files.get(self.selected_file_index);
+        let input = ViewportScrollInput {
+            diff_scroll: self.diff_pane.scroll(),
             sidebar_scroll: self.sidebar_scroll,
             selected_file_index: self.selected_file_index,
             file_count: self.changeset.files.len(),
             selected_file_id: selected_file.map(|file| file.id.as_str()),
             selected_file_line_count: selected_file.map_or(0, DiffFile::line_count),
-        }
+        };
+
+        self.sidebar_scroll = self
+            .diff_pane
+            .ensure_bounds(selected_file, &self.viewport, input);
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
@@ -724,8 +706,12 @@ impl App {
             PendingLeftClick::Diff { hunk_index } => {
                 self.focus = FocusPane::Diff;
                 if let Some(index) = hunk_index {
-                    self.selected_hunk_index = Some(index);
-                    self.center_selected_hunk();
+                    self.diff_pane.set_selected_hunk_index(Some(index));
+                    self.diff_pane.center_selected_hunk(
+                        &self.viewport,
+                        self.selected_file_index,
+                        self.changeset.files.get(self.selected_file_index),
+                    );
                 }
             }
         }
@@ -808,7 +794,12 @@ impl App {
         let visible_row = self.viewport.diff_row_at(column, row)?;
         let diff_row = visible_row.checked_sub(self.viewport.diff_status_rows())?;
 
-        self.hunk_index_at_rendered_row(self.diff_scroll.saturating_add(diff_row))
+        self.diff_pane.hunk_index_at_rendered_row(
+            &self.viewport,
+            self.selected_file_index,
+            self.changeset.files.get(self.selected_file_index),
+            self.diff_pane.scroll().saturating_add(diff_row),
+        )
     }
 
     fn diff_scrollbar_drag_at(&self, column: u16, row: u16) -> Option<(DiffScrollbarDrag, usize)> {
@@ -1082,93 +1073,49 @@ impl App {
 
         self.selected_file_index = index.min(self.changeset.files.len() - 1);
         self.sidebar_cursor_target = Some(SidebarRowTarget::File(self.selected_file_index));
-        self.selected_hunk_index = self
-            .selected_file()
-            .and_then(|file| bounded_hunk_index(file, None));
-        self.diff_scroll = 0;
-        self.invalidate_search_matches();
+        self.diff_pane
+            .select_file(self.changeset.files.get(self.selected_file_index));
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
-        self.scroll_diff_by(direction, self.viewport.diff_view_height());
+        self.diff_pane.scroll_page(
+            direction,
+            &self.viewport,
+            self.selected_file_index,
+            self.changeset.files.get(self.selected_file_index),
+        );
     }
 
     fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
-        self.diff_scroll = direction.shift(self.diff_scroll, amount);
-        self.select_hunk_at_scroll();
+        self.diff_pane.scroll_by(
+            direction,
+            amount,
+            &self.viewport,
+            self.selected_file_index,
+            self.changeset.files.get(self.selected_file_index),
+        );
     }
 
     fn scroll_diff_to(&mut self, scroll: usize) {
-        self.diff_scroll = scroll;
-        self.select_hunk_at_scroll();
+        self.diff_pane.scroll_to(
+            scroll,
+            &self.viewport,
+            self.selected_file_index,
+            self.changeset.files.get(self.selected_file_index),
+        );
     }
 
     fn scroll_diff_to_top(&mut self) {
-        self.diff_scroll = 0;
-        self.select_hunk_at_scroll();
+        self.diff_pane.scroll_to_top(
+            &self.viewport,
+            self.selected_file_index,
+            self.changeset.files.get(self.selected_file_index),
+        );
     }
 
     fn scroll_diff_to_bottom(&mut self) {
-        self.diff_scroll = usize::MAX;
-        self.selected_hunk_index = self
-            .selected_file()
-            .and_then(|file| file.hunks.len().checked_sub(1));
-    }
-
-    fn jump_hunk(&mut self, direction: VerticalDirection) {
-        let Some(hunk_count) = self.selected_file().map(|file| file.hunks.len()) else {
-            return;
-        };
-        if hunk_count == 0 {
-            self.selected_hunk_index = None;
-            return;
-        }
-
-        let current = self
-            .selected_hunk_index
-            .or_else(|| self.hunk_index_at_rendered_row(self.diff_scroll))
-            .unwrap_or(0)
-            .min(hunk_count - 1);
-        let target = direction.shift_clamped(current, 1, hunk_count - 1);
-
-        self.selected_hunk_index = Some(target);
-        self.center_selected_hunk();
-    }
-
-    fn center_selected_hunk(&mut self) {
-        let Some(index) = self.selected_hunk_index else {
-            return;
-        };
-        let Some((file_id, hunk_count)) = self
-            .selected_file()
-            .map(|file| (file.id.clone(), file.hunks.len()))
-        else {
-            return;
-        };
-        if index >= hunk_count {
-            return;
-        }
-
-        if let Some(offset) =
-            self.viewport
-                .hunk_offset(self.selected_file_index, file_id.as_str(), index)
-        {
-            self.diff_scroll = offset.saturating_sub(self.viewport.diff_view_height() / 2);
-        }
-    }
-
-    fn select_hunk_at_scroll(&mut self) {
-        self.selected_hunk_index = self.hunk_index_at_rendered_row(self.diff_scroll);
-    }
-
-    fn hunk_index_at_rendered_row(&self, rendered_row: usize) -> Option<usize> {
-        let file = self.selected_file()?;
-        self.viewport.hunk_index_at(
-            self.selected_file_index,
-            file.id.as_str(),
-            rendered_row,
-            file.hunks.len(),
-        )
+        self.diff_pane
+            .scroll_to_bottom(self.changeset.files.get(self.selected_file_index));
     }
 
     fn toggle_selected_staging(&mut self) {

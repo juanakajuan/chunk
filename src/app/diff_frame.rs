@@ -112,8 +112,11 @@ impl<'a> DiffFrameRenderer<'a> {
         self.app.ensure_scroll_bounds();
 
         if pending_search_scroll {
-            self.app.scroll_active_search_match();
-            self.app.select_hunk_at_scroll();
+            self.app.diff_pane.scroll_active_search_match(
+                &self.app.viewport,
+                self.app.selected_file_index,
+                self.app.changeset.files.get(self.app.selected_file_index),
+            );
             self.app.ensure_scroll_bounds();
         }
 
@@ -268,7 +271,7 @@ impl<'a> DiffFrameRenderer<'a> {
             file.id.clone(),
             total_diff_rows,
             visible_diff_height,
-            self.app.diff_scroll,
+            self.app.diff_pane.scroll(),
         ))
     }
 
@@ -357,7 +360,7 @@ impl<'a> DiffFrameRenderer<'a> {
 
         let mut lines = self.app.viewport.visible_diff_lines(
             self.app.selected_file_index,
-            self.app.diff_scroll,
+            self.app.diff_pane.scroll(),
             visible_height,
         );
         self.apply_selected_hunk_style(&mut lines, content_width);
@@ -434,7 +437,7 @@ impl<'a> DiffFrameRenderer<'a> {
     }
 
     fn apply_selected_hunk_style(&self, lines: &mut [Line<'static>], content_width: usize) {
-        let Some(selected_hunk_index) = self.app.selected_hunk_index else {
+        let Some(selected_hunk_index) = self.app.diff_pane.selected_hunk_index() else {
             return;
         };
         let Some(file) = self.app.selected_file() else {
@@ -451,7 +454,7 @@ impl<'a> DiffFrameRenderer<'a> {
             return;
         };
 
-        let visible_start = self.app.diff_scroll;
+        let visible_start = self.app.diff_pane.scroll();
         let visible_end = visible_start.saturating_add(lines.len());
         let header_rows = rows::selected_hunk_header_rows(
             hunk,
