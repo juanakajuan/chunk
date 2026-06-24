@@ -275,13 +275,13 @@ fn apply_path_change_metadata(
 ) -> bool {
     if let Some(path) = line.strip_prefix(from_prefix) {
         file.status = status;
-        file.old_path = path.to_string();
+        file.old_path = clean_git_path(path);
         return true;
     }
 
     if let Some(path) = line.strip_prefix(to_prefix) {
         file.status = status;
-        file.path = path.to_string();
+        file.path = clean_git_path(path);
         return true;
     }
 
@@ -306,22 +306,147 @@ fn update_path_unless_dev_null(target: &mut String, path: &str) {
 
 fn parse_diff_git_line(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("diff --git ")?;
-    let mut parts = rest.split_whitespace();
-    let old_path = clean_git_path(parts.next()?);
-    let new_path = clean_git_path(parts.next()?);
+    let (old_path, new_path) = parse_diff_git_paths(rest)?;
+    let old_path = clean_git_path(&old_path);
+    let new_path = clean_git_path(&new_path);
     Some((old_path, new_path))
+}
+
+fn parse_diff_git_paths(rest: &str) -> Option<(String, String)> {
+    let rest = rest.trim();
+    if rest.starts_with('"') {
+        return parse_quoted_diff_git_paths(rest);
+    }
+
+    parse_unquoted_diff_git_paths(rest)
+}
+
+fn parse_quoted_diff_git_paths(rest: &str) -> Option<(String, String)> {
+    let (old_path, rest) = parse_quoted_git_path(rest)?;
+    let (new_path, rest) = parse_quoted_git_path(rest.trim_start())?;
+    rest.trim().is_empty().then_some((old_path, new_path))
+}
+
+fn parse_unquoted_diff_git_paths(rest: &str) -> Option<(String, String)> {
+    let (_, new_prefix) = diff_side_prefixes(rest);
+    let delimiter = format!(" {new_prefix}");
+    let mut first_candidate = None;
+
+    for (index, _) in rest.match_indices(&delimiter) {
+        let old_path = rest[..index].to_string();
+        let new_path = rest[index + 1..].to_string();
+        let candidate = (old_path, new_path);
+
+        if clean_git_path(&candidate.0) == clean_git_path(&candidate.1) {
+            return Some(candidate);
+        }
+
+        first_candidate.get_or_insert(candidate);
+    }
+
+    first_candidate.or_else(|| {
+        rest.split_once(' ')
+            .map(|(old_path, new_path)| (old_path.to_string(), new_path.to_string()))
+    })
+}
+
+fn diff_side_prefixes(rest: &str) -> (&'static str, &'static str) {
+    if rest.starts_with("1/") {
+        ("1/", "2/")
+    } else {
+        ("a/", "b/")
+    }
 }
 
 fn clean_git_path(path: &str) -> String {
     let trimmed = path.trim();
-    let unquoted = trimmed.trim_matches('"');
+    let unquoted = parse_complete_quoted_git_path(trimmed).unwrap_or_else(|| trimmed.to_string());
     unquoted
         .strip_prefix("a/")
         .or_else(|| unquoted.strip_prefix("b/"))
         .or_else(|| unquoted.strip_prefix("1/"))
         .or_else(|| unquoted.strip_prefix("2/"))
-        .unwrap_or(unquoted)
+        .unwrap_or(&unquoted)
         .to_string()
+}
+
+fn parse_complete_quoted_git_path(path: &str) -> Option<String> {
+    let (decoded, rest) = parse_quoted_git_path(path)?;
+    rest.trim().is_empty().then_some(decoded)
+}
+
+fn parse_quoted_git_path(path: &str) -> Option<(String, &str)> {
+    let mut chars = path.char_indices();
+    let (_, first) = chars.next()?;
+    if first != '"' {
+        return None;
+    }
+
+    let mut bytes = Vec::new();
+    while let Some((index, value)) = chars.next() {
+        match value {
+            '"' => {
+                let rest = &path[index + value.len_utf8()..];
+                return Some((String::from_utf8_lossy(&bytes).to_string(), rest));
+            }
+            '\\' => push_escaped_git_path_byte(&mut bytes, &mut chars),
+            value => {
+                let mut encoded = [0; 4];
+                bytes.extend(value.encode_utf8(&mut encoded).as_bytes());
+            }
+        }
+    }
+
+    None
+}
+
+fn push_escaped_git_path_byte(bytes: &mut Vec<u8>, chars: &mut std::str::CharIndices<'_>) {
+    let Some((_, value)) = chars.next() else {
+        bytes.push(b'\\');
+        return;
+    };
+
+    match value {
+        'a' => bytes.push(0x07),
+        'b' => bytes.push(0x08),
+        'f' => bytes.push(0x0c),
+        'n' => bytes.push(b'\n'),
+        'r' => bytes.push(b'\r'),
+        't' => bytes.push(b'\t'),
+        'v' => bytes.push(0x0b),
+        '\\' => bytes.push(b'\\'),
+        '"' => bytes.push(b'"'),
+        '0'..='7' => push_octal_git_path_byte(bytes, value, chars),
+        value => {
+            let mut encoded = [0; 4];
+            bytes.extend(value.encode_utf8(&mut encoded).as_bytes());
+        }
+    }
+}
+
+fn push_octal_git_path_byte(
+    bytes: &mut Vec<u8>,
+    first: char,
+    chars: &mut std::str::CharIndices<'_>,
+) {
+    let mut value = first.to_digit(8).unwrap_or(0);
+    let mut consumed = 1;
+
+    while consumed < 3 {
+        let mut clone = chars.clone();
+        let Some((_, next)) = clone.next() else {
+            break;
+        };
+        let Some(digit) = next.to_digit(8) else {
+            break;
+        };
+
+        *chars = clone;
+        value = value * 8 + digit;
+        consumed += 1;
+    }
+
+    bytes.push(value.min(u8::MAX as u32) as u8);
 }
 
 fn parse_hunk_range(header: &str) -> Option<HunkRange> {
@@ -579,6 +704,69 @@ mod tests {
         let file = &changeset.files[0];
         assert_eq!(file.old_path, "old.rs");
         assert_eq!(file.path, "new.rs");
+        assert_eq!(file.status, FileStatus::Renamed);
+    }
+
+    #[test]
+    fn parses_binary_file_with_spaces_from_diff_header() {
+        let changeset = parse_unified_diff(
+            "diff --git a/image data.bin b/image data.bin\n\
+             index 8352675..eaf36c1 100644\n\
+             Binary files a/image data.bin and b/image data.bin differ\n",
+        );
+
+        let file = &changeset.files[0];
+        assert_eq!(file.old_path, "image data.bin");
+        assert_eq!(file.path, "image data.bin");
+        assert!(file.binary);
+    }
+
+    #[test]
+    fn parses_binary_file_with_embedded_side_marker_from_diff_header() {
+        let changeset = parse_unified_diff(
+            "diff --git a/foo b/bar.bin b/foo b/bar.bin\n\
+             new file mode 100644\n\
+             index 0000000..bdc955b\n\
+             Binary files /dev/null and b/foo b/bar.bin differ\n",
+        );
+
+        let file = &changeset.files[0];
+        assert_eq!(file.path, "foo b/bar.bin");
+        assert_eq!(file.status, FileStatus::Added);
+        assert!(file.binary);
+    }
+
+    #[test]
+    fn parses_quoted_paths_with_escaped_characters() {
+        let changeset = parse_unified_diff(
+            "diff --git \"a/tab\\tfile.txt\" \"b/tab\\tfile.txt\"\n\
+             index 1111111..2222222 100644\n\
+             --- \"a/tab\\tfile.txt\"\n\
+             +++ \"b/tab\\tfile.txt\"\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n",
+        );
+
+        let file = &changeset.files[0];
+        assert_eq!(file.old_path, "tab\tfile.txt");
+        assert_eq!(file.path, "tab\tfile.txt");
+        assert_eq!(file.additions, 1);
+        assert_eq!(file.deletions, 1);
+    }
+
+    #[test]
+    fn parses_quoted_rename_metadata_with_escaped_characters() {
+        let changeset = parse_unified_diff(
+            "diff --git \"a/tab\\told.txt\" \"b/tab\\tnew.txt\"\n\
+             similarity index 100%\n\
+             rename from \"tab\\told.txt\"\n\
+             rename to \"tab\\tnew.txt\"\n",
+        );
+
+        let file = &changeset.files[0];
+        assert_eq!(file.old_path, "tab\told.txt");
+        assert_eq!(file.path, "tab\tnew.txt");
         assert_eq!(file.status, FileStatus::Renamed);
     }
 
