@@ -29,12 +29,13 @@ pub(crate) struct LoadedPrDiff {
 }
 
 pub(crate) fn load_worktree_diff() -> Result<Changeset> {
-    let mut patch = git_diff_patch(&[], &["HEAD"], "git diff failed")?;
-    let untracked_paths = untracked_paths()?;
-    patch.push_str(&load_untracked_patches(&untracked_paths)?);
+    let root = worktree_root()?;
+    let mut patch = git_diff_patch_in(&root, &[], &["HEAD"], "git diff failed")?;
+    let untracked_paths = untracked_paths(&root)?;
+    patch.push_str(&load_untracked_patches(&root, &untracked_paths)?);
     let mut changeset = parse_unified_diff(&patch);
-    annotate_stage_states(&mut changeset, &untracked_paths)?;
-    annotate_hunk_stage_states(&mut changeset, &untracked_paths)?;
+    annotate_stage_states(&root, &mut changeset, &untracked_paths)?;
+    annotate_hunk_stage_states(&root, &mut changeset, &untracked_paths)?;
     changeset.title = worktree_title();
     changeset.source_label = "git diff HEAD + untracked".to_string();
     Ok(changeset)
@@ -91,7 +92,8 @@ pub(crate) fn stage_files(paths: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let mut command = Command::new("git");
+    let root = worktree_root()?;
+    let mut command = git_command(&root);
     command.args(["add", "--"]);
     command.args(paths);
     checked_output(&mut command, "git add failed").map(|_| ())
@@ -102,7 +104,8 @@ pub(crate) fn unstage_files(paths: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let mut command = Command::new("git");
+    let root = worktree_root()?;
+    let mut command = git_command(&root);
     command.args(["restore", "--staged", "--"]);
     command.args(paths);
     checked_output(&mut command, "git restore --staged failed").map(|_| ())
@@ -126,8 +129,9 @@ pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Res
 }
 
 pub(crate) fn discard_worktree_file(path: &str) -> Result<()> {
-    let untracked_paths = untracked_paths()?;
-    discard_worktree_file_with_untracked(path, &untracked_paths)
+    let root = worktree_root()?;
+    let untracked_paths = untracked_paths(&root)?;
+    discard_worktree_file_with_untracked(&root, path, &untracked_paths)
 }
 
 pub(crate) fn discard_worktree_files(paths: &[String]) -> Result<()> {
@@ -135,7 +139,8 @@ pub(crate) fn discard_worktree_files(paths: &[String]) -> Result<()> {
         return Err(eyre!("no files to discard"));
     }
 
-    let untracked_paths = untracked_paths()?;
+    let root = worktree_root()?;
+    let untracked_paths = untracked_paths(&root)?;
     for path in paths {
         if !is_untracked_path(&untracked_paths, path) && !is_file_unstaged(path)? {
             return Err(eyre!("no unstaged changes to discard in {path}"));
@@ -143,22 +148,26 @@ pub(crate) fn discard_worktree_files(paths: &[String]) -> Result<()> {
     }
 
     for path in paths {
-        discard_worktree_file_with_untracked(path, &untracked_paths)?;
+        discard_worktree_file_with_untracked(&root, path, &untracked_paths)?;
     }
 
     Ok(())
 }
 
-fn discard_worktree_file_with_untracked(path: &str, untracked_paths: &[String]) -> Result<()> {
+fn discard_worktree_file_with_untracked(
+    root: &Path,
+    path: &str,
+    untracked_paths: &[String],
+) -> Result<()> {
     if is_untracked_path(untracked_paths, path) {
-        return remove_untracked_file(path);
+        return remove_untracked_file(root, path);
     }
 
     if !is_file_unstaged(path)? {
         return Err(eyre!("no unstaged changes to discard in {path}"));
     }
 
-    restore_worktree_file(path)
+    restore_worktree_file(root, path)
 }
 
 pub(crate) fn discard_worktree_hunk(file: &DiffFile, hunk_index: usize) -> Result<()> {
@@ -169,7 +178,8 @@ pub(crate) fn discard_worktree_hunk(file: &DiffFile, hunk_index: usize) -> Resul
             file.display_path()
         )
     })?;
-    let untracked_paths = untracked_paths()?;
+    let root = worktree_root()?;
+    let untracked_paths = untracked_paths(&root)?;
 
     if is_untracked_path(&untracked_paths, file.display_path()) {
         return Err(eyre!(
@@ -178,7 +188,7 @@ pub(crate) fn discard_worktree_hunk(file: &DiffFile, hunk_index: usize) -> Resul
         ));
     }
 
-    discard_matching_hunks_from_worktree(file, hunk, &untracked_paths)
+    discard_matching_hunks_from_worktree(&root, file, hunk, &untracked_paths)
 }
 
 pub(crate) fn worktree_root() -> Result<PathBuf> {
@@ -193,33 +203,53 @@ fn load_git_diff(pre_args: &[&str], post_args: &[&str], context: &str) -> Result
 }
 
 fn git_diff_patch(pre_args: &[&str], post_args: &[&str], context: &str) -> Result<String> {
-    let output = checked_output(
-        Command::new("git")
-            .arg("diff")
-            .args(pre_args)
-            .args(GIT_DIFF_PATCH_ARGS)
-            .args(post_args),
-        context,
-    )?;
+    git_diff_patch_with_dir(None, pre_args, post_args, context)
+}
+
+fn git_diff_patch_in(
+    current_dir: &Path,
+    pre_args: &[&str],
+    post_args: &[&str],
+    context: &str,
+) -> Result<String> {
+    git_diff_patch_with_dir(Some(current_dir), pre_args, post_args, context)
+}
+
+fn git_diff_patch_with_dir(
+    current_dir: Option<&Path>,
+    pre_args: &[&str],
+    post_args: &[&str],
+    context: &str,
+) -> Result<String> {
+    let mut command = Command::new("git");
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    command
+        .arg("diff")
+        .args(pre_args)
+        .args(GIT_DIFF_PATCH_ARGS)
+        .args(post_args);
+
+    let output = checked_output(&mut command, context)?;
     Ok(stdout_text(&output))
 }
 
-fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
+fn load_untracked_patches(root: &Path, untracked_paths: &[String]) -> Result<String> {
     let mut patches = String::new();
 
     for path in untracked_paths {
-        let output = Command::new("git")
-            .args([
-                "diff",
-                "--no-color",
-                "--patch",
-                "--no-index",
-                "--default-prefix",
-                "--",
-            ])
-            .arg("/dev/null")
-            .arg(path)
-            .output()?;
+        let mut command = git_command(root);
+        command.args([
+            "diff",
+            "--no-color",
+            "--patch",
+            "--no-index",
+            "--default-prefix",
+            "--",
+        ]);
+        command.arg("/dev/null").arg(path);
+        let output = command.output()?;
 
         if !output.status.success() && output.status.code() != Some(1) {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -239,21 +269,27 @@ fn load_untracked_patches(untracked_paths: &[String]) -> Result<String> {
     Ok(patches)
 }
 
-fn load_staged_diff() -> Result<Changeset> {
-    load_git_diff(&["--cached"], &["HEAD"], "git diff --cached failed")
-}
-
-fn load_unstaged_diff(untracked_paths: &[String]) -> Result<Changeset> {
-    let mut patch = git_diff_patch(&[], &[], "git diff failed")?;
-    patch.push_str(&load_untracked_patches(untracked_paths)?);
+fn load_staged_diff(root: &Path) -> Result<Changeset> {
+    let patch = git_diff_patch_in(root, &["--cached"], &["HEAD"], "git diff --cached failed")?;
     Ok(parse_unified_diff(&patch))
 }
 
-fn annotate_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) -> Result<()> {
+fn load_unstaged_diff(root: &Path, untracked_paths: &[String]) -> Result<Changeset> {
+    let mut patch = git_diff_patch_in(root, &[], &[], "git diff failed")?;
+    patch.push_str(&load_untracked_patches(root, untracked_paths)?);
+    Ok(parse_unified_diff(&patch))
+}
+
+fn annotate_stage_states(
+    root: &Path,
+    changeset: &mut Changeset,
+    untracked_paths: &[String],
+) -> Result<()> {
     for file in &mut changeset.files {
         let path = file.display_path();
-        let staged = is_file_staged(path)?;
-        let unstaged = is_file_unstaged(path)? || is_untracked_path(untracked_paths, path);
+        let staged = has_file_diff_in(root, path, true)?;
+        let unstaged =
+            has_file_diff_in(root, path, false)? || is_untracked_path(untracked_paths, path);
 
         file.stage = FileStage::from_staged_unstaged(staged, unstaged);
     }
@@ -261,9 +297,13 @@ fn annotate_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) 
     Ok(())
 }
 
-fn annotate_hunk_stage_states(changeset: &mut Changeset, untracked_paths: &[String]) -> Result<()> {
-    let staged = load_staged_diff()?;
-    let unstaged = load_unstaged_diff(untracked_paths)?;
+fn annotate_hunk_stage_states(
+    root: &Path,
+    changeset: &mut Changeset,
+    untracked_paths: &[String],
+) -> Result<()> {
+    let staged = load_staged_diff(root)?;
+    let unstaged = load_unstaged_diff(root, untracked_paths)?;
     annotate_hunk_stage_states_from_diffs(changeset, &staged, &unstaged, untracked_paths);
     Ok(())
 }
@@ -317,11 +357,12 @@ fn apply_matching_hunks_to_index(
     selected_hunk: &DiffHunk,
     source: HunkPatchSource,
 ) -> Result<()> {
+    let root = worktree_root()?;
     let source_changeset = match source {
-        HunkPatchSource::Staged => load_staged_diff()?,
+        HunkPatchSource::Staged => load_staged_diff(&root)?,
         HunkPatchSource::Unstaged => {
-            let untracked_paths = untracked_paths()?;
-            load_unstaged_diff(&untracked_paths)?
+            let untracked_paths = untracked_paths(&root)?;
+            load_unstaged_diff(&root, &untracked_paths)?
         }
     };
     let source_file = matching_file(&source_changeset.files, file).ok_or_else(|| {
@@ -338,15 +379,16 @@ fn apply_matching_hunks_to_index(
             file.display_path()
         )
     })?;
-    apply_patch_to_index(&patch, source.reverse())
+    apply_patch_to_index(&root, &patch, source.reverse())
 }
 
 fn discard_matching_hunks_from_worktree(
+    root: &Path,
     file: &DiffFile,
     selected_hunk: &DiffHunk,
     untracked_paths: &[String],
 ) -> Result<()> {
-    let source_changeset = load_unstaged_diff(untracked_paths)?;
+    let source_changeset = load_unstaged_diff(root, untracked_paths)?;
     let source_file = matching_file(&source_changeset.files, file)
         .ok_or_else(|| eyre!("no unstaged hunk found for {}", file.display_path()))?;
     let patch = overlapping_hunk_patch(source_file, selected_hunk).ok_or_else(|| {
@@ -355,7 +397,7 @@ fn discard_matching_hunks_from_worktree(
             file.display_path()
         )
     })?;
-    apply_patch_to_worktree(&patch, true)
+    apply_patch_to_worktree(root, &patch, true)
 }
 
 fn matching_file<'a>(files: &'a [DiffFile], target: &DiffFile) -> Option<&'a DiffFile> {
@@ -372,12 +414,12 @@ fn non_empty_eq(left: &str, right: &str) -> bool {
     !left.is_empty() && left == right
 }
 
-fn apply_patch_to_index(patch: &str, reverse: bool) -> Result<()> {
-    apply_patch(patch, GitApplyTarget::Index, reverse)
+fn apply_patch_to_index(root: &Path, patch: &str, reverse: bool) -> Result<()> {
+    apply_patch(root, patch, GitApplyTarget::Index, reverse)
 }
 
-fn apply_patch_to_worktree(patch: &str, reverse: bool) -> Result<()> {
-    apply_patch(patch, GitApplyTarget::Worktree, reverse)
+fn apply_patch_to_worktree(root: &Path, patch: &str, reverse: bool) -> Result<()> {
+    apply_patch(root, patch, GitApplyTarget::Worktree, reverse)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,13 +428,13 @@ enum GitApplyTarget {
     Worktree,
 }
 
-fn apply_patch(patch: &str, target: GitApplyTarget, reverse: bool) -> Result<()> {
-    let mut command = git_apply_command(target, reverse);
+fn apply_patch(root: &Path, patch: &str, target: GitApplyTarget, reverse: bool) -> Result<()> {
+    let mut command = git_apply_command(root, target, reverse);
     apply_patch_from_stdin(&mut command, patch, git_apply_context(target, reverse))
 }
 
-fn git_apply_command(target: GitApplyTarget, reverse: bool) -> Command {
-    let mut command = Command::new("git");
+fn git_apply_command(root: &Path, target: GitApplyTarget, reverse: bool) -> Command {
+    let mut command = git_command(root);
     command.arg("apply");
     if target == GitApplyTarget::Index {
         command.arg("--cached");
@@ -641,9 +683,15 @@ fn stop_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn untracked_paths() -> Result<Vec<String>> {
+fn untracked_paths(root: &Path) -> Result<Vec<String>> {
     let output = checked_output(
-        Command::new("git").args(["ls-files", "--others", "--exclude-standard", "-z"]),
+        git_command(root).args([
+            "ls-files",
+            "--full-name",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ]),
         "git ls-files failed",
     )?;
 
@@ -652,6 +700,12 @@ fn untracked_paths() -> Result<Vec<String>> {
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned)
         .collect())
+}
+
+fn git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root);
+    command
 }
 
 fn worktree_title() -> String {
@@ -714,31 +768,32 @@ fn trimmed_stdout_text(output: &Output) -> String {
 }
 
 fn stage_file(path: &str) -> Result<()> {
+    let root = worktree_root()?;
     checked_output(
-        Command::new("git").args(["add", "--", path]),
+        git_command(&root).args(["add", "--", path]),
         &format!("git add failed for {path}"),
     )
     .map(|_| ())
 }
 
 fn unstage_file(path: &str) -> Result<()> {
+    let root = worktree_root()?;
     checked_output(
-        Command::new("git").args(["restore", "--staged", "--", path]),
+        git_command(&root).args(["restore", "--staged", "--", path]),
         &format!("git restore --staged failed for {path}"),
     )
     .map(|_| ())
 }
 
-fn restore_worktree_file(path: &str) -> Result<()> {
+fn restore_worktree_file(root: &Path, path: &str) -> Result<()> {
     checked_output(
-        Command::new("git").args(["restore", "--worktree", "--", path]),
+        git_command(root).args(["restore", "--worktree", "--", path]),
         &format!("git restore --worktree failed for {path}"),
     )
     .map(|_| ())
 }
 
-fn remove_untracked_file(path: &str) -> Result<()> {
-    let root = worktree_root()?;
+fn remove_untracked_file(root: &Path, path: &str) -> Result<()> {
     let full_path = root.join(path);
     fs::remove_file(&full_path)
         .map_err(|error| eyre!("failed to remove untracked file {path}: {error}"))
@@ -753,7 +808,12 @@ fn is_file_unstaged(path: &str) -> Result<bool> {
 }
 
 fn has_file_diff(path: &str, cached: bool) -> Result<bool> {
-    let mut command = Command::new("git");
+    let root = worktree_root()?;
+    has_file_diff_in(&root, path, cached)
+}
+
+fn has_file_diff_in(root: &Path, path: &str, cached: bool) -> Result<bool> {
+    let mut command = git_command(root);
     command.arg("diff");
     if cached {
         command.arg("--cached");
@@ -970,6 +1030,44 @@ mod tests {
 
         assert!(!Path::new("new.txt").exists());
 
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worktree_diff_uses_root_relative_paths_for_untracked_files_from_subdir() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::create_dir_all("crates/clickup_graph/src/tui").unwrap();
+        fs::write("crates/clickup_graph/src/tui/mod.rs", "base\n").unwrap();
+        run_git(["add", "."]);
+        run_git(["commit", "-m", "initial"]);
+
+        let subdir_cwd = CurrentDirGuard::enter(&root.join("crates/clickup_graph"));
+        fs::write("src/tui/mod.rs", "changed\n").unwrap();
+        fs::write("src/tui/app.rs", "new\n").unwrap();
+
+        let changeset = load_worktree_diff().unwrap();
+        let paths = changeset
+            .files
+            .iter()
+            .map(|file| file.display_path())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            vec![
+                "crates/clickup_graph/src/tui/mod.rs",
+                "crates/clickup_graph/src/tui/app.rs"
+            ]
+        );
+
+        drop(subdir_cwd);
         drop(cwd);
         fs::remove_dir_all(root).unwrap();
     }
