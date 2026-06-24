@@ -1027,9 +1027,11 @@ fn footer_keeps_secondary_actions_in_help_only() {
     assert!(!footer.contains("discard"), "footer was {footer:?}");
     assert!(!footer.contains("ask AI"), "footer was {footer:?}");
     assert!(!footer.contains("explain"), "footer was {footer:?}");
+    assert!(!footer.contains("unstaged"), "footer was {footer:?}");
     assert!(help.contains("discard focused file, folder, or hunk"));
     assert!(help.contains("Ask AI about focused file or hunk"));
     assert!(help.contains("Explain focused file or hunk with Ask AI"));
+    assert!(help.contains("Summarize unpublished changes with Ask AI"));
     assert!(help.contains("copy selected hunk diff"));
     assert!(help.contains("copy selected file diff"));
 }
@@ -1175,6 +1177,29 @@ fn explain_code_key_from_diff_pane_queues_hunk_context() {
 }
 
 #[test]
+fn unpublished_summary_key_queues_tui_ai_request() {
+    let mut app = app_with(changeset_with_one_file());
+    app.focus = FocusPane::Sidebar;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(take_unpublished_summary_request(&mut app));
+    assert_eq!(app.focus, FocusPane::Diff);
+    assert!(app.live_error.is_none());
+}
+
+#[test]
+fn unpublished_summary_running_uses_ask_ai_pane() {
+    let mut app = app_with(changeset_with_one_file());
+
+    app.set_ask_ai_running_question(crate::ask_ai::UNPUBLISHED_SUMMARY_QUESTION);
+    let running_pane = render_diff_pane(&mut app, Theme::github_dark());
+
+    assert!(pane_text(&running_pane).contains("Asking AI: Summarize unpublished changes"));
+}
+
+#[test]
 fn ask_ai_running_can_be_cancelled() {
     let mut app = app_with(changeset_with_one_file());
     let request = ask_ai_request("Explain this");
@@ -1287,6 +1312,12 @@ fn take_ask_ai_cancel_request(app: &mut App) -> bool {
     app.take_effects()
         .into_iter()
         .any(|effect| matches!(effect, AppEffect::CancelAskAi))
+}
+
+fn take_unpublished_summary_request(app: &mut App) -> bool {
+    app.take_effects()
+        .into_iter()
+        .any(|effect| matches!(effect, AppEffect::RunUnpublishedSummary))
 }
 
 fn app_with_config(config: AppConfig) -> App {

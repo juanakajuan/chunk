@@ -26,13 +26,14 @@ pub(crate) enum BuiltinAction {
     Editor,
     AskAi,
     ExplainCode,
+    UnpublishedSummary,
     CopyFocused,
     CopyFileDiff,
     ToggleReviewed,
 }
 
 impl BuiltinAction {
-    pub(crate) const COUNT: usize = 18;
+    pub(crate) const COUNT: usize = 19;
 
     pub(crate) const ALL: [Self; Self::COUNT] = [
         Self::Quit,
@@ -50,6 +51,7 @@ impl BuiltinAction {
         Self::Editor,
         Self::AskAi,
         Self::ExplainCode,
+        Self::UnpublishedSummary,
         Self::CopyFocused,
         Self::CopyFileDiff,
         Self::ToggleReviewed,
@@ -73,6 +75,7 @@ impl BuiltinAction {
             Self::Editor => "editor",
             Self::AskAi => "ask_ai",
             Self::ExplainCode => "explain_code",
+            Self::UnpublishedSummary => "unpublished_summary",
             Self::CopyFocused => "copy_focused",
             Self::CopyFileDiff => "copy_file_diff",
             Self::ToggleReviewed => "toggle_reviewed",
@@ -104,6 +107,7 @@ impl BuiltinAction {
             Self::Editor => 'e',
             Self::AskAi => 'a',
             Self::ExplainCode => 'x',
+            Self::UnpublishedSummary => 'u',
             Self::CopyFocused => 'y',
             Self::CopyFileDiff => 'Y',
             Self::ToggleReviewed => 'r',
@@ -274,6 +278,7 @@ mod tests {
             (BuiltinAction::Editor, 'e'),
             (BuiltinAction::AskAi, 'a'),
             (BuiltinAction::ExplainCode, 'x'),
+            (BuiltinAction::UnpublishedSummary, 'u'),
             (BuiltinAction::CopyFocused, 'y'),
             (BuiltinAction::CopyFileDiff, 'Y'),
             (BuiltinAction::ToggleReviewed, 'r'),

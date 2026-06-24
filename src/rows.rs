@@ -449,6 +449,17 @@ pub(crate) fn help_overlay_lines(
                 ),
                 "next or previous hunk",
             ),
+            action_entry(BuiltinAction::CopyFocused, "copy selected hunk diff"),
+            action_entry(BuiltinAction::CopyFileDiff, "copy selected file diff"),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_entries(
+        &mut lines,
+        "AI",
+        &[
             HelpEntry::new(
                 command_key(keybinds.display(BuiltinAction::AskAi)),
                 [
@@ -463,8 +474,10 @@ pub(crate) fn help_overlay_lines(
                 BuiltinAction::ExplainCode,
                 "Explain focused file or hunk with Ask AI",
             ),
-            action_entry(BuiltinAction::CopyFocused, "copy selected hunk diff"),
-            action_entry(BuiltinAction::CopyFileDiff, "copy selected file diff"),
+            action_entry(
+                BuiltinAction::UnpublishedSummary,
+                "Summarize unpublished changes with Ask AI",
+            ),
         ],
         content_width,
         theme,
@@ -999,6 +1012,7 @@ mod tests {
             "Global",
             "Sidebar",
             "Diff",
+            "AI",
             "Mouse",
             "Worktree-only",
             "Custom commands",
@@ -1015,13 +1029,19 @@ mod tests {
         assert!(worktree_help.contains("Space  stage/unstage focused file or hunk"));
         assert!(worktree_help.contains("d      discard focused file, folder, or hunk"));
         assert!(worktree_help.contains("e      open selected file in $EDITOR"));
-        assert!(worktree_help.contains("a                Ask AI about focused file or hunk"));
-        assert!(
-            worktree_help.contains("x                Explain focused file or hunk with Ask AI")
-        );
         assert!(pr_help.contains("Worktree actions unavailable in PR mode"));
         assert!(!pr_help.contains("stage/unstage focused file or hunk"));
         assert!(!pr_help.contains("discard focused file, folder, or hunk"));
+    }
+
+    #[test]
+    fn help_overlay_groups_ai_actions_separately() {
+        let help = help_text(true);
+
+        assert!(help.contains("AI"));
+        assert!(help.contains("a  Ask AI about focused file or hunk"));
+        assert!(help.contains("x  Explain focused file or hunk with Ask AI"));
+        assert!(help.contains("u  Summarize unpublished changes with Ask AI"));
     }
 
     #[test]

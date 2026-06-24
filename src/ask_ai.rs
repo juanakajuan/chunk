@@ -3,12 +3,13 @@
 //! This module owns prompt/context construction and the OpenCode process
 //! boundary. The app owns UI state; runtime owns task orchestration.
 
-use std::io;
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::model::{DiffFile, DiffHunk, DiffLine, DiffLineKind};
 use crate::process::ProcessOutcome;
@@ -18,6 +19,10 @@ const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
 const READ_ONLY_CONFIG_CONTENT: &str = r#"{"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled","permission":{"*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"glob":"allow","grep":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","skill":"deny","webfetch":"allow","websearch":"allow","external_directory":"deny"}}"#;
 const EXPLAIN_CODE_PROMPT: &str = "Explain the selected or focused code for a code review. Describe what the code does, why the changed code matters in this review context, and any assumptions or risks that affect review. Inspect surrounding repository context read-only if needed.";
+pub(crate) const UNPUBLISHED_SUMMARY_QUESTION: &str = "Summarize unpublished changes";
+const UNPUBLISHED_SUMMARY_CONTEXT: &str = "unpublished changes";
+const UNPUBLISHED_SUMMARY_TITLE: &str = "chunk unpublished summary";
+const UNPUBLISHED_SUMMARY_ATTACHMENT_PREFIX: &str = "chunk-unpublished-summary";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AskAiRequest {
@@ -56,7 +61,8 @@ struct AskAiHunkContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AskAiResult {
-    request: AskAiRequest,
+    question: String,
+    context_summary: String,
     repo_root: Option<PathBuf>,
     outcome: ProcessOutcome,
 }
@@ -67,6 +73,11 @@ pub(crate) struct AskAiInvocation {
     args: Vec<String>,
     current_dir: PathBuf,
     env: Vec<(String, String)>,
+}
+
+#[derive(Debug)]
+struct DiffAttachment {
+    path: PathBuf,
 }
 
 impl AskAiRequest {
@@ -87,6 +98,10 @@ impl AskAiRequest {
 
     pub(crate) fn context(&self) -> &AskAiContext {
         &self.context
+    }
+
+    pub(crate) fn context_summary(&self) -> String {
+        self.context.summary()
     }
 }
 
@@ -174,12 +189,44 @@ impl AskAiHunkContext {
 }
 
 impl AskAiResult {
-    pub(crate) fn from_output(request: AskAiRequest, repo_root: PathBuf, output: Output) -> Self {
+    fn new(
+        question: impl Into<String>,
+        context_summary: impl Into<String>,
+        repo_root: Option<PathBuf>,
+        outcome: ProcessOutcome,
+    ) -> Self {
         Self {
-            request,
-            repo_root: Some(repo_root),
-            outcome: ProcessOutcome::from_output(output),
+            question: question.into(),
+            context_summary: context_summary.into(),
+            repo_root,
+            outcome,
         }
+    }
+
+    fn from_request(
+        request: AskAiRequest,
+        repo_root: Option<PathBuf>,
+        outcome: ProcessOutcome,
+    ) -> Self {
+        let context_summary = request.context_summary();
+        Self::new(request.question, context_summary, repo_root, outcome)
+    }
+
+    fn from_unpublished_summary(repo_root: Option<PathBuf>, outcome: ProcessOutcome) -> Self {
+        Self::new(
+            UNPUBLISHED_SUMMARY_QUESTION,
+            UNPUBLISHED_SUMMARY_CONTEXT,
+            repo_root,
+            outcome,
+        )
+    }
+
+    pub(crate) fn from_output(request: AskAiRequest, repo_root: PathBuf, output: Output) -> Self {
+        Self::from_request(
+            request,
+            Some(repo_root),
+            ProcessOutcome::from_output(output),
+        )
     }
 
     pub(crate) fn cancelled(
@@ -187,11 +234,7 @@ impl AskAiResult {
         repo_root: PathBuf,
         output: Option<Output>,
     ) -> Self {
-        Self {
-            request,
-            repo_root: Some(repo_root),
-            outcome: ProcessOutcome::cancelled(output),
-        }
+        Self::from_request(request, Some(repo_root), ProcessOutcome::cancelled(output))
     }
 
     pub(crate) fn not_started(
@@ -199,19 +242,40 @@ impl AskAiResult {
         repo_root: Option<PathBuf>,
         error: impl Into<String>,
     ) -> Self {
-        Self {
-            request,
-            repo_root,
-            outcome: ProcessOutcome::not_started(error),
-        }
+        Self::from_request(request, repo_root, ProcessOutcome::not_started(error))
+    }
+
+    pub(crate) fn unpublished_summary_from_output(repo_root: PathBuf, output: Output) -> Self {
+        Self::from_unpublished_summary(Some(repo_root), ProcessOutcome::from_output(output))
+    }
+
+    pub(crate) fn unpublished_summary_cancelled(
+        repo_root: PathBuf,
+        output: Option<Output>,
+    ) -> Self {
+        Self::from_unpublished_summary(Some(repo_root), ProcessOutcome::cancelled(output))
+    }
+
+    pub(crate) fn unpublished_summary_not_started(
+        repo_root: Option<PathBuf>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self::from_unpublished_summary(repo_root, ProcessOutcome::not_started(error))
+    }
+
+    pub(crate) fn unpublished_summary_message(
+        repo_root: PathBuf,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::from_unpublished_summary(Some(repo_root), ProcessOutcome::successful_stdout(message))
     }
 
     pub(crate) fn question(&self) -> &str {
-        self.request.question()
+        &self.question
     }
 
     pub(crate) fn context_summary(&self) -> String {
-        self.request.context().summary()
+        self.context_summary.clone()
     }
 
     pub(crate) fn repo_root(&self) -> Option<&Path> {
@@ -241,27 +305,40 @@ impl AskAiResult {
 
 impl AskAiInvocation {
     pub(crate) fn new(request: &AskAiRequest, repo_root: &Path) -> Self {
+        let mut args = Self::run_args(repo_root, session_title(request));
+        args.push(build_prompt(request, repo_root));
+        Self::read_only(args, repo_root)
+    }
+
+    fn unpublished_summary(diff_path: &Path, repo_root: &Path) -> Self {
+        let mut args = Self::run_args(repo_root, UNPUBLISHED_SUMMARY_TITLE);
+        args.extend([
+            format!("--file={}", diff_path.display()),
+            "--".to_string(),
+            build_unpublished_summary_prompt(repo_root, diff_path),
+        ]);
+        Self::read_only(args, repo_root)
+    }
+
+    fn run_args(repo_root: &Path, title: impl Into<String>) -> Vec<String> {
+        vec![
+            "run".to_string(),
+            "--pure".to_string(),
+            "--format".to_string(),
+            "default".to_string(),
+            "--dir".to_string(),
+            repo_root.display().to_string(),
+            "--title".to_string(),
+            title.into(),
+        ]
+    }
+
+    fn read_only(args: Vec<String>, repo_root: &Path) -> Self {
         Self {
             program: OPENCODE_PROGRAM.to_string(),
-            args: vec![
-                "run".to_string(),
-                "--pure".to_string(),
-                "--format".to_string(),
-                "default".to_string(),
-                "--dir".to_string(),
-                repo_root.display().to_string(),
-                "--title".to_string(),
-                session_title(request),
-                build_prompt(request, repo_root),
-            ],
+            args,
             current_dir: repo_root.to_path_buf(),
-            env: vec![
-                (
-                    "OPENCODE_CONFIG_CONTENT".to_string(),
-                    READ_ONLY_CONFIG_CONTENT.to_string(),
-                ),
-                ("NO_COLOR".to_string(), "1".to_string()),
-            ],
+            env: read_only_env(),
         }
     }
 
@@ -279,24 +356,79 @@ impl AskAiInvocation {
     }
 }
 
+impl DiffAttachment {
+    fn write(contents: &str) -> io::Result<Self> {
+        let path = env_temp_diff_path();
+        write_temp_diff(&path, contents)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DiffAttachment {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub(crate) fn run_unpublished_summary(
+    diff_text: &str,
+    repo_root: PathBuf,
+    cancel: Receiver<()>,
+) -> io::Result<AskAiResult> {
+    let attachment = DiffAttachment::write(diff_text)?;
+    let invocation = AskAiInvocation::unpublished_summary(attachment.path(), &repo_root);
+
+    match run_invocation(invocation, &cancel)? {
+        InvocationOutcome::Completed(output) => Ok(AskAiResult::unpublished_summary_from_output(
+            repo_root, output,
+        )),
+        InvocationOutcome::Cancelled(output) => Ok(AskAiResult::unpublished_summary_cancelled(
+            repo_root, output,
+        )),
+    }
+}
+
 pub(crate) fn run(
     request: AskAiRequest,
     repo_root: PathBuf,
     cancel: Receiver<()>,
 ) -> io::Result<AskAiResult> {
     let invocation = AskAiInvocation::new(&request, &repo_root);
+    match run_invocation(invocation, &cancel)? {
+        InvocationOutcome::Completed(output) => {
+            Ok(AskAiResult::from_output(request, repo_root, output))
+        }
+        InvocationOutcome::Cancelled(output) => {
+            Ok(AskAiResult::cancelled(request, repo_root, output))
+        }
+    }
+}
+
+enum InvocationOutcome {
+    Completed(Output),
+    Cancelled(Option<Output>),
+}
+
+fn run_invocation(
+    invocation: AskAiInvocation,
+    cancel: &Receiver<()>,
+) -> io::Result<InvocationOutcome> {
     let mut child = invocation.command().spawn()?;
 
     loop {
-        if cancellation_requested(&cancel) {
+        if cancellation_requested(cancel) {
             let _ = child.kill();
             let output = child.wait_with_output().ok();
-            return Ok(AskAiResult::cancelled(request, repo_root, output));
+            return Ok(InvocationOutcome::Cancelled(output));
         }
 
         if child.try_wait()?.is_some() {
             let output = child.wait_with_output()?;
-            return Ok(AskAiResult::from_output(request, repo_root, output));
+            return Ok(InvocationOutcome::Completed(output));
         }
 
         thread::sleep(REQUEST_POLL_INTERVAL);
@@ -316,6 +448,31 @@ fn build_prompt(request: &AskAiRequest, repo_root: &Path) -> String {
     prompt
 }
 
+fn build_unpublished_summary_prompt(repo_root: &Path, diff_path: &Path) -> String {
+    let mut prompt = String::new();
+
+    push_read_only_instructions(&mut prompt);
+    prompt.push_str("User request:\n");
+    prompt.push_str(UNPUBLISHED_SUMMARY_QUESTION);
+    prompt.push_str(". Explain all unpublished Git changes in a very concise summary.\n\n");
+    prompt.push_str("Rules:\n");
+    prompt.push_str("- Summarize local commits that are not pushed plus staged, unstaged, and untracked worktree changes represented in the attachment.\n");
+    prompt.push_str("- Do not exclude staged changes.\n");
+    prompt.push_str("- Group by intent or affected area when possible.\n");
+    prompt.push_str("- Avoid line-by-line diff narration unless necessary.\n");
+    prompt.push_str("- Keep the answer short, preferably 1-5 bullets.\n");
+    prompt.push_str(
+        "- Do not add a title; the pane already shows this is an unpublished changes summary.\n\n",
+    );
+    prompt.push_str("Structured review context:\n");
+    prompt.push_str(&format!("Repository root: {}\n", repo_root.display()));
+    prompt.push_str("Review source: Git diff for unpublished changes: local commits ahead of upstream/base plus worktree/index/untracked changes.\n");
+    prompt.push_str(&format!("Attached patch: {}\n", diff_path.display()));
+    prompt.push_str("The attachment is the complete input for this summary.\n");
+
+    prompt
+}
+
 fn push_read_only_instructions(prompt: &mut String) {
     prompt.push_str("You are answering a question from chunk, a terminal diff reviewer.\n");
     prompt.push_str("Read-only enforcement:\n");
@@ -329,6 +486,16 @@ fn push_read_only_instructions(prompt: &mut String) {
     prompt.push_str(
         "- The OpenCode process is launched with edit, bash, task, skill, and external-directory permissions denied.\n\n",
     );
+}
+
+fn read_only_env() -> Vec<(String, String)> {
+    vec![
+        (
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            READ_ONLY_CONFIG_CONTENT.to_string(),
+        ),
+        ("NO_COLOR".to_string(), "1".to_string()),
+    ]
 }
 
 fn push_user_question(prompt: &mut String, question: &str) {
@@ -489,6 +656,35 @@ fn non_empty_text(text: String) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+fn env_temp_diff_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    std::env::temp_dir().join(format!(
+        "{UNPUBLISHED_SUMMARY_ATTACHMENT_PREFIX}-{}-{nanos}.diff",
+        process::id()
+    ))
+}
+
+fn write_temp_diff(path: &Path, contents: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    set_temp_diff_permissions(&mut options);
+
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+#[cfg(unix)]
+fn set_temp_diff_permissions(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn set_temp_diff_permissions(_options: &mut fs::OpenOptions) {}
+
 fn cancellation_requested(cancel: &Receiver<()>) -> bool {
     match cancel.try_recv() {
         Ok(()) | Err(TryRecvError::Disconnected) => true,
@@ -575,6 +771,46 @@ mod tests {
         assert!(config.contains(r#""websearch":"allow""#));
         assert!(config.contains(r#""external_directory":"deny""#));
         assert!(config.contains(r#""autoupdate":false"#));
+    }
+
+    #[test]
+    fn unpublished_summary_invocation_attaches_patch_and_uses_read_only_config() {
+        let diff_path = Path::new("/tmp/chunk-unpublished-summary.diff");
+        let invocation = AskAiInvocation::unpublished_summary(diff_path, Path::new("/repo"));
+
+        assert_eq!(invocation.program, "opencode");
+        let prompt = invocation.args.last().expect("prompt arg should exist");
+        assert_eq!(
+            invocation.args[(invocation.args.len() - 3)..],
+            [
+                "--file=/tmp/chunk-unpublished-summary.diff".to_string(),
+                "--".to_string(),
+                prompt.clone(),
+            ]
+        );
+        assert!(
+            invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["--title", UNPUBLISHED_SUMMARY_TITLE])
+        );
+
+        assert!(prompt.contains("Summarize unpublished changes"));
+        assert!(prompt.contains("local commits that are not pushed"));
+        assert!(prompt.contains("Do not exclude staged changes"));
+        assert!(prompt.contains("untracked worktree changes"));
+        assert!(prompt.contains("complete input"));
+        assert!(prompt.contains("Do not edit, write, patch, stage, commit, push"));
+
+        let config = invocation
+            .env
+            .iter()
+            .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| value.as_str())
+            .expect("inline config should be set");
+        assert!(config.contains(r#""*":"deny""#));
+        assert!(config.contains(r#""edit":"deny""#));
+        assert!(config.contains(r#""bash":"deny""#));
     }
 
     #[test]

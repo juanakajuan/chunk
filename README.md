@@ -9,7 +9,7 @@ guarded worktree discard actions.
 
 - Rust 2024 toolchain
 - Git
-- [OpenCode](https://opencode.ai/) for the Ask AI action
+- [OpenCode](https://opencode.ai/) for Ask AI actions
 - A [Nerd Font](https://www.nerdfonts.com/) for the colored file-type, status,
   and staging glyphs in the sidebar and bottom bar. Without a Nerd Font these
   glyphs may render as a generic fallback box, but the file list stays usable.
@@ -67,6 +67,9 @@ for the special keys and `Ctrl-*` combos noted inline).
   the prompt or running request
 - `x`: ask OpenCode to explain the selected file from the file list, or the
   focused hunk from the diff pane, using the preset review-oriented prompt
+- `u`: ask OpenCode for a short summary of unpublished changes, including local
+  commits ahead of upstream/base plus staged, unstaged, and untracked worktree
+  changes
 - `y`: copy the selected file path from the file list, or the selected hunk
   diff from the diff pane
 - `Y`: copy the selected file diff from the diff pane
@@ -133,19 +136,20 @@ keys, and keys shared by two actions are rejected at startup. Special keys
 (`Tab`, `Enter`, `Esc`, arrows, `PageUp`/`PageDown`, `Home`/`End`) and
 `Ctrl-*` combos stay fixed and are not listed here.
 
-| Action           | Default | Action           | Default |
-| ---------------- | ------- | ---------------- | ------- |
-| `quit`           | `q`     | `toggle_staging` | `Space` |
-| `help`           | `?`     | `discard`        | `d`     |
-| `toggle_files`   | `f`     | `editor`         | `e`     |
-| `ask_ai`         | `a`     | `explain_code`   | `x`     |
-| `search`         | `/`     | `copy_focused`   | `y`     |
-| `move_down`      | `j`     | `copy_file_diff` | `Y`     |
-| `move_up`        | `k`     | `toggle_reviewed` | `r`     |
-| `next_match`     | `n`     |                  |         |
-| `prev_match`     | `N`     |                  |         |
-| `top`            | `g`     |                  |         |
-| `bottom`         | `G`     |                  |         |
+| Action                  | Default | Action            | Default |
+| ----------------------- | ------- | ----------------- | ------- |
+| `quit`                  | `q`     | `toggle_staging`  | `Space` |
+| `help`                  | `?`     | `discard`         | `d`     |
+| `toggle_files`          | `f`     | `editor`          | `e`     |
+| `ask_ai`                | `a`     | `explain_code`    | `x`     |
+| `unpublished_summary`   | `u`     | `copy_focused`    | `y`     |
+| `search`                | `/`     | `copy_file_diff`  | `Y`     |
+| `move_down`             | `j`     | `toggle_reviewed` | `r`     |
+| `move_up`               | `k`     |                   |         |
+| `next_match`            | `n`     |                   |         |
+| `prev_match`            | `N`     |                   |         |
+| `top`                   | `g`     |                   |         |
+| `bottom`                | `G`     |                   |         |
 
 Remapping a built-in frees its default key for custom commands, and the help
 overlay, keymap bar, and overlay close keys all follow the configured keys.

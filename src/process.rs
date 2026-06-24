@@ -41,6 +41,20 @@ impl ProcessOutcome {
         }
     }
 
+    /// A successful synthetic result for work that intentionally did not spawn.
+    pub(crate) fn successful_stdout(stdout: impl Into<String>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            status: ProcessStatus {
+                success: true,
+                code: Some(0),
+                cancelled: false,
+                start_error: None,
+            },
+        }
+    }
+
     /// A process killed on the caller's request, keeping whatever partial output
     /// it had produced.
     pub(crate) fn cancelled(output: Option<Output>) -> Self {

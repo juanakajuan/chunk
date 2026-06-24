@@ -113,6 +113,7 @@ pub(crate) enum AppEffect {
     OpenEditor(EditorRequest),
     RunCustomCommand(CustomCommandBinding),
     RunAskAi(AskAiRequest),
+    RunUnpublishedSummary,
     CancelAskAi,
     CopyToClipboard(ClipboardRequest),
 }
@@ -457,6 +458,11 @@ impl App {
         self.effects.push_back(AppEffect::RunAskAi(request));
     }
 
+    fn queue_unpublished_summary_effect(&mut self) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::RunUnpublishedSummary));
+        self.effects.push_back(AppEffect::RunUnpublishedSummary);
+    }
+
     fn queue_ask_ai_cancel_effect(&mut self) {
         self.clear_effects(|effect| matches!(effect, AppEffect::CancelAskAi));
         self.effects.push_back(AppEffect::CancelAskAi);
@@ -518,6 +524,13 @@ impl App {
             return Ok(true);
         }
 
+        if self.should_queue_unpublished_summary_request(key) {
+            self.queue_unpublished_summary_request();
+            self.text_selection.clear();
+            self.ensure_scroll_bounds();
+            return Ok(true);
+        }
+
         self.text_selection.clear();
 
         if self.overlay.is_some() {
@@ -569,11 +582,12 @@ impl App {
                 Some(BuiltinAction::Discard) => self.request_selected_discard(),
                 Some(BuiltinAction::Editor) => self.queue_selected_file_editor_request(),
                 Some(BuiltinAction::ToggleReviewed) => self.toggle_selected_file_reviewed(),
-                // AskAi, ExplainCode, CopyFocused, and CopyFileDiff are
+                // AskAi, ExplainCode, UnpublishedSummary, CopyFocused, and CopyFileDiff are
                 // dispatched earlier in this method, so they never reach here.
                 Some(
                     BuiltinAction::AskAi
                     | BuiltinAction::ExplainCode
+                    | BuiltinAction::UnpublishedSummary
                     | BuiltinAction::CopyFocused
                     | BuiltinAction::CopyFileDiff,
                 ) => {}
@@ -835,6 +849,12 @@ impl App {
             && self.keybinds.action_for(key) == Some(BuiltinAction::ExplainCode)
     }
 
+    fn should_queue_unpublished_summary_request(&self, key: KeyEvent) -> bool {
+        self.overlay.is_none()
+            && !self.search_prompt_open()
+            && self.keybinds.action_for(key) == Some(BuiltinAction::UnpublishedSummary)
+    }
+
     fn focused_ask_ai_context(
         &self,
         missing_file_message: &'static str,
@@ -897,6 +917,12 @@ impl App {
         self.focus = FocusPane::Diff;
         self.live_error = None;
         self.queue_ask_ai_request_effect(AskAiRequest::explain_code(context));
+    }
+
+    fn queue_unpublished_summary_request(&mut self) {
+        self.focus = FocusPane::Diff;
+        self.live_error = None;
+        self.queue_unpublished_summary_effect();
     }
 
     fn queue_copy_for_key(&mut self, key: KeyEvent) -> bool {

@@ -242,6 +242,9 @@ fn handle_app_effects(
             AppEffect::RunAskAi(request) => {
                 start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
             }
+            AppEffect::RunUnpublishedSummary => {
+                start_requested_unpublished_summary(terminal, app, ask_ai_task)?;
+            }
             AppEffect::CancelAskAi => {
                 if let Some(task) = ask_ai_task.as_ref() {
                     task.request_cancel();
@@ -350,6 +353,30 @@ fn start_requested_ask_ai(
     Ok(())
 }
 
+fn start_requested_unpublished_summary(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
+) -> Result<()> {
+    if ask_ai_task.is_some() {
+        return Ok(());
+    }
+
+    app.set_ask_ai_running_question(ask_ai::UNPUBLISHED_SUMMARY_QUESTION);
+    terminal.draw(|frame| ui::draw(frame, app))?;
+
+    *ask_ai_task = Some(BackgroundTask::spawn(
+        run_unpublished_summary_request,
+        || {
+            AskAiResult::unpublished_summary_not_started(
+                None,
+                "OpenCode runner stopped before reporting a result",
+            )
+        },
+    ));
+    Ok(())
+}
+
 fn run_ask_ai_request(request: AskAiRequest, cancel: Receiver<()>) -> AskAiResult {
     let repo_root = match git::worktree_root() {
         Ok(root) => root,
@@ -365,6 +392,31 @@ fn run_ask_ai_request(request: AskAiRequest, cancel: Receiver<()>) -> AskAiResul
     ask_ai::run(request.clone(), repo_root.clone(), cancel).unwrap_or_else(|error| {
         AskAiResult::not_started(request, Some(repo_root), error.to_string())
     })
+}
+
+fn run_unpublished_summary_request(cancel: Receiver<()>) -> AskAiResult {
+    let diff = match git::load_unpublished_diff_text() {
+        Ok(diff) => diff,
+        Err(error) => {
+            return AskAiResult::unpublished_summary_not_started(
+                None,
+                format!("could not load unpublished diff: {error}"),
+            );
+        }
+    };
+
+    if diff.text.trim().is_empty() {
+        return AskAiResult::unpublished_summary_message(
+            diff.repo_root,
+            "No unpublished changes found.",
+        );
+    }
+
+    ask_ai::run_unpublished_summary(&diff.text, diff.repo_root.clone(), cancel).unwrap_or_else(
+        |error| {
+            AskAiResult::unpublished_summary_not_started(Some(diff.repo_root), error.to_string())
+        },
+    )
 }
 
 fn run_custom_command(command: &CustomCommandBinding) -> CustomCommandResult {

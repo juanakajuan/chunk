@@ -28,17 +28,29 @@ pub(crate) struct LoadedPrDiff {
     pub(crate) new_ref: String,
 }
 
+pub(crate) struct LoadedUnpublishedDiff {
+    pub(crate) repo_root: PathBuf,
+    pub(crate) text: String,
+}
+
 pub(crate) fn load_worktree_diff() -> Result<Changeset> {
     let root = worktree_root()?;
-    let mut patch = git_diff_patch_in(&root, &[], &["HEAD"], "git diff failed")?;
     let untracked_paths = untracked_paths(&root)?;
-    patch.push_str(&load_untracked_patches(&root, &untracked_paths)?);
+    let patch = load_worktree_patch(&root, &untracked_paths)?;
     let mut changeset = parse_unified_diff(&patch);
     annotate_stage_states(&root, &mut changeset, &untracked_paths)?;
     annotate_hunk_stage_states(&root, &mut changeset, &untracked_paths)?;
     changeset.title = worktree_title();
     changeset.source_label = "git diff HEAD + untracked".to_string();
     Ok(changeset)
+}
+
+pub(crate) fn load_unpublished_diff_text() -> Result<LoadedUnpublishedDiff> {
+    let repo_root = worktree_root()?;
+    let untracked_paths = untracked_paths(&repo_root)?;
+    let text = load_unpublished_patch(&repo_root, &untracked_paths)?;
+
+    Ok(LoadedUnpublishedDiff { repo_root, text })
 }
 
 pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
@@ -221,10 +233,7 @@ fn git_diff_patch_with_dir(
     post_args: &[&str],
     context: &str,
 ) -> Result<String> {
-    let mut command = Command::new("git");
-    if let Some(current_dir) = current_dir {
-        command.current_dir(current_dir);
-    }
+    let mut command = git_command_with_dir(current_dir);
     command
         .arg("diff")
         .args(pre_args)
@@ -275,9 +284,36 @@ fn load_staged_diff(root: &Path) -> Result<Changeset> {
 }
 
 fn load_unstaged_diff(root: &Path, untracked_paths: &[String]) -> Result<Changeset> {
-    let mut patch = git_diff_patch_in(root, &[], &[], "git diff failed")?;
+    Ok(parse_unified_diff(&load_unstaged_patch(
+        root,
+        untracked_paths,
+    )?))
+}
+
+fn load_unstaged_patch(root: &Path, untracked_paths: &[String]) -> Result<String> {
+    load_patch_with_untracked(root, &[], untracked_paths)
+}
+
+fn load_worktree_patch(root: &Path, untracked_paths: &[String]) -> Result<String> {
+    load_patch_with_untracked(root, &["HEAD"], untracked_paths)
+}
+
+fn load_unpublished_patch(root: &Path, untracked_paths: &[String]) -> Result<String> {
+    let Some(base_ref) = unpublished_base_ref(root) else {
+        return load_worktree_patch(root, untracked_paths);
+    };
+    let merge_base = merge_base_in(root, &base_ref)?;
+    load_patch_with_untracked(root, &[merge_base.as_str()], untracked_paths)
+}
+
+fn load_patch_with_untracked(
+    root: &Path,
+    post_args: &[&str],
+    untracked_paths: &[String],
+) -> Result<String> {
+    let mut patch = git_diff_patch_in(root, &[], post_args, "git diff failed")?;
     patch.push_str(&load_untracked_patches(root, untracked_paths)?);
-    Ok(parse_unified_diff(&patch))
+    Ok(patch)
 }
 
 fn annotate_stage_states(
@@ -485,8 +521,49 @@ fn resolve_base_ref(base: Option<&str>) -> Result<String> {
         .ok_or_else(|| eyre!("could not determine base branch; pass one explicitly"))
 }
 
+fn unpublished_base_ref(root: &Path) -> Option<String> {
+    upstream_ref(root)
+        .or_else(|| origin_current_branch_ref(root))
+        .or_else(|| {
+            DEFAULT_BASE_REFS
+                .into_iter()
+                .find(|candidate| git_commit_exists_in(root, candidate))
+                .map(str::to_string)
+        })
+}
+
+fn upstream_ref(root: &Path) -> Option<String> {
+    git_stdout_in(
+        root,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+}
+
+fn origin_current_branch_ref(root: &Path) -> Option<String> {
+    let branch = current_branch_name_in(root)?;
+    let candidate = format!("origin/{branch}");
+    git_commit_exists_in(root, &candidate).then_some(candidate)
+}
+
+fn current_branch_name_in(root: &Path) -> Option<String> {
+    git_stdout_in(root, ["branch", "--show-current"])
+}
+
 fn git_commit_exists(rev: &str) -> bool {
-    Command::new("git")
+    git_commit_exists_with_dir(None, rev)
+}
+
+fn git_commit_exists_in(root: &Path, rev: &str) -> bool {
+    git_commit_exists_with_dir(Some(root), rev)
+}
+
+fn git_commit_exists_with_dir(current_dir: Option<&Path>, rev: &str) -> bool {
+    git_command_with_dir(current_dir)
         .args(["rev-parse", "--verify", "--quiet"])
         .arg(format!("{rev}^{{commit}}"))
         .stdout(Stdio::null())
@@ -496,8 +573,18 @@ fn git_commit_exists(rev: &str) -> bool {
 }
 
 fn merge_base(base_ref: &str) -> Result<String> {
+    merge_base_with_dir(None, base_ref)
+}
+
+fn merge_base_in(root: &Path, base_ref: &str) -> Result<String> {
+    merge_base_with_dir(Some(root), base_ref)
+}
+
+fn merge_base_with_dir(current_dir: Option<&Path>, base_ref: &str) -> Result<String> {
+    let mut command = git_command_with_dir(current_dir);
+    command.args(["merge-base", base_ref, "HEAD"]);
     let output = checked_output(
-        Command::new("git").args(["merge-base", base_ref, "HEAD"]),
+        &mut command,
         &format!("git merge-base failed for {base_ref}"),
     )?;
 
@@ -702,10 +789,16 @@ fn untracked_paths(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-fn git_command(root: &Path) -> Command {
+fn git_command_with_dir(current_dir: Option<&Path>) -> Command {
     let mut command = Command::new("git");
-    command.current_dir(root);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
     command
+}
+
+fn git_command(root: &Path) -> Command {
+    git_command_with_dir(Some(root))
 }
 
 fn worktree_title() -> String {
@@ -722,7 +815,18 @@ fn current_branch_label() -> Option<String> {
 }
 
 fn git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
+    git_stdout_with_dir(None, args)
+}
+
+fn git_stdout_in<const N: usize>(root: &Path, args: [&str; N]) -> Option<String> {
+    git_stdout_with_dir(Some(root), args)
+}
+
+fn git_stdout_with_dir<const N: usize>(
+    current_dir: Option<&Path>,
+    args: [&str; N],
+) -> Option<String> {
+    let output = git_command_with_dir(current_dir).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1070,6 +1174,55 @@ mod tests {
         drop(subdir_cwd);
         drop(cwd);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpublished_diff_text_includes_local_commits_index_worktree_and_untracked_files() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let remote = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+
+        run_git(["init", "--bare", remote.to_str().expect("remote path")]);
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        run_git(["branch", "-M", "main"]);
+        run_git([
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ]);
+        fs::write("committed.txt", "base committed\n").unwrap();
+        fs::write("indexed.txt", "base indexed\n").unwrap();
+        fs::write("unstaged.txt", "base unstaged\n").unwrap();
+        run_git(["add", "."]);
+        run_git(["commit", "-m", "initial"]);
+        run_git(["push", "-u", "origin", "main"]);
+
+        fs::write("committed.txt", "local committed change\n").unwrap();
+        run_git(["add", "committed.txt"]);
+        run_git(["commit", "-m", "local change"]);
+        fs::write("indexed.txt", "indexed change\n").unwrap();
+        run_git(["add", "indexed.txt"]);
+        fs::write("unstaged.txt", "unstaged change\n").unwrap();
+        fs::write("new.txt", "untracked change\n").unwrap();
+
+        let diff = load_unpublished_diff_text().unwrap();
+
+        assert!(diff.text.contains("committed.txt"));
+        assert!(diff.text.contains("local committed change"));
+        assert!(diff.text.contains("indexed.txt"));
+        assert!(diff.text.contains("indexed change"));
+        assert!(diff.text.contains("unstaged.txt"));
+        assert!(diff.text.contains("unstaged change"));
+        assert!(diff.text.contains("new.txt"));
+        assert!(diff.text.contains("untracked change"));
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(remote).unwrap();
     }
 
     #[test]

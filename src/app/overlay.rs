@@ -212,11 +212,15 @@ impl App {
     }
 
     pub(crate) fn set_ask_ai_running(&mut self, request: &AskAiRequest) {
+        self.set_ask_ai_running_question(request.question());
+    }
+
+    pub(crate) fn set_ask_ai_running_question(&mut self, question: &str) {
         self.live_error = None;
         self.focus = FocusPane::Diff;
         self.text_selection.clear();
         self.overlay = Some(Overlay::AskAiRunning {
-            question: request.question().to_string(),
+            question: question.to_string(),
             spinner_frame: 0,
             cancelling: false,
         });
