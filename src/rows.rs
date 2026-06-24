@@ -83,6 +83,7 @@ pub(crate) fn discard_status_lines(
 pub(crate) fn custom_command_running_lines(
     command: Option<&CustomCommandBinding>,
     spinner_frame: usize,
+    cancelling: bool,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
@@ -90,10 +91,16 @@ pub(crate) fn custom_command_running_lines(
         return Vec::new();
     };
 
+    let status = if cancelling {
+        "Cancelling command"
+    } else {
+        "Running command"
+    };
+
     wrap_line(
         Line::styled(
             format!(
-                "{} Running command: {}",
+                "{} {status}: {}",
                 CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()],
                 command.label()
             ),
@@ -299,6 +306,29 @@ pub(crate) fn ask_ai_running_keybind_bar_line(keybinds: KeybindMap, theme: Theme
         Span::styled("  \u{b7}  ", separator_style),
         keybind_key_span("Ctrl-c", key_style),
         Span::styled(" quit", label_style),
+    ])
+}
+
+pub(crate) fn custom_command_running_keybind_bar_line(
+    keybinds: KeybindMap,
+    theme: Theme,
+) -> Line<'static> {
+    let background = theme.background;
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+
+    Line::from(vec![
+        Span::styled(
+            " COMMAND ",
+            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
+        Span::styled("  ", label_style),
+        keybind_key_span(
+            &format!("Esc/{}/Ctrl-c", keybinds.display(BuiltinAction::Quit)),
+            key_style,
+        ),
+        Span::styled(" cancel", label_style),
     ])
 }
 

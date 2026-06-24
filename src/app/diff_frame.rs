@@ -152,8 +152,9 @@ impl<'a> DiffFrameRenderer<'a> {
         );
         let running = self.app.command_running();
         lines.extend(rows::custom_command_running_lines(
-            running.map(|(binding, _)| binding),
-            running.map_or(0, |(_, frame)| frame),
+            running.map(|(binding, _, _)| binding),
+            running.map_or(0, |(_, frame, _)| frame),
+            running.is_some_and(|(_, _, cancelling)| cancelling),
             self.request.content_width,
             self.request.theme,
         ));

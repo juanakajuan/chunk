@@ -239,6 +239,11 @@ fn handle_app_effects(
             AppEffect::RunCustomCommand(command) => {
                 start_requested_custom_command(terminal, app, command, custom_command_task)?;
             }
+            AppEffect::CancelCustomCommand => {
+                if let Some(task) = custom_command_task.as_ref() {
+                    task.request_cancel();
+                }
+            }
             AppEffect::RunAskAi(request) => {
                 start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
             }
@@ -314,7 +319,7 @@ fn start_requested_custom_command(
 
     let run_command = command.clone();
     *custom_command_task = Some(BackgroundTask::spawn(
-        move |_cancel| run_custom_command(&run_command),
+        move |cancel| run_custom_command(&run_command, cancel),
         move || {
             CustomCommandResult::not_started(
                 &command,
@@ -419,7 +424,7 @@ fn run_unpublished_summary_request(cancel: Receiver<()>) -> AskAiResult {
     )
 }
 
-fn run_custom_command(command: &CustomCommandBinding) -> CustomCommandResult {
+fn run_custom_command(command: &CustomCommandBinding, cancel: Receiver<()>) -> CustomCommandResult {
     let cwd = match git::worktree_root() {
         Ok(root) => root,
         Err(error) => {
@@ -431,7 +436,7 @@ fn run_custom_command(command: &CustomCommandBinding) -> CustomCommandResult {
         }
     };
 
-    custom_command::run(command, cwd.clone()).unwrap_or_else(|error| {
+    custom_command::run(command, cwd.clone(), cancel).unwrap_or_else(|error| {
         CustomCommandResult::not_started(command, Some(cwd), error.to_string())
     })
 }

@@ -10,7 +10,7 @@ use crate::theme::Theme;
 
 use super::keys::{
     apply_scroll_key, closes_ask_ai_output, closes_ask_ai_running, closes_command_output,
-    closes_help_overlay,
+    closes_custom_command_running, closes_help_overlay, is_ctrl_c,
 };
 use super::{App, FocusPane, HELP_OVERLAY_SCROLL_PAGE, MOUSE_WHEEL_STEP, accepts_text_input};
 
@@ -86,10 +86,11 @@ pub(super) enum Overlay {
     Help { scroll: ScrollText },
     /// Pending destructive worktree discard awaiting y/n confirmation.
     Discard(DiscardConfirmation),
-    /// A custom command is running; all input is swallowed until runtime delivers output.
+    /// A custom command is running; only cancellation keys are accepted.
     CommandRunning {
         binding: CustomCommandBinding,
         spinner_frame: usize,
+        cancelling: bool,
     },
     /// Completed custom command output shown in the diff pane.
     CommandOutput(CommandOutputState),
@@ -130,12 +131,13 @@ impl App {
         }
     }
 
-    pub(super) fn command_running(&self) -> Option<(&CustomCommandBinding, usize)> {
+    pub(super) fn command_running(&self) -> Option<(&CustomCommandBinding, usize, bool)> {
         match &self.overlay {
             Some(Overlay::CommandRunning {
                 binding,
                 spinner_frame,
-            }) => Some((binding, *spinner_frame)),
+                cancelling,
+            }) => Some((binding, *spinner_frame, *cancelling)),
             _ => None,
         }
     }
@@ -192,6 +194,7 @@ impl App {
         self.overlay = Some(Overlay::CommandRunning {
             binding: command.clone(),
             spinner_frame: 0,
+            cancelling: false,
         });
     }
 
@@ -246,11 +249,12 @@ impl App {
         match self.overlay {
             Some(Overlay::Help { .. }) => self.handle_help_overlay_key(key),
             Some(Overlay::Discard(_)) => self.handle_discard_confirmation_key(key),
+            Some(Overlay::CommandRunning { .. }) => self.handle_custom_command_running_key(key),
             Some(Overlay::CommandOutput(_)) => self.handle_command_output_key(key),
             Some(Overlay::AskAiPrompt(_)) => self.handle_ask_ai_prompt_key(key),
             Some(Overlay::AskAiRunning { .. }) => self.handle_ask_ai_running_key(key),
             Some(Overlay::AskAiOutput(_)) => self.handle_ask_ai_output_key(key),
-            Some(Overlay::CommandRunning { .. }) | None => {}
+            None => {}
         }
     }
 
@@ -353,6 +357,23 @@ impl App {
                 output.scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
             }
         });
+    }
+
+    fn handle_custom_command_running_key(&mut self, key: KeyEvent) {
+        if !is_ctrl_c(key) && !closes_custom_command_running(key, self.keybinds) {
+            return;
+        }
+
+        if let Some(Overlay::CommandRunning {
+            cancelling,
+            binding: _,
+            spinner_frame: _,
+        }) = &mut self.overlay
+            && !*cancelling
+        {
+            *cancelling = true;
+            self.queue_custom_command_cancel_effect();
+        }
     }
 
     fn handle_ask_ai_prompt_key(&mut self, key: KeyEvent) {

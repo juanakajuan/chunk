@@ -112,6 +112,7 @@ impl ClipboardRequest {
 pub(crate) enum AppEffect {
     OpenEditor(EditorRequest),
     RunCustomCommand(CustomCommandBinding),
+    CancelCustomCommand,
     RunAskAi(AskAiRequest),
     RunUnpublishedSummary,
     CancelAskAi,
@@ -303,6 +304,9 @@ impl App {
         if self.ask_ai_running().is_some() {
             return rows::ask_ai_running_keybind_bar_line(self.keybinds, theme);
         }
+        if self.command_running().is_some() {
+            return rows::custom_command_running_keybind_bar_line(self.keybinds, theme);
+        }
         if self.command_output().is_some() {
             return rows::custom_command_output_keybind_bar_line(self.keybinds, theme);
         }
@@ -453,6 +457,11 @@ impl App {
         self.effects.push_back(AppEffect::RunCustomCommand(command));
     }
 
+    fn queue_custom_command_cancel_effect(&mut self) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::CancelCustomCommand));
+        self.effects.push_back(AppEffect::CancelCustomCommand);
+    }
+
     fn queue_ask_ai_request_effect(&mut self, request: AskAiRequest) {
         self.clear_effects(|effect| matches!(effect, AppEffect::RunAskAi(_)));
         self.effects.push_back(AppEffect::RunAskAi(request));
@@ -501,8 +510,9 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // A running command blocks all input, including ctrl-c, until it finishes.
+        // A running command accepts only cancellation keys until it finishes.
         if matches!(self.overlay, Some(Overlay::CommandRunning { .. })) {
+            self.handle_overlay_key(key);
             return Ok(true);
         }
 
@@ -600,7 +610,7 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // A running command blocks all mouse input until it finishes.
+        // A running command blocks mouse input until it finishes or is cancelled.
         if matches!(self.overlay, Some(Overlay::CommandRunning { .. })) {
             return;
         }

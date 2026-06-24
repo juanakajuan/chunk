@@ -28,6 +28,10 @@ pub(super) fn closes_command_output(key: KeyEvent, keybinds: KeybindMap) -> bool
     key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
 }
 
+pub(super) fn closes_custom_command_running(key: KeyEvent, keybinds: KeybindMap) -> bool {
+    key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
+}
+
 pub(super) fn closes_ask_ai_running(key: KeyEvent, keybinds: KeybindMap) -> bool {
     key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
 }

@@ -1070,6 +1070,25 @@ fn custom_command_running_indicator_is_replaced_by_output() {
 }
 
 #[test]
+fn ctrl_c_cancels_running_custom_command() {
+    let mut app = app_with(changeset_with_one_file());
+    let command = custom_command("C", "long command", "sleep 60");
+
+    app.set_custom_command_running(&command);
+
+    let keep_running = app
+        .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert!(keep_running);
+    assert!(take_custom_command_cancel_request(&mut app));
+    assert!(
+        app.command_running()
+            .is_some_and(|(_, _, cancelling)| cancelling)
+    );
+}
+
+#[test]
 fn command_output_pane_scrolls_and_closes() {
     let mut app = app_with(changeset_with_one_file());
     let command = custom_command("C", "long output", "false");
@@ -1297,6 +1316,12 @@ fn take_custom_command_request(app: &mut App) -> Option<CustomCommandBinding> {
             AppEffect::RunCustomCommand(command) => Some(command),
             _ => None,
         })
+}
+
+fn take_custom_command_cancel_request(app: &mut App) -> bool {
+    app.take_effects()
+        .into_iter()
+        .any(|effect| matches!(effect, AppEffect::CancelCustomCommand))
 }
 
 fn take_ask_ai_request(app: &mut App) -> Option<AskAiRequest> {
