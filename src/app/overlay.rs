@@ -187,11 +187,15 @@ impl App {
         rows::discard_status_lines(prompt.as_deref(), content_width, theme)
     }
 
-    pub(crate) fn set_custom_command_running(&mut self, command: &CustomCommandBinding) {
+    fn set_diff_overlay(&mut self, overlay: Overlay) {
         self.live_error = None;
         self.focus = FocusPane::Diff;
         self.text_selection.clear();
-        self.overlay = Some(Overlay::CommandRunning {
+        self.overlay = Some(overlay);
+    }
+
+    pub(crate) fn set_custom_command_running(&mut self, command: &CustomCommandBinding) {
+        self.set_diff_overlay(Overlay::CommandRunning {
             binding: command.clone(),
             spinner_frame: 0,
             cancelling: false,
@@ -205,10 +209,7 @@ impl App {
     }
 
     pub(crate) fn set_custom_command_result(&mut self, result: CustomCommandResult) {
-        self.live_error = None;
-        self.focus = FocusPane::Diff;
-        self.text_selection.clear();
-        self.overlay = Some(Overlay::CommandOutput(CommandOutputState {
+        self.set_diff_overlay(Overlay::CommandOutput(CommandOutputState {
             result,
             scroll: ScrollText::default(),
         }));
@@ -219,10 +220,7 @@ impl App {
     }
 
     pub(crate) fn set_ask_ai_running_question(&mut self, question: &str) {
-        self.live_error = None;
-        self.focus = FocusPane::Diff;
-        self.text_selection.clear();
-        self.overlay = Some(Overlay::AskAiRunning {
+        self.set_diff_overlay(Overlay::AskAiRunning {
             question: question.to_string(),
             spinner_frame: 0,
             cancelling: false,
@@ -236,10 +234,7 @@ impl App {
     }
 
     pub(crate) fn set_ask_ai_result(&mut self, result: AskAiResult) {
-        self.live_error = None;
-        self.focus = FocusPane::Diff;
-        self.text_selection.clear();
-        self.overlay = Some(Overlay::AskAiOutput(AskAiOutputState {
+        self.set_diff_overlay(Overlay::AskAiOutput(AskAiOutputState {
             result,
             scroll: ScrollText::default(),
         }));

@@ -121,17 +121,21 @@ impl CommandKey {
 }
 
 impl CustomCommandResult {
+    fn new(binding: &CustomCommandBinding, cwd: Option<PathBuf>, outcome: ProcessOutcome) -> Self {
+        Self {
+            label: binding.label.clone(),
+            command: binding.command.clone(),
+            cwd,
+            outcome,
+        }
+    }
+
     pub(crate) fn from_output(
         binding: &CustomCommandBinding,
         cwd: PathBuf,
         output: Output,
     ) -> Self {
-        Self {
-            label: binding.label.clone(),
-            command: binding.command.clone(),
-            cwd: Some(cwd),
-            outcome: ProcessOutcome::from_output(output),
-        }
+        Self::new(binding, Some(cwd), ProcessOutcome::from_output(output))
     }
 
     pub(crate) fn not_started(
@@ -139,12 +143,7 @@ impl CustomCommandResult {
         cwd: Option<PathBuf>,
         error: impl Into<String>,
     ) -> Self {
-        Self {
-            label: binding.label.clone(),
-            command: binding.command.clone(),
-            cwd,
-            outcome: ProcessOutcome::not_started(error),
-        }
+        Self::new(binding, cwd, ProcessOutcome::not_started(error))
     }
 
     pub(crate) fn cancelled(
@@ -152,12 +151,7 @@ impl CustomCommandResult {
         cwd: PathBuf,
         output: Option<Output>,
     ) -> Self {
-        Self {
-            label: binding.label.clone(),
-            command: binding.command.clone(),
-            cwd: Some(cwd),
-            outcome: ProcessOutcome::cancelled(output),
-        }
+        Self::new(binding, Some(cwd), ProcessOutcome::cancelled(output))
     }
 
     pub(crate) fn label(&self) -> &str {

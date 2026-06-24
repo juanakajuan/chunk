@@ -39,6 +39,18 @@ pub(crate) fn no_diff_lines(
     wrap_line(muted_line(message, theme), content_width)
 }
 
+fn styled_status_lines(
+    text: impl Into<String>,
+    color: Color,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    wrap_line(
+        Line::styled(text.into(), color_style(color, theme.background)),
+        content_width,
+    )
+}
+
 pub(crate) fn live_status_lines(
     error: Option<&str>,
     notice: Option<&str>,
@@ -53,13 +65,7 @@ pub(crate) fn live_status_lines(
         return Vec::new();
     };
 
-    wrap_line(
-        Line::styled(
-            format!("{prefix} {message}"),
-            color_style(color, theme.background),
-        ),
-        content_width,
-    )
+    styled_status_lines(format!("{prefix} {message}"), color, content_width, theme)
 }
 
 pub(crate) fn discard_status_lines(
@@ -71,12 +77,11 @@ pub(crate) fn discard_status_lines(
         return Vec::new();
     };
 
-    wrap_line(
-        Line::styled(
-            format!("! {prompt}  y/Enter confirm  Esc/n cancel"),
-            color_style(theme.removed, theme.background),
-        ),
+    styled_status_lines(
+        format!("! {prompt}  y/Enter confirm  Esc/n cancel"),
+        theme.removed,
         content_width,
+        theme,
     )
 }
 
@@ -97,16 +102,15 @@ pub(crate) fn custom_command_running_lines(
         "Running command"
     };
 
-    wrap_line(
-        Line::styled(
-            format!(
-                "{} {status}: {}",
-                CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()],
-                command.label()
-            ),
-            color_style(theme.accent, theme.background),
+    styled_status_lines(
+        format!(
+            "{} {status}: {}",
+            CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()],
+            command.label()
         ),
+        theme.accent,
         content_width,
+        theme,
     )
 }
 
@@ -125,10 +129,7 @@ pub(crate) fn ask_ai_prompt_lines(
         format!("Ask AI: {input}")
     };
 
-    wrap_line(
-        Line::styled(text, color_style(theme.accent, theme.background)),
-        content_width,
-    )
+    styled_status_lines(text, theme.accent, content_width, theme)
 }
 
 pub(crate) fn ask_ai_running_lines(
@@ -147,15 +148,15 @@ pub(crate) fn ask_ai_running_lines(
     } else {
         "Asking AI"
     };
-    wrap_line(
-        Line::styled(
-            format!(
-                "{} {status}: {question}",
-                CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()]
-            ),
-            color_style(theme.accent, theme.background),
+
+    styled_status_lines(
+        format!(
+            "{} {status}: {question}",
+            CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()]
         ),
+        theme.accent,
         content_width,
+        theme,
     )
 }
 
@@ -198,10 +199,7 @@ pub(crate) fn search_status_lines(
         ),
     };
 
-    wrap_line(
-        Line::styled(text, color_style(theme.accent, theme.background)),
-        content_width,
-    )
+    styled_status_lines(text, theme.accent, content_width, theme)
 }
 
 pub(crate) fn keybind_bar_line(
@@ -210,11 +208,6 @@ pub(crate) fn keybind_bar_line(
     keybinds: KeybindMap,
     theme: Theme,
 ) -> Line<'static> {
-    let background = theme.background;
-    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
-    let label_style = color_style(theme.muted, background);
-    let separator_style = color_style(theme.border, background);
-
     let move_keys = key_pair(keybinds, BuiltinAction::MoveDown, BuiltinAction::MoveUp);
     let mut hints: Vec<(String, &'static str)> = vec![(
         keybinds.display(BuiltinAction::ToggleFiles),
@@ -235,17 +228,7 @@ pub(crate) fn keybind_bar_line(
     hints.push((keybinds.display(BuiltinAction::Help), "help"));
     hints.push((keybinds.display(BuiltinAction::Quit), "quit"));
 
-    let mut spans = Vec::new();
-
-    for (index, (key, label)) in hints.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled("  \u{b7}  ", separator_style));
-        }
-        spans.push(keybind_key_span(key, key_style));
-        spans.push(Span::styled(format!(" {label}"), label_style));
-    }
-
-    Line::from(spans)
+    Line::from(keybind_hint_spans(&hints, theme))
 }
 
 pub(crate) fn keybind_mode_tag_line(can_stage: bool, theme: Theme) -> Line<'static> {
@@ -265,71 +248,33 @@ fn keybind_key_span(key: &str, style: Style) -> Span<'static> {
 }
 
 pub(crate) fn ask_ai_prompt_keybind_bar_line(theme: Theme) -> Line<'static> {
-    let background = theme.background;
-    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
-    let label_style = color_style(theme.muted, background);
-    let separator_style = color_style(theme.border, background);
-
-    Line::from(vec![
-        Span::styled(
-            " ASK AI ",
-            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
-        Span::styled("  ", label_style),
-        keybind_key_span("Enter", key_style),
-        Span::styled(" submit", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("Esc", key_style),
-        Span::styled(" cancel", label_style),
-    ])
+    let hints = [
+        ("Enter".to_string(), "submit"),
+        ("Esc".to_string(), "cancel"),
+    ];
+    tagged_keybind_bar_line(" ASK AI ", &hints, theme)
 }
 
 pub(crate) fn ask_ai_running_keybind_bar_line(keybinds: KeybindMap, theme: Theme) -> Line<'static> {
-    let background = theme.background;
-    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
-    let label_style = color_style(theme.muted, background);
-    let separator_style = color_style(theme.border, background);
-
-    Line::from(vec![
-        Span::styled(
-            " ASK AI ",
-            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
+    let hints = [
+        (
+            format!("Esc/{}", keybinds.display(BuiltinAction::Quit)),
+            "cancel",
         ),
-        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
-        Span::styled("  ", label_style),
-        keybind_key_span(
-            &format!("Esc/{}", keybinds.display(BuiltinAction::Quit)),
-            key_style,
-        ),
-        Span::styled(" cancel", label_style),
-        Span::styled("  \u{b7}  ", separator_style),
-        keybind_key_span("Ctrl-c", key_style),
-        Span::styled(" quit", label_style),
-    ])
+        ("Ctrl-c".to_string(), "quit"),
+    ];
+    tagged_keybind_bar_line(" ASK AI ", &hints, theme)
 }
 
 pub(crate) fn custom_command_running_keybind_bar_line(
     keybinds: KeybindMap,
     theme: Theme,
 ) -> Line<'static> {
-    let background = theme.background;
-    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
-    let label_style = color_style(theme.muted, background);
-
-    Line::from(vec![
-        Span::styled(
-            " COMMAND ",
-            color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("\u{e0b0}", color_style(theme.accent, background)),
-        Span::styled("  ", label_style),
-        keybind_key_span(
-            &format!("Esc/{}/Ctrl-c", keybinds.display(BuiltinAction::Quit)),
-            key_style,
-        ),
-        Span::styled(" cancel", label_style),
-    ])
+    let hints = [(
+        format!("Esc/{}/Ctrl-c", keybinds.display(BuiltinAction::Quit)),
+        "cancel",
+    )];
+    tagged_keybind_bar_line(" COMMAND ", &hints, theme)
 }
 
 pub(crate) fn ask_ai_output_keybind_bar_line(keybinds: KeybindMap, theme: Theme) -> Line<'static> {
@@ -371,9 +316,7 @@ fn tagged_keybind_bar_line(
     theme: Theme,
 ) -> Line<'static> {
     let background = theme.background;
-    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
     let label_style = color_style(theme.muted, background);
-    let separator_style = color_style(theme.border, background);
 
     let mut spans = vec![
         Span::styled(
@@ -384,6 +327,18 @@ fn tagged_keybind_bar_line(
         Span::styled("  ", label_style),
     ];
 
+    spans.extend(keybind_hint_spans(hints, theme));
+
+    Line::from(spans)
+}
+
+fn keybind_hint_spans(hints: &[(String, &'static str)], theme: Theme) -> Vec<Span<'static>> {
+    let background = theme.background;
+    let key_style = color_style(theme.on_accent, theme.accent).add_modifier(Modifier::BOLD);
+    let label_style = color_style(theme.muted, background);
+    let separator_style = color_style(theme.border, background);
+    let mut spans = Vec::new();
+
     for (index, (key, label)) in hints.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled("  \u{b7}  ", separator_style));
@@ -392,7 +347,7 @@ fn tagged_keybind_bar_line(
         spans.push(Span::styled(format!(" {label}"), label_style));
     }
 
-    Line::from(spans)
+    spans
 }
 
 fn key_pair(keybinds: KeybindMap, first: BuiltinAction, second: BuiltinAction) -> String {

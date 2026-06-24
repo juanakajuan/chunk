@@ -32,12 +32,39 @@ struct SelectionPoint {
     row: u16,
 }
 
+impl SelectionPoint {
+    fn new(column: u16, row: u16) -> Self {
+        Self { column, row }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectionDrag {
     surface: Rect,
     anchor: SelectionPoint,
     cursor: SelectionPoint,
     moved: bool,
+}
+
+impl SelectionDrag {
+    fn new(surface: Rect, anchor: SelectionPoint) -> Self {
+        Self {
+            surface,
+            anchor,
+            cursor: anchor,
+            moved: false,
+        }
+    }
+
+    fn update_cursor(&mut self, cursor: SelectionPoint) {
+        self.moved |= cursor != self.anchor;
+        self.cursor = cursor;
+    }
+
+    fn range(self) -> Option<SelectionRange> {
+        self.moved
+            .then(|| SelectionRange::between(self.surface, self.anchor, self.cursor))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,12 +109,7 @@ impl TextSelection {
             return false;
         };
 
-        self.drag = Some(SelectionDrag {
-            surface,
-            anchor: point,
-            cursor: point,
-            moved: false,
-        });
+        self.drag = Some(SelectionDrag::new(surface, point));
         self.selected = None;
         true
     }
@@ -97,9 +119,7 @@ impl TextSelection {
             return false;
         };
 
-        let cursor = SelectionPoint { column, row };
-        drag.moved |= cursor != drag.anchor;
-        drag.cursor = cursor;
+        drag.update_cursor(SelectionPoint::new(column, row));
         true
     }
 
@@ -108,15 +128,12 @@ impl TextSelection {
             return false;
         };
 
-        let cursor = SelectionPoint { column, row };
-        drag.moved |= cursor != drag.anchor;
-        drag.cursor = cursor;
-        if !drag.moved {
+        drag.update_cursor(SelectionPoint::new(column, row));
+        let Some(range) = drag.range() else {
             self.selected = None;
             return false;
-        }
+        };
 
-        let range = SelectionRange::between(drag.surface, drag.anchor, drag.cursor);
         self.selected = Some(range);
         if let Some(text) = self.text_for_range(range) {
             self.clipboard_request = Some(text);
@@ -192,10 +209,7 @@ impl TextSelection {
     }
 
     fn active_range(&self) -> Option<SelectionRange> {
-        self.drag
-            .filter(|drag| drag.moved)
-            .map(|drag| SelectionRange::between(drag.surface, drag.anchor, drag.cursor))
-            .or(self.selected)
+        self.drag.and_then(SelectionDrag::range).or(self.selected)
     }
 
     fn selectable_point_at(&self, column: u16, row: u16) -> Option<(Rect, SelectionPoint)> {
@@ -206,10 +220,7 @@ impl TextSelection {
             .map(|line| {
                 (
                     line.surface,
-                    SelectionPoint {
-                        column: column.max(line.start_col),
-                        row,
-                    },
+                    SelectionPoint::new(column.max(line.start_col), row),
                 )
             })
     }
@@ -391,15 +402,10 @@ fn highlight_line_selection(
 ) -> Line<'static> {
     let style = line.style;
     let alignment = line.alignment;
-    let mut display_col = 0;
     let mut spans = Vec::new();
 
     for span in line.spans {
-        for value in span.content.chars() {
-            let char_start = display_col;
-            let char_end = display_col + char_display_width(value).max(1);
-            display_col = char_end;
-
+        for (value, char_start, char_end) in display_columns(span.content.as_ref()) {
             let style = if columns.overlaps_display_range(char_start, char_end) {
                 span.style
                     .bg(theme.accent)
@@ -421,14 +427,8 @@ fn highlight_line_selection(
 
 fn text_by_display_columns(text: &str, columns: SelectedColumns) -> String {
     let mut output = String::new();
-    let mut display_col = 0;
 
-    for character in text.chars() {
-        let width = char_display_width(character).max(1);
-        let char_start = display_col;
-        let char_end = display_col + width;
-        display_col = char_end;
-
+    for (character, char_start, char_end) in display_columns(text) {
         if char_start >= usize::from(columns.end_col) {
             break;
         }
@@ -439,6 +439,17 @@ fn text_by_display_columns(text: &str, columns: SelectedColumns) -> String {
     }
 
     output
+}
+
+fn display_columns(text: &str) -> impl Iterator<Item = (char, usize, usize)> + '_ {
+    let mut display_col = 0;
+
+    text.chars().map(move |character| {
+        let char_start = display_col;
+        let char_end = char_start + char_display_width(character).max(1);
+        display_col = char_end;
+        (character, char_start, char_end)
+    })
 }
 
 fn line_text(line: &Line<'_>) -> String {

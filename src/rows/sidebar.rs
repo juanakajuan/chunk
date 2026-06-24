@@ -199,7 +199,10 @@ fn visible_sidebar_scroll(
     }
 
     let clamped_scroll = sidebar_scroll.min(entries.len() - 1);
-    let Some(selected_entry_index) = selected_sidebar_entry_index(entries, active_target) else {
+    let Some(selected_entry_index) = entries
+        .iter()
+        .position(|entry| entry.matches_target(active_target))
+    else {
         return clamped_scroll;
     };
 
@@ -219,15 +222,6 @@ fn visible_sidebar_scroll(
     sidebar_scroll_for_selected(row_counts, selected_entry_index, visible_height)
 }
 
-fn selected_sidebar_entry_index(
-    entries: &[SidebarEntry],
-    active_target: &SidebarRowTarget,
-) -> Option<usize> {
-    entries
-        .iter()
-        .position(|entry| entry.matches_target(active_target))
-}
-
 fn sidebar_selection_visible(
     row_counts: &[usize],
     scroll: usize,
@@ -241,10 +235,7 @@ fn sidebar_selection_visible(
         return false;
     }
 
-    let Some(selected_row_count) = row_counts.get(selected_index).copied() else {
-        return false;
-    };
-
+    let selected_row_count = row_counts[selected_index];
     let visible_height = visible_height.max(1);
     let rows_above_selection: usize = row_counts[scroll..selected_index].iter().sum();
     if rows_above_selection == 0 {
@@ -386,10 +377,6 @@ impl TreeNode {
 }
 
 fn sidebar_entries(files: &[DiffFile], collapsed_dirs: &HashSet<String>) -> Vec<SidebarEntry> {
-    tree_sidebar_entries(files, collapsed_dirs)
-}
-
-fn tree_sidebar_entries(files: &[DiffFile], collapsed_dirs: &HashSet<String>) -> Vec<SidebarEntry> {
     let mut root = TreeNode::default();
     for (index, file) in files.iter().enumerate() {
         root.insert_file(file.display_path(), index);
@@ -412,16 +399,13 @@ fn render_sidebar_entry(
     entry: &SidebarEntry,
     context: &SidebarRenderContext<'_>,
 ) -> Vec<Line<'static>> {
+    let is_selected = entry.matches_target(&context.active_target);
     match entry {
         SidebarEntry::File { index, depth } => {
             let Some(file) = context.files.get(*index) else {
                 return Vec::new();
             };
             let is_reviewed = context.reviewed_files.contains(file.display_path());
-            let is_selected = matches!(
-                &context.active_target,
-                SidebarRowTarget::File(active_index) if active_index == index
-            );
             render_file_entry(FileEntryRenderInput {
                 file,
                 is_selected,
@@ -438,10 +422,6 @@ fn render_sidebar_entry(
             expanded,
         } => {
             let folder_stage = folder_stage(context.files, path);
-            let is_selected = matches!(
-                &context.active_target,
-                SidebarRowTarget::Folder(active_path) if active_path == path
-            );
             render_folder_entry(
                 name,
                 *depth,
@@ -636,13 +616,11 @@ fn folder_stage(files: &[DiffFile], folder_path: &str) -> FileStage {
         return FileStage::Unstaged;
     };
 
-    matching_stages.fold(first_stage, |combined, stage| {
-        if combined == stage && stage != FileStage::Mixed {
-            combined
-        } else {
-            FileStage::Mixed
-        }
-    })
+    if matching_stages.all(|stage| stage == first_stage) {
+        first_stage
+    } else {
+        FileStage::Mixed
+    }
 }
 
 fn tree_file_prefix(depth: usize) -> String {
