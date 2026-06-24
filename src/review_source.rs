@@ -42,6 +42,22 @@ pub(crate) struct PullRequestReviewSource {
     source_label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorktreeMutation {
+    ToggleFileStaging { path: String },
+    StageFiles { paths: Vec<String> },
+    UnstageFiles { paths: Vec<String> },
+    ToggleHunkStaging { file: DiffFile, hunk_index: usize },
+    DiscardFile { path: String },
+    DiscardFiles { paths: Vec<String> },
+    DiscardHunk { file: DiffFile, hunk_index: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorktreeMutations {
+    source: WorktreeReviewSource,
+}
+
 impl LoadedReview {
     #[cfg(test)]
     pub(crate) fn worktree(changeset: Changeset) -> Self {
@@ -74,12 +90,11 @@ impl ReviewSource {
         })
     }
 
-    pub(crate) fn can_stage(&self) -> bool {
-        matches!(self, Self::Worktree(_))
-    }
-
-    pub(crate) fn can_discard(&self) -> bool {
-        matches!(self, Self::Worktree(_))
+    pub(crate) fn worktree_mutations(&self) -> Option<WorktreeMutations> {
+        match self {
+            Self::Worktree(source) => Some(WorktreeMutations { source: *source }),
+            Self::PullRequest(_) => None,
+        }
     }
 
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
@@ -100,63 +115,6 @@ impl ReviewSource {
         match self {
             Self::Worktree(source) => source.load_source_snapshots(file),
             Self::PullRequest(source) => source.load_source_snapshots(file),
-        }
-    }
-
-    pub(crate) fn toggle_staging_for_file(&self, path: &str) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.toggle_staging_for_file(path).map(Some),
-            Self::PullRequest(_) => Ok(None),
-        }
-    }
-
-    pub(crate) fn stage_files(&self, paths: &[String]) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.stage_files(paths).map(Some),
-            Self::PullRequest(_) => Ok(None),
-        }
-    }
-
-    pub(crate) fn unstage_files(&self, paths: &[String]) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.unstage_files(paths).map(Some),
-            Self::PullRequest(_) => Ok(None),
-        }
-    }
-
-    pub(crate) fn toggle_staging_for_hunk(
-        &self,
-        file: &DiffFile,
-        hunk_index: usize,
-    ) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.toggle_staging_for_hunk(file, hunk_index).map(Some),
-            Self::PullRequest(_) => Ok(None),
-        }
-    }
-
-    pub(crate) fn discard_file(&self, path: &str) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.discard_file(path).map(Some),
-            Self::PullRequest(_) => Ok(None),
-        }
-    }
-
-    pub(crate) fn discard_files(&self, paths: &[String]) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.discard_files(paths).map(Some),
-            Self::PullRequest(_) => Ok(None),
-        }
-    }
-
-    pub(crate) fn discard_hunk(
-        &self,
-        file: &DiffFile,
-        hunk_index: usize,
-    ) -> Result<Option<Changeset>> {
-        match self {
-            Self::Worktree(source) => source.discard_hunk(file, hunk_index).map(Some),
-            Self::PullRequest(_) => Ok(None),
         }
     }
 
@@ -195,6 +153,36 @@ impl ReviewSource {
     }
 }
 
+impl WorktreeMutation {
+    pub(crate) fn preserve_scroll(&self) -> bool {
+        matches!(
+            self,
+            Self::ToggleHunkStaging { .. }
+                | Self::DiscardFile { .. }
+                | Self::DiscardFiles { .. }
+                | Self::DiscardHunk { .. }
+        )
+    }
+
+    pub(crate) fn failure_context(&self) -> &'static str {
+        match self {
+            Self::ToggleHunkStaging { .. } => "hunk staging failed",
+            Self::ToggleFileStaging { .. }
+            | Self::StageFiles { .. }
+            | Self::UnstageFiles { .. } => "staging failed",
+            Self::DiscardFile { .. } | Self::DiscardFiles { .. } | Self::DiscardHunk { .. } => {
+                "discard failed"
+            }
+        }
+    }
+}
+
+impl WorktreeMutations {
+    pub(crate) fn apply(self, mutation: WorktreeMutation) -> Result<Changeset> {
+        self.source.apply_mutation(mutation)
+    }
+}
+
 impl WorktreeReviewSource {
     fn live_watch_root(self) -> Result<PathBuf> {
         git::worktree_root()
@@ -208,37 +196,25 @@ impl WorktreeReviewSource {
         git::load_worktree_source_snapshots(file);
     }
 
+    fn apply_mutation(self, mutation: WorktreeMutation) -> Result<Changeset> {
+        self.reload_after(|| match mutation {
+            WorktreeMutation::ToggleFileStaging { path } => git::toggle_staging_for_file(&path),
+            WorktreeMutation::StageFiles { paths } => git::stage_files(&paths),
+            WorktreeMutation::UnstageFiles { paths } => git::unstage_files(&paths),
+            WorktreeMutation::ToggleHunkStaging { file, hunk_index } => {
+                git::toggle_staging_for_hunk(&file, hunk_index)
+            }
+            WorktreeMutation::DiscardFile { path } => git::discard_worktree_file(&path),
+            WorktreeMutation::DiscardFiles { paths } => git::discard_worktree_files(&paths),
+            WorktreeMutation::DiscardHunk { file, hunk_index } => {
+                git::discard_worktree_hunk(&file, hunk_index)
+            }
+        })
+    }
+
     fn reload_after(self, git_action: impl FnOnce() -> Result<()>) -> Result<Changeset> {
         git_action()?;
         self.reload()
-    }
-
-    fn toggle_staging_for_file(self, path: &str) -> Result<Changeset> {
-        self.reload_after(|| git::toggle_staging_for_file(path))
-    }
-
-    fn stage_files(self, paths: &[String]) -> Result<Changeset> {
-        self.reload_after(|| git::stage_files(paths))
-    }
-
-    fn unstage_files(self, paths: &[String]) -> Result<Changeset> {
-        self.reload_after(|| git::unstage_files(paths))
-    }
-
-    fn toggle_staging_for_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
-        self.reload_after(|| git::toggle_staging_for_hunk(file, hunk_index))
-    }
-
-    fn discard_file(self, path: &str) -> Result<Changeset> {
-        self.reload_after(|| git::discard_worktree_file(path))
-    }
-
-    fn discard_files(self, paths: &[String]) -> Result<Changeset> {
-        self.reload_after(|| git::discard_worktree_files(paths))
-    }
-
-    fn discard_hunk(self, file: &DiffFile, hunk_index: usize) -> Result<Changeset> {
-        self.reload_after(|| git::discard_worktree_hunk(file, hunk_index))
     }
 
     fn editor_request(self, file: &DiffFile) -> Result<EditorRequest> {
@@ -306,21 +282,8 @@ mod tests {
         let source = pull_request_source();
         let file = diff_file(FileStatus::Modified, "src/lib.rs", "src/lib.rs");
 
-        assert!(!source.can_stage());
-        assert!(!source.can_discard());
+        assert!(source.worktree_mutations().is_none());
         assert_eq!(source.live_watch_root().unwrap(), None);
-        assert_eq!(source.toggle_staging_for_file("src/lib.rs").unwrap(), None);
-        assert_eq!(
-            source.stage_files(&["src/lib.rs".to_string()]).unwrap(),
-            None
-        );
-        assert_eq!(
-            source.unstage_files(&["src/lib.rs".to_string()]).unwrap(),
-            None
-        );
-        assert_eq!(source.toggle_staging_for_hunk(&file, 0).unwrap(), None);
-        assert_eq!(source.discard_file("src/lib.rs").unwrap(), None);
-        assert_eq!(source.discard_hunk(&file, 0).unwrap(), None);
         assert!(
             source
                 .editor_request(&file)
@@ -337,11 +300,49 @@ mod tests {
     fn worktree_source_exposes_worktree_affordances() {
         let source = ReviewSource::worktree();
 
-        assert!(source.can_stage());
-        assert!(source.can_discard());
+        assert!(source.worktree_mutations().is_some());
         assert_eq!(source.empty_sidebar_message(), NO_TRACKED_CHANGES);
         assert_eq!(source.no_diff_message(), NO_DIFF_MESSAGE);
         assert_eq!(source.ask_ai_review_mode(), AskAiReviewMode::Worktree);
+    }
+
+    #[test]
+    fn worktree_mutation_metadata_describes_reload_and_error_policy() {
+        let file = diff_file(FileStatus::Modified, "src/lib.rs", "src/lib.rs");
+
+        assert!(
+            !WorktreeMutation::ToggleFileStaging {
+                path: "src/lib.rs".to_string()
+            }
+            .preserve_scroll()
+        );
+        assert!(
+            !WorktreeMutation::StageFiles {
+                paths: vec!["src/lib.rs".to_string()]
+            }
+            .preserve_scroll()
+        );
+        assert!(
+            WorktreeMutation::ToggleHunkStaging {
+                file: file.clone(),
+                hunk_index: 0,
+            }
+            .preserve_scroll()
+        );
+        assert!(
+            WorktreeMutation::DiscardFile {
+                path: "src/lib.rs".to_string()
+            }
+            .preserve_scroll()
+        );
+        assert_eq!(
+            WorktreeMutation::ToggleHunkStaging {
+                file,
+                hunk_index: 0,
+            }
+            .failure_context(),
+            "hunk staging failed"
+        );
     }
 
     #[test]

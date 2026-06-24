@@ -20,7 +20,7 @@ use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::{Changeset, DiffFile, DiffHunk, FileStage};
 use crate::patch;
-use crate::review_source::{LoadedReview, ReviewSource};
+use crate::review_source::{LoadedReview, ReviewSource, WorktreeMutation};
 use crate::rows::{self, SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
 use crate::scroll_text::VerticalDirection;
 use crate::selection::TextSelection;
@@ -83,6 +83,25 @@ enum StagingRequest {
 enum FolderStagingAction {
     Stage,
     Unstage,
+}
+
+impl StagingRequest {
+    fn into_mutation(self) -> WorktreeMutation {
+        match self {
+            Self::File { path } => WorktreeMutation::ToggleFileStaging { path },
+            Self::Folder {
+                file_paths, action, ..
+            } => match action {
+                FolderStagingAction::Stage => WorktreeMutation::StageFiles { paths: file_paths },
+                FolderStagingAction::Unstage => {
+                    WorktreeMutation::UnstageFiles { paths: file_paths }
+                }
+            },
+            Self::Hunk { file, hunk_index } => {
+                WorktreeMutation::ToggleHunkStaging { file, hunk_index }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,11 +360,11 @@ impl App {
     }
 
     fn can_stage(&self) -> bool {
-        self.source.can_stage()
+        self.source.worktree_mutations().is_some()
     }
 
     fn can_discard(&self) -> bool {
-        self.source.can_discard()
+        self.source.worktree_mutations().is_some()
     }
 
     fn stage_keybind_hint(&self) -> Option<&'static str> {
@@ -1142,48 +1161,7 @@ impl App {
             }
         };
 
-        match request {
-            StagingRequest::File { path } => self.toggle_file_staging(&path),
-            StagingRequest::Folder {
-                file_paths, action, ..
-            } => self.toggle_folder_staging(&file_paths, action),
-            StagingRequest::Hunk { file, hunk_index } => {
-                self.toggle_hunk_staging(&file, hunk_index)
-            }
-        }
-    }
-
-    fn toggle_file_staging(&mut self, path: &str) {
-        match self.source.toggle_staging_for_file(path) {
-            Ok(Some(reloaded_changeset)) => {
-                self.apply_reloaded_changeset(reloaded_changeset, false)
-            }
-            Ok(None) => {}
-            Err(error) => self.live_error = Some(format!("staging failed: {error}")),
-        }
-    }
-
-    fn toggle_folder_staging(&mut self, paths: &[String], action: FolderStagingAction) {
-        let result = match action {
-            FolderStagingAction::Stage => self.source.stage_files(paths),
-            FolderStagingAction::Unstage => self.source.unstage_files(paths),
-        };
-
-        match result {
-            Ok(Some(reloaded_changeset)) => {
-                self.apply_reloaded_changeset(reloaded_changeset, false)
-            }
-            Ok(None) => {}
-            Err(error) => self.live_error = Some(format!("staging failed: {error}")),
-        }
-    }
-
-    fn toggle_hunk_staging(&mut self, file: &DiffFile, hunk_index: usize) {
-        match self.source.toggle_staging_for_hunk(file, hunk_index) {
-            Ok(Some(reloaded_changeset)) => self.apply_reloaded_changeset(reloaded_changeset, true),
-            Ok(None) => {}
-            Err(error) => self.live_error = Some(format!("hunk staging failed: {error}")),
-        }
+        self.apply_worktree_mutation(request.into_mutation());
     }
 
     fn toggle_selected_file_reviewed(&mut self) {
@@ -1345,18 +1323,18 @@ impl App {
             return;
         };
 
-        let result = match confirmation.target {
+        let mutation = match confirmation.target {
             DiscardTarget::File { file_index, path } => {
                 if self.confirmed_file(file_index, &path).is_none() {
                     return;
                 }
-                self.source.discard_file(&path)
+                WorktreeMutation::DiscardFile { path }
             }
             DiscardTarget::Folder { path, file_paths } => {
                 let Some(file_paths) = self.confirmed_folder_paths(&path, file_paths) else {
                     return;
                 };
-                self.source.discard_files(&file_paths)
+                WorktreeMutation::DiscardFiles { paths: file_paths }
             }
             DiscardTarget::Hunk {
                 file_index,
@@ -1366,14 +1344,25 @@ impl App {
                 let Some(file) = self.confirmed_file(file_index, &path) else {
                     return;
                 };
-                self.source.discard_hunk(&file, hunk_index)
+                WorktreeMutation::DiscardHunk { file, hunk_index }
             }
         };
 
-        match result {
-            Ok(Some(reloaded_changeset)) => self.apply_reloaded_changeset(reloaded_changeset, true),
-            Ok(None) => {}
-            Err(error) => self.live_error = Some(format!("discard failed: {error}")),
+        self.apply_worktree_mutation(mutation);
+    }
+
+    fn apply_worktree_mutation(&mut self, mutation: WorktreeMutation) {
+        let Some(mutations) = self.source.worktree_mutations() else {
+            return;
+        };
+        let preserve_scroll = mutation.preserve_scroll();
+        let failure_context = mutation.failure_context();
+
+        match mutations.apply(mutation) {
+            Ok(reloaded_changeset) => {
+                self.apply_reloaded_changeset(reloaded_changeset, preserve_scroll)
+            }
+            Err(error) => self.live_error = Some(format!("{failure_context}: {error}")),
         }
     }
 
