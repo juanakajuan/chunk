@@ -1,10 +1,10 @@
 use super::*;
 use crate::ask_ai::{AskAiResult, AskAiReviewMode};
 use crate::custom_command::CustomCommandResult;
+use crate::diff_render::RenderedDiffLines;
 use crate::keybind::{BuiltinAction, BuiltinKey, KeybindMap};
 use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
 use crate::theme::Theme;
-use crate::viewport::RenderedDiffLines;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
@@ -13,7 +13,7 @@ fn diff_scroll_bounds_use_rendered_rows_when_available() {
     let mut app = app_with(changeset_with_one_file());
     app.viewport.begin_diff(Rect::default(), 3);
     app.diff_pane.set_scroll(99);
-    app.viewport.cache_diff_lines(
+    app.diff_render.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -257,7 +257,7 @@ fn hunk_jump_uses_cached_wrapped_offsets() {
     let mut app = app_with(changeset_with_two_hunk_file());
     let theme = Theme::github_dark();
     app.viewport.begin_diff(Rect::default(), 3);
-    app.viewport.cache_diff_lines(
+    app.diff_render.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -286,7 +286,7 @@ fn hunk_jump_handles_missing_and_single_offsets() {
     let mut app = app_with(changeset_with_one_file());
     let theme = Theme::github_dark();
     app.viewport.begin_diff(Rect::default(), 3);
-    app.viewport.cache_diff_lines(
+    app.diff_render.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -304,7 +304,7 @@ fn hunk_jump_handles_missing_and_single_offsets() {
         .unwrap();
     assert_eq!(app.diff_pane.scroll(), 4);
 
-    app.viewport.cache_diff_lines(
+    app.diff_render.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -332,7 +332,7 @@ fn scrolling_diff_selects_hunk_at_top_visible_row() {
     let mut app = app_with(changeset_with_two_hunk_file());
     let theme = Theme::github_dark();
     app.viewport.begin_diff(Rect::default(), 3);
-    app.viewport.cache_diff_lines(
+    app.diff_render.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -371,7 +371,7 @@ fn diff_click_selects_hunk_under_pointer() {
     let mut app = app_with(changeset_with_two_hunk_file());
     let theme = Theme::github_dark();
     app.viewport.begin_diff(Rect::new(0, 0, 80, 10), 8);
-    app.viewport.cache_diff_lines(
+    app.diff_render.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -478,7 +478,7 @@ fn diff_pane_editor_request_uses_visible_diff_line() {
 
     render_diff_pane(&mut app, theme);
     let second_hunk_offset = app
-        .viewport
+        .diff_render
         .hunk_offset(0, "0", 1)
         .expect("second hunk offset should be cached");
     app.diff_pane.set_scroll(second_hunk_offset + 2);

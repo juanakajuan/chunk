@@ -8,6 +8,7 @@ mod ask_ai;
 mod clipboard;
 mod config;
 mod custom_command;
+mod diff_render;
 mod editor;
 mod git;
 mod keybind;

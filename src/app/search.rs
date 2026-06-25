@@ -52,9 +52,9 @@ impl App {
 
     pub(super) fn refresh_search_matches(&mut self, selected_file_index: usize) -> bool {
         self.diff_pane.refresh_search_matches(
-            &self.changeset.files,
-            &self.viewport,
+            &self.diff_render,
             selected_file_index,
+            self.changeset.files.get(selected_file_index),
         )
     }
 
@@ -70,6 +70,7 @@ impl App {
         self.diff_pane.jump_by(
             direction,
             &self.viewport,
+            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );

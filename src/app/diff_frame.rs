@@ -15,9 +15,10 @@
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+use crate::diff_render::SelectedDiffRenderRequest;
 use crate::rows;
 use crate::theme::Theme;
-use crate::viewport::{DiffLayoutMetrics, DiffLayoutRequest, DiffRenderRequest, DiffScrollbar};
+use crate::viewport::DiffScrollbar;
 
 use super::{App, DiffPaneRows, pane_text_area, saturating_u16};
 
@@ -113,7 +114,8 @@ impl<'a> DiffFrameRenderer<'a> {
 
         if pending_search_scroll {
             self.app.diff_pane.scroll_active_search_match(
-                &self.app.viewport,
+                &self.app.diff_render,
+                self.app.viewport.diff_view_height(),
                 self.app.selected_file_index,
                 self.app.changeset.files.get(self.app.selected_file_index),
             );
@@ -194,45 +196,21 @@ impl<'a> DiffFrameRenderer<'a> {
     }
 
     fn selected_diff_line_count(&mut self, content_width: usize) -> usize {
-        self.selected_diff_layout_metrics(content_width)
-            .map_or(0, |metrics| metrics.total_rows)
-    }
-
-    fn selected_diff_layout_metrics(&mut self, content_width: usize) -> Option<&DiffLayoutMetrics> {
-        self.app
-            .viewport
-            .ensure_diff_cache_len(self.app.changeset.files.len());
-
         let selected_file_index = self.app.selected_file_index;
-        let file_id = self
-            .app
-            .changeset
-            .files
-            .get(selected_file_index)?
-            .id
-            .clone();
-        let request = DiffLayoutRequest {
-            file_index: selected_file_index,
-            file_id: file_id.as_str(),
+        let can_stage = self.app.can_stage();
+        let App {
+            diff_render,
+            changeset,
+            ..
+        } = &mut *self.app;
+
+        diff_render.total_rows(
+            selected_file_index,
+            changeset.files.get(selected_file_index),
             content_width,
-            can_stage: self.app.can_stage(),
-        };
-
-        if self.app.viewport.diff_layout_metrics(request).is_none() {
-            let file = &self.app.changeset.files[selected_file_index];
-            let counts = rows::diff_layout_counts(
-                file,
-                content_width,
-                self.request.theme,
-                request.can_stage,
-            );
-            self.app.viewport.cache_diff_layout_metrics(
-                request,
-                DiffLayoutMetrics::new(counts.hunk_offsets, counts.new_line_rows),
-            );
-        }
-
-        self.app.viewport.diff_layout_metrics(request)
+            self.request.theme,
+            can_stage,
+        )
     }
 
     fn diff_scrollbar(
@@ -285,10 +263,6 @@ impl<'a> DiffFrameRenderer<'a> {
     }
 
     fn ensure_selected_diff_cache(&mut self, content_width: usize, visible_height: usize) -> bool {
-        self.app
-            .viewport
-            .ensure_diff_cache_len(self.app.changeset.files.len());
-
         let selected_file_index = self.app.selected_file_index;
         let can_stage = self.app.can_stage();
         if selected_file_index >= self.app.changeset.files.len() {
@@ -297,46 +271,24 @@ impl<'a> DiffFrameRenderer<'a> {
         }
 
         let target_rows = self.app.diff_render_target_rows(visible_height);
-        let hunk_offsets = self
-            .selected_diff_layout_metrics(content_width)
-            .map(|metrics| metrics.hunk_offsets.clone())
-            .unwrap_or_default();
-
-        let file_id = self.app.changeset.files[selected_file_index].id.clone();
-        let request = DiffRenderRequest {
-            file_index: selected_file_index,
-            file_id: file_id.as_str(),
-            content_width,
-            syntax_palette: self.request.theme.syntax,
-            can_stage,
-            requested_rows: target_rows,
-        };
-
-        // Split borrows so the render seam can load source snapshots and render
-        // rows while the viewport owns the cache; source snapshots load only
-        // when the viewport actually invokes `render`.
         {
             let App {
-                viewport,
+                diff_render,
                 changeset,
                 source,
                 ..
             } = &mut *self.app;
-            viewport.ensure_diff_lines(request, hunk_offsets, |render_target| {
-                if let Some(file) = changeset.files.get_mut(selected_file_index) {
-                    source.load_source_snapshots(file);
-                }
-                let file = &changeset.files[selected_file_index];
-                let rendered = rows::diff_lines_until(
-                    file,
+            diff_render.ensure_selected_file(
+                changeset,
+                source,
+                SelectedDiffRenderRequest {
+                    file_index: selected_file_index,
                     content_width,
-                    self.request.theme,
+                    theme: self.request.theme,
                     can_stage,
-                    None,
-                    render_target,
-                );
-                (rendered.lines, rendered.complete)
-            });
+                    requested_rows: target_rows,
+                },
+            );
         }
 
         let pending_search_scroll = self.app.refresh_search_matches(selected_file_index);
@@ -350,20 +302,24 @@ impl<'a> DiffFrameRenderer<'a> {
         content_width: usize,
         visible_height: usize,
     ) -> Vec<Line<'static>> {
-        if self.app.selected_file_index >= self.app.changeset.files.len() {
+        let Some(file) = self.app.changeset.files.get(self.app.selected_file_index) else {
             return rows::no_diff_lines(
                 self.app.no_diff_message(),
                 content_width,
                 self.request.theme,
             );
-        }
+        };
 
-        let mut lines = self.app.viewport.visible_diff_lines(
+        let lines = self.app.diff_render.visible_selected_lines(
             self.app.selected_file_index,
+            file,
             self.app.diff_pane.scroll(),
             visible_height,
+            content_width,
+            self.request.theme,
+            self.app.can_stage(),
+            self.app.diff_pane.selected_hunk_index(),
         );
-        self.apply_selected_hunk_style(&mut lines, content_width);
         self.app.highlight_search_matches(lines, self.request.theme)
     }
 
@@ -433,42 +389,6 @@ impl<'a> DiffFrameRenderer<'a> {
             title,
             lines,
             scrollbar: None,
-        }
-    }
-
-    fn apply_selected_hunk_style(&self, lines: &mut [Line<'static>], content_width: usize) {
-        let Some(selected_hunk_index) = self.app.diff_pane.selected_hunk_index() else {
-            return;
-        };
-        let Some(file) = self.app.selected_file() else {
-            return;
-        };
-        let Some(hunk) = file.hunks.get(selected_hunk_index) else {
-            return;
-        };
-        let Some(hunk_offset) = self.app.viewport.hunk_offset(
-            self.app.selected_file_index,
-            file.id.as_str(),
-            selected_hunk_index,
-        ) else {
-            return;
-        };
-
-        let visible_start = self.app.diff_pane.scroll();
-        let visible_end = visible_start.saturating_add(lines.len());
-        let header_rows = rows::selected_hunk_header_rows(
-            hunk,
-            content_width,
-            self.request.theme,
-            self.app.can_stage(),
-        );
-        for (header_row_offset, header_row) in header_rows.into_iter().enumerate() {
-            let rendered_row = hunk_offset.saturating_add(header_row_offset);
-            if rendered_row < visible_start || rendered_row >= visible_end {
-                continue;
-            }
-
-            lines[rendered_row - visible_start] = header_row;
         }
     }
 }

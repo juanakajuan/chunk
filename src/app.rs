@@ -2,8 +2,8 @@
 //!
 //! `App` owns selection, focus, scroll state, and live reload errors. Review
 //! source behavior lives in `review_source`; terminal and watch orchestration
-//! live in `runtime`; rendered row preparation lives here while `ui` draws
-//! Ratatui widgets.
+//! live in `runtime`; diff row rendering lives in `diff_render` while `ui`
+//! draws Ratatui widgets.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ use ratatui::text::Line;
 use crate::ask_ai::{AskAiContext, AskAiRequest};
 use crate::config::AppConfig;
 use crate::custom_command::CustomCommandBinding;
+use crate::diff_render::DiffRenderState;
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::{Changeset, DiffFile, DiffHunk, FileStage};
@@ -152,6 +153,8 @@ pub(crate) struct App {
     selected_file_index: usize,
     /// Diff-pane scroll, hunk selection, search, and render-derived navigation state.
     diff_pane: DiffPaneState,
+    /// Rendered diff-row cache and layout metrics.
+    diff_render: DiffRenderState,
     /// Pane receiving keyboard and mouse wheel actions.
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
@@ -173,7 +176,7 @@ pub(crate) struct App {
     collapsed_tree_dirs: HashSet<String>,
     /// Active Files-panel tree row, if it differs from the selected file fallback.
     sidebar_cursor_target: Option<SidebarRowTarget>,
-    /// Rendered viewport geometry, row mapping, and render caches.
+    /// Rendered viewport geometry and row mapping.
     viewport: RenderedViewport,
     /// Visible text rows and active drag-to-copy selection.
     text_selection: TextSelection,
@@ -209,6 +212,7 @@ impl App {
             live_notice: None,
             selected_file_index: 0,
             diff_pane,
+            diff_render: DiffRenderState::new(file_count),
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             overlay: None,
@@ -219,7 +223,7 @@ impl App {
             sidebar_scroll: 0,
             collapsed_tree_dirs: HashSet::new(),
             sidebar_cursor_target: None,
-            viewport: RenderedViewport::new(file_count),
+            viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
             pending_left_click: None,
             diff_scrollbar_drag: None,
@@ -407,13 +411,24 @@ impl App {
 
     fn ensure_scroll_bounds(&mut self) {
         let selected_file = self.changeset.files.get(self.selected_file_index);
+        let selected_file_id = selected_file.map(|file| file.id.as_str());
+        let diff_render_max_scroll = self.diff_render.max_scroll(
+            self.selected_file_index,
+            selected_file_id,
+            selected_file.map_or(0, DiffFile::line_count),
+            self.viewport.diff_view_height(),
+        );
+        let scrollbar_max_scroll = selected_file_id
+            .map(|file_id| {
+                self.viewport
+                    .diff_scrollbar_max_scroll(self.selected_file_index, file_id)
+            })
+            .unwrap_or(0);
         let input = ViewportScrollInput {
             diff_scroll: self.diff_pane.scroll(),
             sidebar_scroll: self.sidebar_scroll,
-            selected_file_index: self.selected_file_index,
             file_count: self.changeset.files.len(),
-            selected_file_id: selected_file.map(|file| file.id.as_str()),
-            selected_file_line_count: selected_file.map_or(0, DiffFile::line_count),
+            diff_max_scroll: diff_render_max_scroll.max(scrollbar_max_scroll),
         };
 
         self.sidebar_scroll = self
@@ -503,8 +518,8 @@ impl App {
     }
 
     fn clear_render_caches(&mut self) {
-        self.viewport
-            .clear_render_caches(self.changeset.files.len());
+        self.diff_render.clear(self.changeset.files.len());
+        self.viewport.clear_diff_geometry();
         self.text_selection.clear();
         self.pending_left_click = None;
         self.diff_scrollbar_drag = None;
@@ -727,7 +742,8 @@ impl App {
                 if let Some(index) = hunk_index {
                     self.diff_pane.set_selected_hunk_index(Some(index));
                     self.diff_pane.center_selected_hunk(
-                        &self.viewport,
+                        &self.diff_render,
+                        self.viewport.diff_view_height(),
                         self.selected_file_index,
                         self.changeset.files.get(self.selected_file_index),
                     );
@@ -814,7 +830,7 @@ impl App {
         let diff_row = visible_row.checked_sub(self.viewport.diff_status_rows())?;
 
         self.diff_pane.hunk_index_at_rendered_row(
-            &self.viewport,
+            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
             self.diff_pane.scroll().saturating_add(diff_row),
@@ -1100,6 +1116,7 @@ impl App {
         self.diff_pane.scroll_page(
             direction,
             &self.viewport,
+            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
@@ -1109,7 +1126,7 @@ impl App {
         self.diff_pane.scroll_by(
             direction,
             amount,
-            &self.viewport,
+            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
@@ -1118,7 +1135,7 @@ impl App {
     fn scroll_diff_to(&mut self, scroll: usize) {
         self.diff_pane.scroll_to(
             scroll,
-            &self.viewport,
+            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
@@ -1126,7 +1143,7 @@ impl App {
 
     fn scroll_diff_to_top(&mut self) {
         self.diff_pane.scroll_to_top(
-            &self.viewport,
+            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
@@ -1406,7 +1423,12 @@ impl App {
         if self.focus == FocusPane::Diff {
             return self
                 .diff_pane
-                .editor_line(&self.viewport, self.selected_file_index, file)
+                .editor_line(
+                    &self.viewport,
+                    &self.diff_render,
+                    self.selected_file_index,
+                    file,
+                )
                 .or_else(|| file.first_changed_line());
         }
 
