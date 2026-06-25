@@ -830,6 +830,10 @@ fn custom_command_key_queues_command_request() {
     let request = take_custom_command_request(&mut app).expect("custom command should be queued");
     assert_eq!(request.label(), "commit");
     assert_eq!(request.command(), "git commit");
+    assert!(
+        app.command_running()
+            .is_some_and(|(command, _, cancelling)| command.label() == "commit" && !cancelling)
+    );
 }
 
 #[test]
@@ -1171,7 +1175,10 @@ fn ask_ai_key_from_files_panel_queues_file_context() {
     let request = take_ask_ai_request(&mut app).expect("Ask AI request should be queued");
     assert_eq!(request.question(), "Why changed?");
     assert_eq!(request.context().summary(), "sample.txt");
-    assert!(app.overlay.is_none());
+    assert!(
+        app.ask_ai_running()
+            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
+    );
 }
 
 #[test]
@@ -1194,7 +1201,10 @@ fn ask_ai_key_from_diff_pane_queues_hunk_context() {
     let request = take_ask_ai_request(&mut app).expect("Ask AI request should be queued");
     assert_eq!(request.question(), "Why changed?");
     assert_eq!(request.context().summary(), "sample.txt hunk 1");
-    assert!(app.overlay.is_none());
+    assert!(
+        app.ask_ai_running()
+            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
+    );
 }
 
 #[test]
@@ -1210,7 +1220,10 @@ fn explain_code_key_from_files_panel_queues_file_context() {
     let request = take_ask_ai_request(&mut app).expect("Explain Code request should be queued");
     assert_explain_code_question(request.question());
     assert_eq!(request.context().summary(), "sample.txt");
-    assert!(app.overlay.is_none());
+    assert!(
+        app.ask_ai_running()
+            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
+    );
 }
 
 #[test]
@@ -1227,7 +1240,10 @@ fn explain_code_key_from_diff_pane_queues_hunk_context() {
     let request = take_ask_ai_request(&mut app).expect("Explain Code request should be queued");
     assert_explain_code_question(request.question());
     assert_eq!(request.context().summary(), "sample.txt hunk 1");
-    assert!(app.overlay.is_none());
+    assert!(
+        app.ask_ai_running()
+            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
+    );
 }
 
 #[test]
@@ -1241,6 +1257,12 @@ fn unpublished_summary_key_queues_tui_ai_request() {
     assert!(take_unpublished_summary_request(&mut app));
     assert_eq!(app.focus, FocusPane::Diff);
     assert!(app.live_error.is_none());
+    assert!(
+        app.ask_ai_running()
+            .is_some_and(|(question, _, cancelling)| question
+                == crate::ask_ai::UNPUBLISHED_SUMMARY_QUESTION
+                && !cancelling)
+    );
 }
 
 #[test]

@@ -13,9 +13,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
-use crate::ask_ai::{AskAiContext, AskAiRequest};
+use crate::ask_ai::{AskAiContext, AskAiRequest, AskAiResult};
 use crate::config::AppConfig;
-use crate::custom_command::CustomCommandBinding;
+use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::diff_render::DiffRenderState;
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
@@ -137,6 +137,44 @@ pub(crate) enum AppEffect {
     RunUnpublishedSummary,
     CancelAskAi,
     CopyToClipboard(ClipboardRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EditorOutcome {
+    Completed,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClipboardWriteResult {
+    request: ClipboardRequest,
+    error: Option<String>,
+}
+
+impl ClipboardWriteResult {
+    pub(crate) fn completed(request: ClipboardRequest) -> Self {
+        Self {
+            request,
+            error: None,
+        }
+    }
+
+    pub(crate) fn failed(request: ClipboardRequest, error: impl Into<String>) -> Self {
+        Self {
+            request,
+            error: Some(error.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeEvent {
+    EditorFinished(EditorOutcome),
+    CustomCommandFinished(CustomCommandResult),
+    AskAiFinished(AskAiResult),
+    ClipboardWriteFinished(ClipboardWriteResult),
+    LiveWatchFailed(String),
+    ReloadReviewSource { preserve_scroll: bool },
 }
 
 #[derive(Debug)]
@@ -446,6 +484,37 @@ impl App {
         self.live_notice = Some(notice);
     }
 
+    pub(crate) fn handle_runtime_event(&mut self, event: RuntimeEvent) {
+        match event {
+            RuntimeEvent::EditorFinished(EditorOutcome::Completed) => {
+                self.reload_review_source(true);
+            }
+            RuntimeEvent::EditorFinished(EditorOutcome::Failed(error)) => {
+                self.set_live_error(error);
+            }
+            RuntimeEvent::CustomCommandFinished(result) => {
+                self.set_custom_command_result(result);
+                self.reload_review_source(true);
+            }
+            RuntimeEvent::AskAiFinished(result) => {
+                self.set_ask_ai_result(result);
+            }
+            RuntimeEvent::ClipboardWriteFinished(result) => {
+                if let Some(error) = result.error {
+                    self.set_live_error(format!("copy failed: {error}"));
+                } else {
+                    self.set_live_notice(result.request.success_message().to_string());
+                }
+            }
+            RuntimeEvent::LiveWatchFailed(error) => {
+                self.set_live_error(format!("watch failed: {error}"));
+            }
+            RuntimeEvent::ReloadReviewSource { preserve_scroll } => {
+                self.reload_review_source(preserve_scroll);
+            }
+        }
+    }
+
     pub(crate) fn take_effects(&mut self) -> Vec<AppEffect> {
         let has_clipboard_effect = self
             .effects
@@ -470,6 +539,7 @@ impl App {
 
     fn queue_custom_command_effect(&mut self, command: CustomCommandBinding) {
         self.clear_effects(|effect| matches!(effect, AppEffect::RunCustomCommand(_)));
+        self.set_custom_command_running(&command);
         self.effects.push_back(AppEffect::RunCustomCommand(command));
     }
 
@@ -480,11 +550,13 @@ impl App {
 
     fn queue_ask_ai_request_effect(&mut self, request: AskAiRequest) {
         self.clear_effects(|effect| matches!(effect, AppEffect::RunAskAi(_)));
+        self.set_ask_ai_running(&request);
         self.effects.push_back(AppEffect::RunAskAi(request));
     }
 
     fn queue_unpublished_summary_effect(&mut self) {
         self.clear_effects(|effect| matches!(effect, AppEffect::RunUnpublishedSummary));
+        self.set_ask_ai_running_question(crate::ask_ai::UNPUBLISHED_SUMMARY_QUESTION);
         self.effects.push_back(AppEffect::RunUnpublishedSummary);
     }
 

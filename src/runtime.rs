@@ -19,7 +19,9 @@ use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::app::{App, AppEffect, ClipboardRequest};
+use crate::app::{
+    App, AppEffect, ClipboardRequest, ClipboardWriteResult, EditorOutcome, RuntimeEvent,
+};
 use crate::ask_ai::{self, AskAiRequest, AskAiResult};
 use crate::clipboard;
 use crate::custom_command::{self, CustomCommandBinding, CustomCommandResult};
@@ -167,18 +169,20 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
 
     loop {
         if let Some(result) = finish_task(&mut custom_command_task) {
-            app.set_custom_command_result(result);
-            app.reload_review_source(true);
+            app.handle_runtime_event(RuntimeEvent::CustomCommandFinished(result));
         }
         if let Some(result) = finish_task(&mut ask_ai_task) {
-            app.set_ask_ai_result(result);
+            app.handle_runtime_event(RuntimeEvent::AskAiFinished(result));
         }
         app.advance_custom_command_spinner();
         app.advance_ask_ai_spinner();
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        drain_live_worktree_events(watcher.as_ref(), app, &mut pending_reload_at);
-        if reload_worktree_if_due(app, &mut pending_reload_at) {
+        if let Some(event) = drain_live_worktree_events(watcher.as_ref(), &mut pending_reload_at) {
+            app.handle_runtime_event(event);
+        }
+        if let Some(event) = reload_worktree_if_due(&mut pending_reload_at) {
+            app.handle_runtime_event(event);
             continue;
         }
 
@@ -235,9 +239,12 @@ fn handle_app_effects(
 ) -> Result<()> {
     for effect in app.take_effects() {
         match effect {
-            AppEffect::OpenEditor(request) => open_requested_editor(terminal, app, &request)?,
+            AppEffect::OpenEditor(request) => {
+                let event = open_requested_editor(terminal, &request)?;
+                app.handle_runtime_event(event);
+            }
             AppEffect::RunCustomCommand(command) => {
-                start_requested_custom_command(terminal, app, command, custom_command_task)?;
+                start_requested_custom_command(command, custom_command_task);
             }
             AppEffect::CancelCustomCommand => {
                 if let Some(task) = custom_command_task.as_ref() {
@@ -245,48 +252,46 @@ fn handle_app_effects(
                 }
             }
             AppEffect::RunAskAi(request) => {
-                start_requested_ask_ai(terminal, app, request, ask_ai_task)?;
+                start_requested_ask_ai(request, ask_ai_task);
             }
             AppEffect::RunUnpublishedSummary => {
-                start_requested_unpublished_summary(terminal, app, ask_ai_task)?;
+                start_requested_unpublished_summary(ask_ai_task);
             }
             AppEffect::CancelAskAi => {
                 if let Some(task) = ask_ai_task.as_ref() {
                     task.request_cancel();
                 }
             }
-            AppEffect::CopyToClipboard(request) => write_clipboard_request(app, &request),
+            AppEffect::CopyToClipboard(request) => {
+                app.handle_runtime_event(write_clipboard_request(request));
+            }
         }
     }
 
     Ok(())
 }
 
-fn write_clipboard_request(app: &mut App, request: &ClipboardRequest) {
-    if let Err(error) = clipboard::write_text(request.text()) {
-        app.set_live_error(format!("copy failed: {error}"));
-    } else {
-        app.set_live_notice(request.success_message().to_string());
-    }
+fn write_clipboard_request(request: ClipboardRequest) -> RuntimeEvent {
+    let result = match clipboard::write_text(request.text()) {
+        Ok(()) => ClipboardWriteResult::completed(request),
+        Err(error) => ClipboardWriteResult::failed(request, error.to_string()),
+    };
+    RuntimeEvent::ClipboardWriteFinished(result)
 }
 
 fn open_requested_editor(
     terminal: &mut TuiTerminal,
-    app: &mut App,
     request: &EditorRequest,
-) -> Result<()> {
-    match open_editor(terminal, request)? {
-        Some(error) => app.set_live_error(error),
-        None => app.reload_review_source(true),
-    }
-
-    Ok(())
+) -> Result<RuntimeEvent> {
+    Ok(RuntimeEvent::EditorFinished(open_editor(
+        terminal, request,
+    )?))
 }
 
-fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<Option<String>> {
+fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<EditorOutcome> {
     let editor = match EditorCommand::from_env() {
         Ok(editor) => editor,
-        Err(error) => return Ok(Some(error)),
+        Err(error) => return Ok(EditorOutcome::Failed(error)),
     };
 
     suspend_terminal(terminal)?;
@@ -295,9 +300,11 @@ fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<Op
     terminal.clear()?;
 
     match status {
-        Ok(status) if status.success() => Ok(None),
-        Ok(status) => Ok(Some(format!("editor exited with status {status}"))),
-        Err(error) => Ok(Some(format!(
+        Ok(status) if status.success() => Ok(EditorOutcome::Completed),
+        Ok(status) => Ok(EditorOutcome::Failed(format!(
+            "editor exited with status {status}"
+        ))),
+        Err(error) => Ok(EditorOutcome::Failed(format!(
             "failed to start editor `{}`: {error}",
             editor.display_name()
         ))),
@@ -305,17 +312,12 @@ fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<Op
 }
 
 fn start_requested_custom_command(
-    terminal: &mut TuiTerminal,
-    app: &mut App,
     command: CustomCommandBinding,
     custom_command_task: &mut Option<BackgroundTask<CustomCommandResult>>,
-) -> Result<()> {
+) {
     if custom_command_task.is_some() {
-        return Ok(());
+        return;
     }
-
-    app.set_custom_command_running(&command);
-    terminal.draw(|frame| ui::draw(frame, app))?;
 
     let run_command = command.clone();
     *custom_command_task = Some(BackgroundTask::spawn(
@@ -328,21 +330,15 @@ fn start_requested_custom_command(
             )
         },
     ));
-    Ok(())
 }
 
 fn start_requested_ask_ai(
-    terminal: &mut TuiTerminal,
-    app: &mut App,
     request: AskAiRequest,
     ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
-) -> Result<()> {
+) {
     if ask_ai_task.is_some() {
-        return Ok(());
+        return;
     }
-
-    app.set_ask_ai_running(&request);
-    terminal.draw(|frame| ui::draw(frame, app))?;
 
     let run_request = request.clone();
     *ask_ai_task = Some(BackgroundTask::spawn(
@@ -355,20 +351,12 @@ fn start_requested_ask_ai(
             )
         },
     ));
-    Ok(())
 }
 
-fn start_requested_unpublished_summary(
-    terminal: &mut TuiTerminal,
-    app: &mut App,
-    ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
-) -> Result<()> {
+fn start_requested_unpublished_summary(ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>) {
     if ask_ai_task.is_some() {
-        return Ok(());
+        return;
     }
-
-    app.set_ask_ai_running_question(ask_ai::UNPUBLISHED_SUMMARY_QUESTION);
-    terminal.draw(|frame| ui::draw(frame, app))?;
 
     *ask_ai_task = Some(BackgroundTask::spawn(
         run_unpublished_summary_request,
@@ -379,7 +367,6 @@ fn start_requested_unpublished_summary(
             )
         },
     ));
-    Ok(())
 }
 
 fn run_ask_ai_request(request: AskAiRequest, cancel: Receiver<()>) -> AskAiResult {
@@ -464,36 +451,30 @@ fn resume_terminal(terminal: &mut TuiTerminal) -> Result<()> {
 
 fn drain_live_worktree_events(
     watcher: Option<&WorktreeWatcher>,
-    app: &mut App,
     pending_reload_at: &mut Option<Instant>,
-) {
-    let Some(watcher) = watcher else {
-        return;
-    };
+) -> Option<RuntimeEvent> {
+    let watcher = watcher?;
 
     let DrainedWorktreeEvents { changed, error } = watcher.drain();
-
-    if let Some(error) = error {
-        app.set_live_error(format!("watch failed: {error}"));
-    }
 
     if changed {
         *pending_reload_at = Some(Instant::now() + WORKTREE_RELOAD_DEBOUNCE);
     }
+
+    error.map(|error| RuntimeEvent::LiveWatchFailed(error.to_string()))
 }
 
-fn reload_worktree_if_due(app: &mut App, pending_reload_at: &mut Option<Instant>) -> bool {
-    let Some(deadline) = *pending_reload_at else {
-        return false;
-    };
+fn reload_worktree_if_due(pending_reload_at: &mut Option<Instant>) -> Option<RuntimeEvent> {
+    let deadline = (*pending_reload_at)?;
 
     if Instant::now() < deadline {
-        return false;
+        return None;
     }
 
-    app.reload_review_source(true);
     *pending_reload_at = None;
-    true
+    Some(RuntimeEvent::ReloadReviewSource {
+        preserve_scroll: true,
+    })
 }
 
 fn start_live_worktree_watcher(app: &mut App) -> Option<WorktreeWatcher> {
@@ -503,7 +484,7 @@ fn start_live_worktree_watcher(app: &mut App) -> Option<WorktreeWatcher> {
     {
         Ok(watcher) => watcher,
         Err(error) => {
-            app.set_live_error(format!("watch failed: {error}"));
+            app.handle_runtime_event(RuntimeEvent::LiveWatchFailed(error.to_string()));
             None
         }
     }
