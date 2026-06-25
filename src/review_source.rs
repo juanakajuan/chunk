@@ -118,9 +118,13 @@ impl ReviewSource {
         }
     }
 
-    pub(crate) fn editor_request(&self, file: &DiffFile) -> Result<EditorRequest> {
+    pub(crate) fn editor_request(
+        &self,
+        file: &DiffFile,
+        line: Option<u32>,
+    ) -> Result<EditorRequest> {
         match self {
-            Self::Worktree(source) => source.editor_request(file),
+            Self::Worktree(source) => source.editor_request(file, line),
             Self::PullRequest(_) => Err(eyre!(
                 "cannot open PR snapshot in editor; run `chunk diff` to edit worktree files"
             )),
@@ -217,13 +221,13 @@ impl WorktreeReviewSource {
         self.reload()
     }
 
-    fn editor_request(self, file: &DiffFile) -> Result<EditorRequest> {
+    fn editor_request(self, file: &DiffFile, line: Option<u32>) -> Result<EditorRequest> {
         let path = editable_file_path(file)?;
         let root = git::worktree_root()?;
 
         Ok(EditorRequest {
             path: worktree_file_path(&root, path)?,
-            line: file.first_changed_line(),
+            line,
         })
     }
 }
@@ -286,7 +290,7 @@ mod tests {
         assert_eq!(source.live_watch_root().unwrap(), None);
         assert!(
             source
-                .editor_request(&file)
+                .editor_request(&file, None)
                 .unwrap_err()
                 .to_string()
                 .contains("cannot open PR snapshot")

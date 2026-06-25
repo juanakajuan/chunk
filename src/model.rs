@@ -64,7 +64,32 @@ impl DiffFile {
             return None;
         }
 
-        self.hunks.iter().find_map(first_changed_line_in_hunk)
+        self.hunks.iter().find_map(DiffHunk::first_changed_line)
+    }
+}
+
+impl DiffHunk {
+    /// Best-effort line in the new file to place an external editor near this
+    /// hunk.
+    pub fn first_changed_line(&self) -> Option<u32> {
+        let mut next_new_line = self.new_start.max(1);
+
+        for line in &self.lines {
+            match line.kind {
+                DiffLineKind::Added => {
+                    return Some(valid_line_number(line.new_line, next_new_line));
+                }
+                DiffLineKind::Removed => return Some(next_new_line),
+                DiffLineKind::Context => {
+                    if let Some(line_number) = line.new_line {
+                        next_new_line = line_number.saturating_add(1).max(1);
+                    }
+                }
+                DiffLineKind::Meta => {}
+            }
+        }
+
+        None
     }
 }
 
@@ -76,25 +101,6 @@ impl FileStage {
             (false, _) => Self::Unstaged,
         }
     }
-}
-
-fn first_changed_line_in_hunk(hunk: &DiffHunk) -> Option<u32> {
-    let mut next_new_line = hunk.new_start.max(1);
-
-    for line in &hunk.lines {
-        match line.kind {
-            DiffLineKind::Added => return Some(valid_line_number(line.new_line, next_new_line)),
-            DiffLineKind::Removed => return Some(next_new_line),
-            DiffLineKind::Context => {
-                if let Some(line_number) = line.new_line {
-                    next_new_line = line_number.saturating_add(1).max(1);
-                }
-            }
-            DiffLineKind::Meta => {}
-        }
-    }
-
-    None
 }
 
 fn valid_line_number(line: Option<u32>, fallback: u32) -> u32 {

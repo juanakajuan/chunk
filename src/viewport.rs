@@ -91,6 +91,7 @@ pub struct DiffLayoutRequest<'a> {
 pub struct DiffLayoutMetrics {
     pub total_rows: usize,
     pub hunk_offsets: Vec<usize>,
+    new_line_rows: Vec<Option<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +412,18 @@ impl RenderedViewport {
         )
     }
 
+    /// New-file line corresponding to `rendered_row`, if layout metrics are
+    /// cached for the selected file.
+    pub fn new_line_at(
+        &self,
+        file_index: usize,
+        file_id: &str,
+        rendered_row: usize,
+    ) -> Option<u32> {
+        self.matching_diff_layout_cache(file_index, Some(file_id))
+            .and_then(|cache| cache.metrics.new_line_at(rendered_row))
+    }
+
     fn diff_lines_cache(&self, file_index: usize) -> Option<&RenderedDiffLines> {
         self.diff_lines_cache
             .get(file_index)
@@ -620,11 +633,16 @@ impl RenderedDiffLines {
 }
 
 impl DiffLayoutMetrics {
-    pub fn new(total_rows: usize, hunk_offsets: Vec<usize>) -> Self {
+    pub(crate) fn new(hunk_offsets: Vec<usize>, new_line_rows: Vec<Option<u32>>) -> Self {
         Self {
-            total_rows,
+            total_rows: new_line_rows.len(),
             hunk_offsets,
+            new_line_rows,
         }
+    }
+
+    fn new_line_at(&self, rendered_row: usize) -> Option<u32> {
+        self.new_line_rows.get(rendered_row).copied().flatten()
     }
 }
 

@@ -471,6 +471,41 @@ fn diff_copy_keys_copy_hunk_or_file_diff() {
 }
 
 #[test]
+fn diff_pane_editor_request_uses_visible_diff_line() {
+    let theme = Theme::github_dark();
+    let mut app = app_with(changeset_with_editor_target_hunks());
+    app.focus = FocusPane::Diff;
+
+    render_diff_pane(&mut app, theme);
+    let second_hunk_offset = app
+        .viewport
+        .hunk_offset(0, "0", 1)
+        .expect("second hunk offset should be cached");
+    app.diff_pane.set_scroll(second_hunk_offset + 2);
+    render_diff_pane(&mut app, theme);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = take_editor_request(&mut app).expect("editor request should be queued");
+    assert!(request.path.ends_with("sample.txt"));
+    assert_eq!(request.line, Some(51));
+}
+
+#[test]
+fn sidebar_editor_request_uses_first_changed_line_fallback() {
+    let mut app = app_with(changeset_with_editor_target_hunks());
+    app.focus = FocusPane::Sidebar;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+        .unwrap();
+
+    let request = take_editor_request(&mut app).expect("editor request should be queued");
+    assert!(request.path.ends_with("sample.txt"));
+    assert_eq!(request.line, Some(2));
+}
+
+#[test]
 fn diff_scrollbar_click_and_drag_update_scroll() {
     let theme = Theme::github_dark();
     let mut app = app_with(changeset_with_file(diff_file("sample.txt", 40)));
@@ -1309,6 +1344,15 @@ fn take_clipboard_request(app: &mut App) -> Option<ClipboardRequest> {
         })
 }
 
+fn take_editor_request(app: &mut App) -> Option<crate::editor::EditorRequest> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::OpenEditor(request) => Some(request),
+            _ => None,
+        })
+}
+
 fn take_custom_command_request(app: &mut App) -> Option<CustomCommandBinding> {
     app.take_effects()
         .into_iter()
@@ -1464,6 +1508,35 @@ fn changeset_with_two_hunk_file() -> Changeset {
     changeset
 }
 
+fn changeset_with_editor_target_hunks() -> Changeset {
+    let mut file = diff_file("sample.txt", 1);
+    file.additions = 2;
+    file.hunks = vec![
+        DiffHunk {
+            header: "@@ -1,1 +1,2 @@".to_string(),
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 2,
+            stage: crate::model::FileStage::Unstaged,
+            lines: vec![context_line(1), added_line(2)],
+        },
+        DiffHunk {
+            header: "@@ -50,6 +50,7 @@".to_string(),
+            old_start: 50,
+            old_lines: 6,
+            new_start: 50,
+            new_lines: 7,
+            stage: crate::model::FileStage::Unstaged,
+            lines: std::iter::once(context_line(50))
+                .chain(std::iter::once(added_line(51)))
+                .chain((52..=56).map(context_line))
+                .collect(),
+        },
+    ];
+    changeset_with_file(file)
+}
+
 fn changeset_with_short_file(path: &str) -> Changeset {
     changeset_with_file(diff_file(path, 1))
 }
@@ -1549,5 +1622,23 @@ fn diff_file_with_contents<const N: usize>(contents: [&str; N]) -> DiffFile {
                 .collect(),
         }],
         binary: false,
+    }
+}
+
+fn context_line(line_number: u32) -> DiffLine {
+    DiffLine {
+        kind: DiffLineKind::Context,
+        old_line: Some(line_number),
+        new_line: Some(line_number),
+        content: "context".to_string(),
+    }
+}
+
+fn added_line(line_number: u32) -> DiffLine {
+    DiffLine {
+        kind: DiffLineKind::Added,
+        old_line: None,
+        new_line: Some(line_number),
+        content: "added".to_string(),
     }
 }

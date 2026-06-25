@@ -228,7 +228,7 @@ impl<'a> DiffFrameRenderer<'a> {
             );
             self.app.viewport.cache_diff_layout_metrics(
                 request,
-                DiffLayoutMetrics::new(counts.total_rows, counts.hunk_offsets),
+                DiffLayoutMetrics::new(counts.hunk_offsets, counts.new_line_rows),
             );
         }
 

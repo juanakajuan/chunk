@@ -30,8 +30,8 @@ pub(crate) struct RenderedRows {
 }
 
 pub(crate) struct DiffLayoutCounts {
-    pub(crate) total_rows: usize,
     pub(crate) hunk_offsets: Vec<usize>,
+    pub(crate) new_line_rows: Vec<Option<u32>>,
 }
 
 impl RenderedRows {
@@ -114,24 +114,30 @@ pub(crate) fn diff_layout_counts(
     can_stage: bool,
 ) -> DiffLayoutCounts {
     let header_rows = render_file_header_rows(file, content_width, can_stage, theme).len();
+    let file_target_line = file.first_changed_line();
+    let mut new_line_rows = vec![file_target_line; header_rows];
 
     if let Some(message) = file_body_message(file) {
+        new_line_rows.extend(std::iter::repeat_n(
+            file_target_line,
+            muted_body_rows(message, content_width, theme).len(),
+        ));
         return DiffLayoutCounts {
-            total_rows: header_rows + muted_body_rows(message, content_width, theme).len(),
             hunk_offsets: Vec::new(),
+            new_line_rows,
         };
     }
 
-    let mut total_rows = header_rows;
     let mut hunk_offsets = Vec::with_capacity(file.hunks.len());
     for hunk in &file.hunks {
-        hunk_offsets.push(total_rows);
-        total_rows += hunk_row_count(hunk, content_width, theme, can_stage);
+        hunk_offsets.push(new_line_rows.len());
+        let hunk_rows = hunk_new_line_rows(hunk, content_width, theme, can_stage);
+        new_line_rows.extend(hunk_rows);
     }
 
     DiffLayoutCounts {
-        total_rows,
         hunk_offsets,
+        new_line_rows,
     }
 }
 
@@ -232,19 +238,38 @@ fn path_or_display<'a>(path: &'a str, file: &'a DiffFile) -> &'a str {
     }
 }
 
-fn hunk_row_count(hunk: &DiffHunk, content_width: usize, theme: Theme, can_stage: bool) -> usize {
+fn hunk_new_line_rows(
+    hunk: &DiffHunk,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+) -> Vec<Option<u32>> {
+    let mut rows = Vec::new();
     let header_rows = wrap_line(
         hunk_header_line(hunk, theme, can_stage, false),
         content_width,
     )
     .len();
-    let content_rows = hunk
-        .lines
-        .iter()
-        .map(|line| diff_line_row_count(line, content_width))
-        .sum::<usize>();
+    rows.extend(std::iter::repeat_n(hunk.first_changed_line(), header_rows));
 
-    header_rows + content_rows
+    let mut next_new_line = hunk.new_start.max(1);
+    for line in &hunk.lines {
+        let target_line = match line.kind {
+            DiffLineKind::Added | DiffLineKind::Context => {
+                let line_number = valid_line_number(line.new_line, next_new_line);
+                next_new_line = line_number.saturating_add(1).max(1);
+                Some(line_number)
+            }
+            DiffLineKind::Removed => Some(next_new_line),
+            DiffLineKind::Meta => None,
+        };
+        rows.extend(std::iter::repeat_n(
+            target_line,
+            diff_line_row_count(line, content_width),
+        ));
+    }
+
+    rows
 }
 
 fn diff_line_row_count(line: &DiffLine, content_width: usize) -> usize {
@@ -253,6 +278,10 @@ fn diff_line_row_count(line: &DiffLine, content_width: usize) -> usize {
         diff_content_width(content_width),
     )
     .len()
+}
+
+fn valid_line_number(line: Option<u32>, fallback: u32) -> u32 {
+    line.filter(|line| *line > 0).unwrap_or(fallback)
 }
 
 fn hunk_header_line(
@@ -631,7 +660,9 @@ mod tests {
         let lines = diff_lines_until(&file, content_width, theme, true, None, usize::MAX).lines;
 
         assert_eq!(
-            diff_layout_counts(&file, content_width, theme, true).total_rows,
+            diff_layout_counts(&file, content_width, theme, true)
+                .new_line_rows
+                .len(),
             lines.len()
         );
     }
@@ -692,6 +723,53 @@ mod tests {
         assert!(line_text(&lines[offsets[0]]).starts_with("  @@ -1 +1 @@"));
         assert!(line_text(&lines[offsets[1]]).starts_with("  @@ -10 +10 @@"));
         assert!(offsets[1] > offsets[0] + 2);
+    }
+
+    #[test]
+    fn layout_counts_map_wrapped_rows_to_editor_lines() {
+        let theme = Theme::github_dark();
+        let file = diff_file_with_hunks(vec![(
+            "@@ -10,2 +10,2 @@",
+            vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    old_line: Some(10),
+                    new_line: Some(10),
+                    content: "context".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    old_line: Some(11),
+                    new_line: None,
+                    content: "alpha beta gamma delta epsilon zeta eta theta iota".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    old_line: None,
+                    new_line: Some(11),
+                    content: "alpha beta gamma delta epsilon zeta eta theta iota".to_string(),
+                },
+            ],
+        )]);
+        let content_width = DIFF_GUTTER_WIDTH + 12;
+
+        let counts = diff_layout_counts(&file, content_width, theme, true);
+        let hunk_offset = counts.hunk_offsets[0];
+        let header_rows = wrap_line(
+            hunk_header_line(&file.hunks[0], theme, true, false),
+            content_width,
+        )
+        .len();
+        let context_rows = diff_line_row_count(&file.hunks[0].lines[0], content_width);
+        let removed_row = hunk_offset + header_rows + context_rows;
+        let removed_rows = diff_line_row_count(&file.hunks[0].lines[1], content_width);
+        let added_row = removed_row + removed_rows;
+
+        assert_eq!(counts.new_line_rows[hunk_offset], Some(11));
+        assert!(removed_rows > 1);
+        assert_eq!(counts.new_line_rows[removed_row], Some(11));
+        assert_eq!(counts.new_line_rows[removed_row + 1], Some(11));
+        assert_eq!(counts.new_line_rows[added_row], Some(11));
     }
 
     #[test]

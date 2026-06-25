@@ -175,6 +175,21 @@ impl DiffPaneState {
         )
     }
 
+    pub(super) fn editor_line(
+        &self,
+        viewport: &RenderedViewport,
+        selected_file_index: usize,
+        file: &DiffFile,
+    ) -> Option<u32> {
+        let rendered_row = self.editor_target_row(viewport, selected_file_index, file);
+        viewport
+            .new_line_at(selected_file_index, file.id.as_str(), rendered_row)
+            .or_else(|| {
+                self.selected_hunk(Some(file))
+                    .and_then(DiffHunk::first_changed_line)
+            })
+    }
+
     pub(super) fn search_prompt_open(&self) -> bool {
         self.search.is_prompt_open()
     }
@@ -333,6 +348,27 @@ impl DiffPaneState {
         {
             self.scroll_active_search_match(viewport, selected_file_index, file);
         }
+    }
+
+    fn editor_target_row(
+        &self,
+        viewport: &RenderedViewport,
+        selected_file_index: usize,
+        file: &DiffFile,
+    ) -> usize {
+        if let Some(active_row) = self.search.active_match_row() {
+            return active_row;
+        }
+
+        self.selected_hunk_index
+            .and_then(|hunk_index| {
+                viewport.hunk_offset(selected_file_index, file.id.as_str(), hunk_index)
+            })
+            .filter(|hunk_offset| {
+                *hunk_offset > self.scroll
+                    && *hunk_offset < self.scroll.saturating_add(viewport.diff_view_height())
+            })
+            .unwrap_or(self.scroll)
     }
 }
 

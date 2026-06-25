@@ -1384,7 +1384,9 @@ impl App {
     fn queue_selected_file_editor_request(&mut self) {
         self.clear_effects(|effect| matches!(effect, AppEffect::OpenEditor(_)));
         let request = match self.focused_review_target().editor() {
-            Ok(target) => self.source.editor_request(target.file),
+            Ok(target) => self
+                .source
+                .editor_request(target.file, self.editor_line(target.file)),
             Err(error) => {
                 self.live_error = Some(error.message().to_string());
                 return;
@@ -1398,6 +1400,17 @@ impl App {
             }
             Err(error) => self.live_error = Some(format!("edit failed: {error}")),
         }
+    }
+
+    fn editor_line(&self, file: &DiffFile) -> Option<u32> {
+        if self.focus == FocusPane::Diff {
+            return self
+                .diff_pane
+                .editor_line(&self.viewport, self.selected_file_index, file)
+                .or_else(|| file.first_changed_line());
+        }
+
+        file.first_changed_line()
     }
 }
 
