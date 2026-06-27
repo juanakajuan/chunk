@@ -33,7 +33,7 @@ mod diff_pane;
 mod focused_review_target;
 mod keys;
 mod overlay;
-mod reload;
+mod review_session;
 mod search;
 
 pub(crate) use keys::accepts_text_input;
@@ -42,6 +42,7 @@ use diff_pane::DiffPaneState;
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
+use review_session::{ReviewSessionReplacement, ReviewSessionSnapshot};
 
 const MOUSE_WHEEL_STEP: usize = 3;
 const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
@@ -586,7 +587,33 @@ impl App {
     }
 
     fn apply_reloaded_changeset(&mut self, changeset: Changeset, preserve_scroll: bool) {
-        reload::apply_changeset(self, changeset, preserve_scroll);
+        let snapshot = ReviewSessionSnapshot::capture(
+            self.selected_file(),
+            self.selected_file_index,
+            self.selected_hunk(),
+            self.diff_pane.selected_hunk_index(),
+            self.diff_pane.scroll(),
+            self.sidebar_cursor_target.clone(),
+        );
+        let replacement = ReviewSessionReplacement::plan(snapshot, changeset, preserve_scroll);
+        self.apply_review_session_replacement(replacement);
+    }
+
+    fn apply_review_session_replacement(&mut self, replacement: ReviewSessionReplacement) {
+        self.changeset = replacement.changeset;
+        self.live_error = None;
+        if matches!(self.overlay, Some(Overlay::Discard(_))) {
+            self.overlay = None;
+        }
+        self.text_selection.clear();
+        self.selected_file_index = replacement.selected_file_index;
+        self.sidebar_cursor_target = replacement.sidebar_target;
+        self.diff_pane
+            .set_selected_hunk_index(replacement.selected_hunk_index);
+        self.diff_pane.set_scroll(replacement.diff_scroll);
+        self.clear_render_caches();
+        self.invalidate_search_matches();
+        self.ensure_scroll_bounds();
     }
 
     fn clear_render_caches(&mut self) {
