@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
+use crossterm::cursor::Show;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -43,6 +44,27 @@ struct WorktreeWatcher {
 struct DrainedWorktreeEvents {
     changed: bool,
     error: Option<notify::Error>,
+}
+
+#[derive(Debug, Default)]
+struct TerminalRestore {
+    raw_mode_enabled: bool,
+    alternate_screen_enabled: bool,
+    mouse_capture_enabled: bool,
+}
+
+trait TerminalCommands {
+    fn enable_raw_mode(&mut self) -> io::Result<()>;
+    fn disable_raw_mode(&mut self) -> io::Result<()>;
+    fn enter_alternate_screen(&mut self) -> io::Result<()>;
+    fn leave_alternate_screen(&mut self) -> io::Result<()>;
+    fn enable_mouse_capture(&mut self) -> io::Result<()>;
+    fn disable_mouse_capture(&mut self) -> io::Result<()>;
+    fn show_cursor(&mut self) -> io::Result<()>;
+}
+
+struct CrosstermTerminalCommands<'a> {
+    stdout: &'a mut io::Stdout,
 }
 
 /// A child process running on a worker thread, reporting exactly one result.
@@ -106,6 +128,111 @@ fn cancel_and_join<T>(slot: &mut Option<BackgroundTask<T>>) {
     }
 }
 
+impl TerminalRestore {
+    fn restore(&mut self, commands: &mut impl TerminalCommands) -> io::Result<()> {
+        let should_show_cursor =
+            self.raw_mode_enabled || self.alternate_screen_enabled || self.mouse_capture_enabled;
+        let mut first_error = None;
+
+        if self.raw_mode_enabled
+            && remember_terminal_result(&mut first_error, commands.disable_raw_mode())
+        {
+            self.raw_mode_enabled = false;
+        }
+        if self.alternate_screen_enabled
+            && remember_terminal_result(&mut first_error, commands.leave_alternate_screen())
+        {
+            self.alternate_screen_enabled = false;
+        }
+        if self.mouse_capture_enabled
+            && remember_terminal_result(&mut first_error, commands.disable_mouse_capture())
+        {
+            self.mouse_capture_enabled = false;
+        }
+        if should_show_cursor {
+            remember_terminal_result(&mut first_error, commands.show_cursor());
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for TerminalRestore {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout();
+        let mut commands = CrosstermTerminalCommands {
+            stdout: &mut stdout,
+        };
+        let _ = self.restore(&mut commands);
+    }
+}
+
+impl TerminalCommands for CrosstermTerminalCommands<'_> {
+    fn enable_raw_mode(&mut self) -> io::Result<()> {
+        enable_raw_mode()
+    }
+
+    fn disable_raw_mode(&mut self) -> io::Result<()> {
+        disable_raw_mode()
+    }
+
+    fn enter_alternate_screen(&mut self) -> io::Result<()> {
+        execute!(&mut *self.stdout, EnterAlternateScreen)
+    }
+
+    fn leave_alternate_screen(&mut self) -> io::Result<()> {
+        execute!(&mut *self.stdout, LeaveAlternateScreen)
+    }
+
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(&mut *self.stdout, EnableMouseCapture)
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(&mut *self.stdout, DisableMouseCapture)
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        execute!(&mut *self.stdout, Show)
+    }
+}
+
+fn enter_terminal_mode(commands: &mut impl TerminalCommands) -> io::Result<TerminalRestore> {
+    let mut restore = TerminalRestore::default();
+
+    commands.enable_raw_mode()?;
+    restore.raw_mode_enabled = true;
+
+    if let Err(error) = commands.enter_alternate_screen() {
+        let _ = restore.restore(commands);
+        return Err(error);
+    }
+    restore.alternate_screen_enabled = true;
+
+    if let Err(error) = commands.enable_mouse_capture() {
+        let _ = restore.restore(commands);
+        return Err(error);
+    }
+    restore.mouse_capture_enabled = true;
+
+    Ok(restore)
+}
+
+fn remember_terminal_result(first_error: &mut Option<io::Error>, result: io::Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            if first_error.is_none() {
+                *first_error = Some(error);
+            }
+            false
+        }
+    }
+}
+
 impl WorktreeWatcher {
     fn start(root: PathBuf) -> Result<Self> {
         let (sender, events) = mpsc::channel();
@@ -141,22 +268,21 @@ impl WorktreeWatcher {
 }
 
 pub(crate) fn run(mut app: App) -> Result<()> {
-    enable_raw_mode()?;
-
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let mut terminal_commands = CrosstermTerminalCommands {
+        stdout: &mut stdout,
+    };
+    let mut terminal_restore = enter_terminal_mode(&mut terminal_commands)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let result = run_loop(&mut terminal, &mut app);
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    let mut stdout = io::stdout();
+    let mut terminal_commands = CrosstermTerminalCommands {
+        stdout: &mut stdout,
+    };
+    terminal_restore.restore(&mut terminal_commands)?;
 
     result
 }
@@ -544,6 +670,112 @@ fn is_relevant_git_metadata_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TerminalAction {
+        EnableRawMode,
+        DisableRawMode,
+        EnterAlternateScreen,
+        LeaveAlternateScreen,
+        EnableMouseCapture,
+        DisableMouseCapture,
+        ShowCursor,
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeTerminalCommands {
+        actions: Vec<TerminalAction>,
+        fail_on: Option<TerminalAction>,
+    }
+
+    impl FakeTerminalCommands {
+        fn failing_on(action: TerminalAction) -> Self {
+            Self {
+                actions: Vec::new(),
+                fail_on: Some(action),
+            }
+        }
+
+        fn record(&mut self, action: TerminalAction) -> io::Result<()> {
+            self.actions.push(action);
+            if self.fail_on == Some(action) {
+                return Err(io::Error::other(format!("{action:?} failed")));
+            }
+            Ok(())
+        }
+    }
+
+    impl TerminalCommands for FakeTerminalCommands {
+        fn enable_raw_mode(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::EnableRawMode)
+        }
+
+        fn disable_raw_mode(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::DisableRawMode)
+        }
+
+        fn enter_alternate_screen(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::EnterAlternateScreen)
+        }
+
+        fn leave_alternate_screen(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::LeaveAlternateScreen)
+        }
+
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::EnableMouseCapture)
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::DisableMouseCapture)
+        }
+
+        fn show_cursor(&mut self) -> io::Result<()> {
+            self.record(TerminalAction::ShowCursor)
+        }
+    }
+
+    #[test]
+    fn terminal_mode_setup_restores_partial_state_when_mouse_capture_fails() {
+        let mut commands = FakeTerminalCommands::failing_on(TerminalAction::EnableMouseCapture);
+
+        let error = enter_terminal_mode(&mut commands).unwrap_err();
+
+        assert!(error.to_string().contains("EnableMouseCapture failed"));
+        assert_eq!(
+            commands.actions,
+            [
+                TerminalAction::EnableRawMode,
+                TerminalAction::EnterAlternateScreen,
+                TerminalAction::EnableMouseCapture,
+                TerminalAction::DisableRawMode,
+                TerminalAction::LeaveAlternateScreen,
+                TerminalAction::ShowCursor,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_restore_cleans_up_successful_setup_once() {
+        let mut commands = FakeTerminalCommands::default();
+        let mut restore = enter_terminal_mode(&mut commands).unwrap();
+
+        restore.restore(&mut commands).unwrap();
+        restore.restore(&mut commands).unwrap();
+
+        assert_eq!(
+            commands.actions,
+            [
+                TerminalAction::EnableRawMode,
+                TerminalAction::EnterAlternateScreen,
+                TerminalAction::EnableMouseCapture,
+                TerminalAction::DisableRawMode,
+                TerminalAction::LeaveAlternateScreen,
+                TerminalAction::DisableMouseCapture,
+                TerminalAction::ShowCursor,
+            ]
+        );
+    }
 
     #[test]
     fn live_reload_treats_git_state_files_as_relevant() {
