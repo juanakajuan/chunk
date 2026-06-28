@@ -1339,10 +1339,7 @@ impl App {
 
     fn folder_staging_action(&self, folder_path: &str) -> FolderStagingAction {
         if self
-            .changeset
-            .files
-            .iter()
-            .filter(|file| folder_contains_path(folder_path, file.display_path()))
+            .folder_files(folder_path)
             .all(|file| file.stage == FileStage::Staged)
         {
             FolderStagingAction::Unstage
@@ -1372,24 +1369,23 @@ impl App {
     }
 
     fn folder_discard_paths(&self, folder_path: &str) -> Vec<String> {
-        self.changeset
-            .files
-            .iter()
-            .filter(|file| {
-                folder_contains_path(folder_path, file.display_path())
-                    && matches!(file.stage, FileStage::Unstaged | FileStage::Mixed)
-            })
+        self.folder_files(folder_path)
+            .filter(|file| matches!(file.stage, FileStage::Unstaged | FileStage::Mixed))
             .map(|file| file.display_path().to_string())
             .collect()
     }
 
     fn current_folder_paths(&self, folder_path: &str) -> Vec<String> {
+        self.folder_files(folder_path)
+            .map(|file| file.display_path().to_string())
+            .collect()
+    }
+
+    fn folder_files<'a>(&'a self, folder_path: &'a str) -> impl Iterator<Item = &'a DiffFile> + 'a {
         self.changeset
             .files
             .iter()
-            .filter(|file| folder_contains_path(folder_path, file.display_path()))
-            .map(|file| file.display_path().to_string())
-            .collect()
+            .filter(move |file| folder_contains_path(folder_path, file.display_path()))
     }
 
     fn confirmed_folder_paths(

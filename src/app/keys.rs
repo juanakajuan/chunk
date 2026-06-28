@@ -17,27 +17,34 @@ pub(crate) fn accepts_text_input(key: KeyEvent) -> bool {
 }
 
 pub(super) fn closes_help_overlay(key: KeyEvent, keybinds: KeybindMap) -> bool {
-    key.code == KeyCode::Esc
-        || matches!(
-            keybinds.action_for(key),
-            Some(BuiltinAction::Help | BuiltinAction::Quit)
-        )
+    closes_with_actions(key, keybinds, &[BuiltinAction::Help, BuiltinAction::Quit])
 }
 
 pub(super) fn closes_command_output(key: KeyEvent, keybinds: KeybindMap) -> bool {
-    key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
+    closes_with_quit(key, keybinds)
 }
 
 pub(super) fn closes_custom_command_running(key: KeyEvent, keybinds: KeybindMap) -> bool {
-    key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
+    closes_with_quit(key, keybinds)
 }
 
 pub(super) fn closes_ask_ai_running(key: KeyEvent, keybinds: KeybindMap) -> bool {
-    key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
+    closes_with_quit(key, keybinds)
 }
 
 pub(super) fn closes_ask_ai_output(key: KeyEvent, keybinds: KeybindMap) -> bool {
-    key.code == KeyCode::Esc || keybinds.action_for(key) == Some(BuiltinAction::Quit)
+    closes_with_quit(key, keybinds)
+}
+
+fn closes_with_quit(key: KeyEvent, keybinds: KeybindMap) -> bool {
+    closes_with_actions(key, keybinds, &[BuiltinAction::Quit])
+}
+
+fn closes_with_actions(key: KeyEvent, keybinds: KeybindMap, actions: &[BuiltinAction]) -> bool {
+    key.code == KeyCode::Esc
+        || keybinds
+            .action_for(key)
+            .is_some_and(|action| actions.contains(&action))
 }
 
 pub(super) fn is_ctrl_c(key: KeyEvent) -> bool {

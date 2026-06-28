@@ -76,29 +76,12 @@ impl<'a> DiffFrameRenderer<'a> {
         let title = format!(" {} ", rows::changeset_title(&self.app.changeset));
         let mut lines = self.review_status_lines();
 
-        let provisional_search_lines = self
-            .app
-            .search_status_lines(self.request.content_width, self.request.theme);
-        let provisional_visible_diff_height = self
-            .request
-            .visible_height
-            .saturating_sub(lines.len() + provisional_search_lines.len());
+        let provisional_visible_diff_height = self.provisional_visible_diff_height(lines.len());
         let mut diff_content_width = self.diff_content_width(provisional_visible_diff_height);
+        let pending_search_scroll =
+            self.prepare_search_scroll(diff_content_width, provisional_visible_diff_height);
 
-        let pending_search_scroll = if self.app.has_active_search() {
-            self.app
-                .viewport
-                .begin_diff(self.request.area, provisional_visible_diff_height);
-            self.app.ensure_scroll_bounds();
-            self.ensure_selected_diff_cache(diff_content_width, provisional_visible_diff_height)
-        } else {
-            false
-        };
-
-        lines.extend(
-            self.app
-                .search_status_lines(self.request.content_width, self.request.theme),
-        );
+        lines.extend(self.search_status_lines());
 
         self.app.viewport.set_diff_status_rows(lines.len());
         let status_rows = self.app.viewport.diff_status_rows();
@@ -108,28 +91,73 @@ impl<'a> DiffFrameRenderer<'a> {
         self.app
             .viewport
             .begin_diff(self.request.area, visible_diff_height);
-        let scrollbar = self.diff_scrollbar(visible_diff_height, total_diff_rows, status_rows);
-        self.app.viewport.set_diff_scrollbar(scrollbar);
+        self.update_diff_scrollbar(visible_diff_height, total_diff_rows, status_rows);
         self.app.ensure_scroll_bounds();
 
         if pending_search_scroll {
-            self.app.diff_pane.scroll_active_search_match(
-                &self.app.diff_render,
-                self.app.viewport.diff_view_height(),
-                self.app.selected_file_index,
-                self.app.changeset.files.get(self.app.selected_file_index),
-            );
-            self.app.ensure_scroll_bounds();
+            self.scroll_active_search_match();
         }
 
         if visible_diff_height > 0 {
             lines.extend(self.selected_diff_lines(diff_content_width, visible_diff_height));
         }
         lines.truncate(self.request.visible_height);
+        self.update_diff_scrollbar(visible_diff_height, total_diff_rows, status_rows);
+        let lines = self.decorate_visible_lines(lines);
+
+        DiffPaneRows {
+            title,
+            lines,
+            scrollbar: self.app.viewport.diff_scrollbar().cloned(),
+        }
+    }
+
+    fn search_status_lines(&self) -> Vec<Line<'static>> {
+        self.app
+            .search_status_lines(self.request.content_width, self.request.theme)
+    }
+
+    fn provisional_visible_diff_height(&self, status_rows: usize) -> usize {
+        let search_rows = self.search_status_lines().len();
+        self.request
+            .visible_height
+            .saturating_sub(status_rows + search_rows)
+    }
+
+    fn prepare_search_scroll(&mut self, content_width: usize, visible_height: usize) -> bool {
+        if !self.app.has_active_search() {
+            return false;
+        }
+
+        self.app
+            .viewport
+            .begin_diff(self.request.area, visible_height);
+        self.app.ensure_scroll_bounds();
+        self.ensure_selected_diff_cache(content_width, visible_height)
+    }
+
+    fn scroll_active_search_match(&mut self) {
+        self.app.diff_pane.scroll_active_search_match(
+            &self.app.diff_render,
+            self.app.viewport.diff_view_height(),
+            self.app.selected_file_index,
+            self.app.changeset.files.get(self.app.selected_file_index),
+        );
+        self.app.ensure_scroll_bounds();
+    }
+
+    fn update_diff_scrollbar(
+        &mut self,
+        visible_diff_height: usize,
+        total_diff_rows: usize,
+        status_rows: usize,
+    ) {
         let scrollbar = self.diff_scrollbar(visible_diff_height, total_diff_rows, status_rows);
         self.app.viewport.set_diff_scrollbar(scrollbar);
+    }
 
-        let lines = self.app.text_selection.decorate_visible_lines(
+    fn decorate_visible_lines(&mut self, lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+        self.app.text_selection.decorate_visible_lines(
             pane_text_area(
                 self.request.area,
                 self.request.content_width,
@@ -139,13 +167,7 @@ impl<'a> DiffFrameRenderer<'a> {
             0,
             self.request.visible_height,
             self.request.theme,
-        );
-
-        DiffPaneRows {
-            title,
-            lines,
-            scrollbar: self.app.viewport.diff_scrollbar().cloned(),
-        }
+        )
     }
 
     fn review_status_lines(&self) -> Vec<Line<'static>> {

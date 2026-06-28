@@ -3,9 +3,9 @@ use ratatui::text::Line;
 
 use crate::ask_ai::{AskAiContext, AskAiRequest, AskAiResult};
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
-use crate::keybind::BuiltinAction;
+use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::rows;
-use crate::scroll_text::ScrollText;
+use crate::scroll_text::{ScrollText, VerticalDirection};
 use crate::theme::Theme;
 
 use super::keys::{
@@ -70,6 +70,24 @@ impl DiscardConfirmation {
             } => format!("Discard hunk {} in {path}?", hunk_index + 1),
         }
     }
+}
+
+fn apply_output_scroll_key(scroll: &mut ScrollText, key: KeyEvent, keybinds: KeybindMap) {
+    let page = scroll.page();
+    apply_scroll_key(scroll, key, page, keybinds);
+}
+
+fn scroll_output_by_wheel(scroll: &mut ScrollText, direction: VerticalDirection) {
+    scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
+}
+
+fn mark_cancelling(cancelling: &mut bool) -> bool {
+    if *cancelling {
+        return false;
+    }
+
+    *cancelling = true;
+    true
 }
 
 /// The single modal overlay active over the diff view, if any.
@@ -341,15 +359,14 @@ impl App {
 
         let keybinds = self.keybinds;
         if let Some(output) = self.command_output_mut() {
-            let page = output.scroll.page();
-            apply_scroll_key(&mut output.scroll, key, page, keybinds);
+            apply_output_scroll_key(&mut output.scroll, key, keybinds);
         }
     }
 
     fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
             if let Some(output) = app.command_output_mut() {
-                output.scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
+                scroll_output_by_wheel(&mut output.scroll, direction);
             }
         });
     }
@@ -364,9 +381,8 @@ impl App {
             binding: _,
             spinner_frame: _,
         }) = &mut self.overlay
-            && !*cancelling
+            && mark_cancelling(cancelling)
         {
-            *cancelling = true;
             self.queue_custom_command_cancel_effect();
         }
     }
@@ -399,9 +415,8 @@ impl App {
             question: _,
             spinner_frame: _,
         }) = &mut self.overlay
-            && !*cancelling
+            && mark_cancelling(cancelling)
         {
-            *cancelling = true;
             self.queue_ask_ai_cancel_effect();
         }
     }
@@ -419,15 +434,14 @@ impl App {
         }
 
         if let Some(output) = self.ask_ai_output_mut() {
-            let page = output.scroll.page();
-            apply_scroll_key(&mut output.scroll, key, page, keybinds);
+            apply_output_scroll_key(&mut output.scroll, key, keybinds);
         }
     }
 
     fn handle_ask_ai_output_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
             if let Some(output) = app.ask_ai_output_mut() {
-                output.scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
+                scroll_output_by_wheel(&mut output.scroll, direction);
             }
         });
     }

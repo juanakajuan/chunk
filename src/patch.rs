@@ -576,8 +576,8 @@ fn ranges_overlap(left: LineSpan, right: LineSpan) -> bool {
 
 fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
     let mut patch = String::new();
-    let old_path = patch_old_path(file);
-    let new_path = patch_new_path(file);
+    let old_path = patch_side_path(file, &file.old_path);
+    let new_path = patch_side_path(file, &file.path);
 
     patch.push_str(&format!(
         "diff --git {} {}\n",
@@ -589,8 +589,14 @@ fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
         FileStatus::Deleted => patch.push_str("deleted file mode 100644\n"),
         _ => {}
     }
-    patch.push_str(&format!("--- {}\n", old_patch_header_path(file, old_path)));
-    patch.push_str(&format!("+++ {}\n", new_patch_header_path(file, new_path)));
+    patch.push_str(&format!(
+        "--- {}\n",
+        patch_header_path(file.status, FileStatus::Added, "a", old_path)
+    ));
+    patch.push_str(&format!(
+        "+++ {}\n",
+        patch_header_path(file.status, FileStatus::Deleted, "b", new_path)
+    ));
 
     for index in hunk_indices {
         if let Some(hunk) = file.hunks.get(*index) {
@@ -601,28 +607,12 @@ fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
     patch
 }
 
-fn patch_old_path(file: &DiffFile) -> &str {
-    patch_side_path(file, &file.old_path)
-}
-
-fn patch_new_path(file: &DiffFile) -> &str {
-    patch_side_path(file, &file.path)
-}
-
 fn patch_side_path<'a>(file: &'a DiffFile, path: &'a str) -> &'a str {
     if path.is_empty() {
         file.display_path()
     } else {
         path
     }
-}
-
-fn old_patch_header_path(file: &DiffFile, path: &str) -> String {
-    patch_header_path(file.status, FileStatus::Added, "a", path)
-}
-
-fn new_patch_header_path(file: &DiffFile, path: &str) -> String {
-    patch_header_path(file.status, FileStatus::Deleted, "b", path)
 }
 
 fn patch_header_path(
