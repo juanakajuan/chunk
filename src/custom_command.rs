@@ -1,24 +1,21 @@
 //! User-configured shell command bindings and execution.
 
 use std::env;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, eyre};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::process::ProcessOutcome;
+use crate::process::{ProcessOutcome, ProcessOutputCollector};
 
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINATION_GRACE: Duration = Duration::from_millis(100);
-const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(500);
 const OUTPUT_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
-const TRUNCATED_OUTPUT_NOTICE_MAX_BYTES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CustomCommandBinding {
@@ -38,23 +35,6 @@ pub(crate) struct CustomCommandResult {
     command: String,
     cwd: Option<PathBuf>,
     outcome: ProcessOutcome,
-}
-
-#[derive(Default)]
-struct CapturedStream {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-struct StreamCollector {
-    events: Receiver<StreamEvent>,
-    captured: CapturedStream,
-    finished: bool,
-}
-
-enum StreamEvent {
-    Chunk(Vec<u8>),
-    Truncated,
 }
 
 impl CustomCommandBinding {
@@ -197,21 +177,24 @@ pub(crate) fn run(
     prepare_process(&mut process);
 
     let mut child = process.spawn()?;
-    let mut stdout = child.stdout.take().map(spawn_bounded_reader);
-    let mut stderr = child.stderr.take().map(spawn_bounded_reader);
+    let mut output = ProcessOutputCollector::start(&mut child);
 
     loop {
-        drain_collectors(&mut stdout, &mut stderr);
+        output.drain();
 
         if cancellation_requested(&cancel) {
             let status = terminate_child(&mut child)?;
-            let output = status.map(|status| collect_output(status, &mut stdout, &mut stderr));
-            return Ok(CustomCommandResult::cancelled(binding, cwd, output));
+            let process_output = status.map(|status| output.collect(status));
+            return Ok(CustomCommandResult::cancelled(binding, cwd, process_output));
         }
 
         if let Some(status) = child.try_wait()? {
-            let output = collect_output(status, &mut stdout, &mut stderr);
-            return Ok(CustomCommandResult::from_output(binding, cwd, output));
+            let process_output = output.collect(status);
+            return Ok(CustomCommandResult::from_output(
+                binding,
+                cwd,
+                process_output,
+            ));
         }
 
         thread::sleep(COMMAND_POLL_INTERVAL);
@@ -227,139 +210,6 @@ fn prepare_process(process: &mut Command) {
 
 #[cfg(not(unix))]
 fn prepare_process(_process: &mut Command) {}
-
-fn spawn_bounded_reader(mut stream: impl Read + Send + 'static) -> StreamCollector {
-    let (sender, events) = mpsc::channel();
-    thread::spawn(move || read_bounded_stream(&mut stream, sender));
-
-    StreamCollector {
-        events,
-        captured: CapturedStream::default(),
-        finished: false,
-    }
-}
-
-fn read_bounded_stream(stream: &mut impl Read, sender: mpsc::Sender<StreamEvent>) {
-    let mut captured_len = 0usize;
-    let mut truncated = false;
-    let mut buffer = [0; 8192];
-
-    loop {
-        let read = match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(_) => break,
-        };
-        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(captured_len);
-        if remaining > 0 {
-            let captured = read.min(remaining);
-            if sender
-                .send(StreamEvent::Chunk(buffer[..captured].to_vec()))
-                .is_err()
-            {
-                break;
-            }
-            captured_len += captured;
-        }
-        if read > remaining && !truncated {
-            truncated = true;
-            if sender.send(StreamEvent::Truncated).is_err() {
-                break;
-            }
-        }
-    }
-}
-
-fn collect_output(
-    status: ExitStatus,
-    stdout: &mut Option<StreamCollector>,
-    stderr: &mut Option<StreamCollector>,
-) -> Output {
-    drain_collectors_until_finished_or_timeout(stdout, stderr);
-
-    Output {
-        status,
-        stdout: take_captured_stream(stdout),
-        stderr: take_captured_stream(stderr),
-    }
-}
-
-impl StreamCollector {
-    fn drain(&mut self) -> bool {
-        let mut received = false;
-
-        loop {
-            match self.events.try_recv() {
-                Ok(StreamEvent::Chunk(bytes)) => {
-                    self.captured.bytes.extend_from_slice(&bytes);
-                    received = true;
-                }
-                Ok(StreamEvent::Truncated) => {
-                    self.captured.truncated = true;
-                    received = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.finished = true;
-                    break;
-                }
-            }
-        }
-
-        received
-    }
-}
-
-fn drain_collectors(stdout: &mut Option<StreamCollector>, stderr: &mut Option<StreamCollector>) {
-    if let Some(stdout) = stdout {
-        stdout.drain();
-    }
-    if let Some(stderr) = stderr {
-        stderr.drain();
-    }
-}
-
-fn drain_collectors_until_finished_or_timeout(
-    stdout: &mut Option<StreamCollector>,
-    stderr: &mut Option<StreamCollector>,
-) {
-    let deadline = Instant::now() + OUTPUT_DRAIN_GRACE;
-
-    while !collectors_finished(stdout, stderr) && Instant::now() < deadline {
-        let stdout_received = stdout.as_mut().is_some_and(StreamCollector::drain);
-        let stderr_received = stderr.as_mut().is_some_and(StreamCollector::drain);
-        if !stdout_received && !stderr_received {
-            thread::sleep(OUTPUT_DRAIN_POLL_INTERVAL);
-        }
-    }
-}
-
-fn collectors_finished(stdout: &Option<StreamCollector>, stderr: &Option<StreamCollector>) -> bool {
-    stdout.as_ref().is_none_or(|stream| stream.finished)
-        && stderr.as_ref().is_none_or(|stream| stream.finished)
-}
-
-fn take_captured_stream(collector: &mut Option<StreamCollector>) -> Vec<u8> {
-    collector
-        .take()
-        .map(|collector| collector.captured.into_bytes())
-        .unwrap_or_default()
-}
-
-impl CapturedStream {
-    fn into_bytes(mut self) -> Vec<u8> {
-        if self.truncated {
-            let notice = truncated_output_notice();
-            debug_assert!(notice.len() <= TRUNCATED_OUTPUT_NOTICE_MAX_BYTES);
-            self.bytes.extend_from_slice(&notice);
-        }
-        self.bytes
-    }
-}
-
-fn truncated_output_notice() -> Vec<u8> {
-    format!("\n[chunk: output truncated after {MAX_CAPTURED_OUTPUT_BYTES} bytes]\n").into_bytes()
-}
 
 fn cancellation_requested(cancel: &Receiver<()>) -> bool {
     match cancel.try_recv() {
@@ -436,6 +286,7 @@ fn shell_command(command: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::{MAX_CAPTURED_OUTPUT_BYTES, TRUNCATED_OUTPUT_NOTICE_MAX_BYTES};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};

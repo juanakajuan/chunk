@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::model::{DiffFile, DiffHunk, DiffLine, DiffLineKind};
-use crate::process::ProcessOutcome;
+use crate::process::{ProcessOutcome, ProcessOutputCollector};
 
 const OPENCODE_PROGRAM: &str = "opencode";
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -347,6 +347,7 @@ impl AskAiInvocation {
         command
             .args(&self.args)
             .current_dir(&self.current_dir)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (key, value) in &self.env {
@@ -418,17 +419,20 @@ fn run_invocation(
     cancel: &Receiver<()>,
 ) -> io::Result<InvocationOutcome> {
     let mut child = invocation.command().spawn()?;
+    let mut output = ProcessOutputCollector::start(&mut child);
 
     loop {
+        output.drain();
+
         if cancellation_requested(cancel) {
             let _ = child.kill();
-            let output = child.wait_with_output().ok();
-            return Ok(InvocationOutcome::Cancelled(output));
+            let process_output = child.wait().ok().map(|status| output.collect(status));
+            return Ok(InvocationOutcome::Cancelled(process_output));
         }
 
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            return Ok(InvocationOutcome::Completed(output));
+        if let Some(status) = child.try_wait()? {
+            let process_output = output.collect(status);
+            return Ok(InvocationOutcome::Completed(process_output));
         }
 
         thread::sleep(REQUEST_POLL_INTERVAL);
@@ -876,6 +880,56 @@ mod tests {
             "failed to start: missing opencode"
         );
         assert_eq!(not_started.stderr(), "missing opencode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invocation_drains_large_stdout_while_process_runs() {
+        use crate::process::{MAX_CAPTURED_OUTPUT_BYTES, TRUNCATED_OUTPUT_NOTICE_MAX_BYTES};
+        use std::sync::mpsc;
+
+        let invocation = AskAiInvocation {
+            program: "head".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "2097152".to_string(),
+                "/dev/zero".to_string(),
+            ],
+            current_dir: PathBuf::from("."),
+            env: Vec::new(),
+        };
+        let (cancel_sender, cancel) = mpsc::channel();
+        let (done_sender, done) = mpsc::channel();
+
+        thread::spawn(move || {
+            let _ = done_sender.send(run_invocation(invocation, &cancel));
+        });
+
+        match done.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(InvocationOutcome::Completed(output))) => {
+                assert!(output.status.success());
+                assert!(
+                    output.stdout.len()
+                        <= MAX_CAPTURED_OUTPUT_BYTES + TRUNCATED_OUTPUT_NOTICE_MAX_BYTES
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("output truncated"),
+                    "large output should include truncation notice"
+                );
+            }
+            Ok(Ok(InvocationOutcome::Cancelled(_))) => {
+                panic!("large-output invocation was cancelled unexpectedly")
+            }
+            Ok(Err(error)) => panic!("large-output invocation failed: {error}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = cancel_sender.send(());
+                let _ = done.recv_timeout(Duration::from_secs(2));
+                panic!("large-output invocation blocked without draining stdout");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("large-output invocation worker disconnected")
+            }
+        }
     }
 
     #[test]
