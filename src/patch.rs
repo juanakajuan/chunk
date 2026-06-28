@@ -639,7 +639,47 @@ fn patch_header_path(
 }
 
 fn prefixed_patch_path(prefix: &str, path: &str) -> String {
-    format!("{prefix}/{path}")
+    quote_git_path_if_needed(&format!("{prefix}/{path}"))
+}
+
+fn quote_git_path_if_needed(path: &str) -> String {
+    if !path_needs_git_quotes(path) {
+        return path.to_string();
+    }
+
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('"');
+    for value in path.chars() {
+        push_quoted_git_path_char(&mut quoted, value);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn path_needs_git_quotes(path: &str) -> bool {
+    path.chars()
+        .any(|value| value.is_control() || value == '"' || value == '\\')
+}
+
+fn push_quoted_git_path_char(quoted: &mut String, value: char) {
+    match value {
+        '\x07' => quoted.push_str("\\a"),
+        '\x08' => quoted.push_str("\\b"),
+        '\x0c' => quoted.push_str("\\f"),
+        '\n' => quoted.push_str("\\n"),
+        '\r' => quoted.push_str("\\r"),
+        '\t' => quoted.push_str("\\t"),
+        '\x0b' => quoted.push_str("\\v"),
+        '\\' => quoted.push_str("\\\\"),
+        '"' => quoted.push_str("\\\""),
+        value if value.is_control() => {
+            let mut bytes = [0; 4];
+            for byte in value.encode_utf8(&mut bytes).bytes() {
+                quoted.push_str(&format!("\\{byte:03o}"));
+            }
+        }
+        value => quoted.push(value),
+    }
 }
 
 fn push_hunk_patch(patch: &mut String, hunk: &DiffHunk) {
@@ -870,6 +910,35 @@ mod tests {
                 (DiffLineKind::Added, "    let x = 2;"),
             ]
         );
+    }
+
+    #[test]
+    fn hunk_patch_quotes_paths_that_need_git_escapes() {
+        let source = file(
+            "tab\tfile.txt",
+            FileStatus::Modified,
+            vec![hunk(
+                "@@ -1 +1 @@",
+                1,
+                1,
+                1,
+                1,
+                vec![
+                    line(DiffLineKind::Removed, "old"),
+                    line(DiffLineKind::Added, "new"),
+                ],
+            )],
+        );
+        let selected = hunk("@@ -1 +1 @@", 1, 1, 1, 1, Vec::new());
+
+        let patch = overlapping_hunk_patch(&source, &selected).expect("overlap");
+
+        assert!(patch.contains("diff --git \"a/tab\\tfile.txt\" \"b/tab\\tfile.txt\""));
+        assert!(patch.contains("--- \"a/tab\\tfile.txt\""));
+        assert!(patch.contains("+++ \"b/tab\\tfile.txt\""));
+
+        let parsed = parse_unified_diff(&patch);
+        assert_eq!(parsed.files[0].path, "tab\tfile.txt");
     }
 
     #[test]

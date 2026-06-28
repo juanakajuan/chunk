@@ -1052,6 +1052,39 @@ mod tests {
     }
 
     #[test]
+    fn toggle_hunk_staging_handles_git_quoted_paths() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let cwd = CurrentDirGuard::enter(&root);
+        let path = "tab\tfile.txt";
+
+        run_git(["init"]);
+        run_git(["config", "user.email", "chunk@example.test"]);
+        run_git(["config", "user.name", "Chunk Test"]);
+        fs::write(path, "old\n").unwrap();
+        run_git(["add", path]);
+        run_git(["commit", "-m", "initial"]);
+
+        fs::write(path, "new\n").unwrap();
+        let changeset = load_worktree_diff().unwrap();
+        let file = changeset
+            .files
+            .iter()
+            .find(|file| file.display_path() == path)
+            .expect("changed tabbed path should be parsed");
+
+        toggle_staging_for_hunk(file, 0).unwrap();
+
+        let cached = git_output(["diff", "--cached", "--", path]);
+        assert!(cached.contains("new"));
+        let unstaged = git_output(["diff", "--", path]);
+        assert!(unstaged.is_empty());
+
+        drop(cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn discard_hunk_reverts_only_selected_unstaged_hunk() {
         let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
         let root = temp_root();
