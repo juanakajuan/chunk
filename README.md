@@ -30,6 +30,57 @@ This is also the default command:
 cargo run
 ```
 
+Print a JSON worktree snapshot for external frontends:
+
+```sh
+cargo run -- diff --json
+```
+
+The JSON output is a single snapshot and does not start the live terminal UI. It
+has this shape:
+
+```json
+{
+  "title": "Working tree changes (main)",
+  "source_label": "git diff HEAD + untracked",
+  "files": [
+    {
+      "path": "src/main.rs",
+      "old_path": "src/main.rs",
+      "status": "modified",
+      "stage": "unstaged",
+      "additions": 1,
+      "deletions": 1,
+      "binary": false,
+      "hunks": [
+        {
+          "header": "@@ -1,2 +1,2 @@",
+          "old_range": { "start": 1, "lines": 2 },
+          "new_range": { "start": 1, "lines": 2 },
+          "stage": "unstaged",
+          "lines": [
+            {
+              "kind": "context",
+              "old_line": 1,
+              "new_line": 1,
+              "content": "fn main() {"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`files` includes staged, unstaged, mixed, and untracked worktree changes.
+`path` is the new-side path and is empty for deletions; `old_path` is the
+old-side path and is empty for additions. `status` is one of `added`, `deleted`,
+`modified`, `renamed`, or `copied`. `stage` is one of `unstaged`, `staged`, or
+`mixed`. Hunk `old_range` and `new_range` are stable coordinates for navigation.
+Line `kind` is one of `context`, `added`, `removed`, or `meta`; unavailable line
+numbers are `null`. `content` does not include the diff prefix character.
+
 Review the current branch like a pull request:
 
 ```sh

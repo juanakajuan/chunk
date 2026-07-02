@@ -8,6 +8,7 @@ mod ask_ai;
 mod clipboard;
 mod config;
 mod custom_command;
+mod diff_json;
 mod diff_render;
 mod editor;
 mod git;
@@ -40,7 +41,11 @@ struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 enum Command {
     /// Review the current Git working tree diff.
-    Diff,
+    Diff {
+        /// Print a JSON snapshot instead of opening the terminal UI.
+        #[arg(long)]
+        json: bool,
+    },
     /// Review the current branch against a base branch, like a pull request.
     Pr {
         /// Base branch/ref. Defaults to origin/HEAD, then main, then master.
@@ -52,15 +57,11 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     let cli = Cli::parse();
-    let config = config::load()?;
-    match cli.command.unwrap_or(Command::Diff) {
-        Command::Diff => runtime::run(app::App::with_config(
-            review_source::ReviewSource::load_worktree()?,
-            config,
-        )),
-        Command::Pr { base } => runtime::run(app::App::with_config(
-            review_source::ReviewSource::load_pull_request(base.as_deref())?,
-            config,
-        )),
-    }
+    let review = match cli.command.unwrap_or(Command::Diff { json: false }) {
+        Command::Diff { json: true } => return diff_json::print(&git::load_worktree_diff()?),
+        Command::Diff { json: false } => review_source::ReviewSource::load_worktree()?,
+        Command::Pr { base } => review_source::ReviewSource::load_pull_request(base.as_deref())?,
+    };
+
+    runtime::run(app::App::with_config(review, config::load()?))
 }
