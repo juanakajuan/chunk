@@ -125,7 +125,7 @@ impl FileKind {
             Self::Html => "\u{e736}",
             Self::Css => "\u{e749}",
             Self::Sass => "\u{e603}",
-            Self::Vue => "\u{fd42}",
+            Self::Vue => "\u{e6a0}",
             Self::Shell => "\u{e795}",
             Self::Config => "\u{f013}",
             Self::Yaml => "\u{e615}",
