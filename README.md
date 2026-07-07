@@ -1,157 +1,66 @@
 # chunk
 
-`chunk` is a compact terminal diff reviewer for Git repositories. It renders a
-tree file list and a syntax-highlighted unified diff in the terminal, with
-keyboard and mouse navigation, live worktree refresh, file/hunk staging, and
-guarded worktree discard actions.
+`chunk` is a terminal diff reviewer for Git repositories. It shows a tree file
+list beside a syntax-highlighted unified diff, with live worktree refresh,
+file/hunk staging, guarded discard actions, mouse support, and optional OpenCode
+AI actions.
 
 ## Requirements
 
 - Rust 2024 toolchain
 - Git
 - [OpenCode](https://opencode.ai/) for Ask AI actions
-- A [Nerd Font](https://www.nerdfonts.com/) for the colored file-type, status,
-  and staging glyphs in the sidebar and bottom bar. Without a Nerd Font these
-  glyphs may render as a generic fallback box, but the file list stays usable.
+- A [Nerd Font](https://www.nerdfonts.com/) for file/status glyphs
 
 ## Usage
 
-Run from inside a Git worktree:
+Run inside a Git worktree:
 
 ```sh
-cargo run -- diff
-```
-
-`diff` reviews the current working tree against `HEAD`, including staged,
-unstaged, mixed, and untracked files. It live-refreshes as the worktree changes.
-This is also the default command:
-
-```sh
-cargo run
-```
-
-Print a JSON worktree snapshot for external frontends:
-
-```sh
+cargo run -- diff       # live worktree review; also the default command
+cargo run -- pr [base]  # branch review from merge-base(base, HEAD) to HEAD
 cargo run -- diff --json
 ```
 
-The JSON output is a single snapshot and does not start the live terminal UI. It
-has this shape:
+`diff` reviews staged, unstaged, mixed, and untracked changes against `HEAD` and
+live-refreshes as the worktree changes.
 
-```json
-{
-  "title": "Working tree changes (main)",
-  "source_label": "git diff HEAD + untracked",
-  "files": [
-    {
-      "path": "src/main.rs",
-      "old_path": "src/main.rs",
-      "status": "modified",
-      "stage": "unstaged",
-      "additions": 1,
-      "deletions": 1,
-      "binary": false,
-      "hunks": [
-        {
-          "header": "@@ -1,2 +1,2 @@",
-          "old_range": { "start": 1, "lines": 2 },
-          "new_range": { "start": 1, "lines": 2 },
-          "stage": "unstaged",
-          "lines": [
-            {
-              "kind": "context",
-              "old_line": 1,
-              "new_line": 1,
-              "content": "fn main() {"
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
+`pr` is read-only: no live refresh, staging, or discard. Without a base ref it
+tries `origin/HEAD`, then `main`, then `master`.
 
-`files` includes staged, unstaged, mixed, and untracked worktree changes.
-`path` is the new-side path and is empty for deletions; `old_path` is the
-old-side path and is empty for additions. `status` is one of `added`, `deleted`,
-`modified`, `renamed`, or `copied`. `stage` is one of `unstaged`, `staged`, or
-`mixed`. Hunk `old_range` and `new_range` are stable coordinates for navigation.
-Line `kind` is one of `context`, `added`, `removed`, or `meta`; unavailable line
-numbers are `null`. `content` does not include the diff prefix character.
-
-Review the current branch like a pull request:
-
-```sh
-cargo run -- pr
-cargo run -- pr main
-```
-
-When no base is passed, `pr` tries `origin/HEAD`, then `main`, then `master`.
-PR mode compares the merge-base of the base ref and `HEAD` against `HEAD`.
-It does not live-refresh, stage files, or discard worktree changes.
+`diff --json` prints one worktree snapshot for external frontends instead of
+starting the terminal UI. The output includes `title`, `source_label`, and
+`files`; each file includes paths, status, stage, line counts, binary state, and
+hunks with stable old/new ranges and diff lines.
 
 ## Controls
 
-The keys below are the defaults and can be remapped in `[keybinds]` (except
-for the special keys and `Ctrl-*` combos noted inline).
+These are the default keys. Most single-character actions can be remapped in
+`[keybinds]`; special keys and `Ctrl-*` combos stay fixed.
 
-- `j` / `k`: move down or up in the focused pane; in the file list this changes
-  files, in the diff pane this scrolls by one row
-- `Tab`: switch focus between file list and diff
-- `f`: show or hide the file list
-- `Left`: focus file list
-- `Right` / `Enter`: focus diff
-- `PageDown` / `Ctrl-d`: scroll diff down one page
-- `PageUp` / `Ctrl-u`: scroll diff up one page
-- `/`: open a literal search prompt for the selected file; `Enter` applies the
-  query and `Esc` cancels or clears search
-- `n` / `N`: with search active, jump to the next or previous match; otherwise
-  select and jump to the next or previous hunk in the selected file
-- `g` / `Home`: jump to top of diff
-- `G` / `End`: jump to bottom of diff
-- `?`: show or hide the in-app keymap help; the overlay also closes with
-  `Esc` or `q`
-- `a`: ask OpenCode a read-only question about the selected file from the file
-  list, or the focused hunk from the diff pane; `Enter` submits, `Esc` cancels
-  the prompt or running request
-- `x`: ask OpenCode to explain the selected file from the file list, or the
-  focused hunk from the diff pane, using the preset review-oriented prompt
-- `u`: ask OpenCode for a short summary of unpublished changes, including local
-  commits ahead of upstream/base plus staged, unstaged, and untracked worktree
-  changes
-- `y`: copy the selected file path from the file list, or the selected hunk
-  diff from the diff pane
-- `Y`: copy the selected file diff from the diff pane
-- `r`: toggle reviewed state for the selected file; reviewed files are dimmed
-  and marked with a check in the file list, and the state survives reloads as
-  long as the file path stays the same
-- `Space`: in `diff` mode, stage or unstage the selected file when the file list
-  is focused, or the selected hunk when the diff pane is focused
-- `d`: in `diff` mode, discard unstaged worktree changes for the focused file,
-  folder, or hunk after confirmation; untracked files can be discarded from the
-  file list
-- `e`: open the selected file in `$EDITOR` near the first changed line in `diff`
-  mode
-- Custom command keys from config: run the configured shell command from the Git
-  root, then show stdout, stderr, and exit status in a command pane
-- `q` / `Ctrl-c`: quit
+| Keys | Action |
+| ---- | ------ |
+| `j` / `k` | Move in the file list or scroll the diff |
+| `Tab`, `Left`, `Right`, `Enter` | Change focus between files and diff |
+| `f` | Toggle the file list |
+| `/`, `n`, `N` | Search the selected file; jump next/previous match or hunk |
+| `PageDown` / `Ctrl-d`, `PageUp` / `Ctrl-u` | Page the diff |
+| `g` / `Home`, `G` / `End` | Jump to top or bottom |
+| `?` | Toggle in-app help |
+| `a`, `x`, `u` | Ask AI, explain selection, or summarize unpublished changes |
+| `y`, `Y` | Copy focused path/hunk or selected file diff |
+| `r` | Toggle reviewed state for the selected file |
+| `Space` | Stage/unstage the selected file or hunk in `diff` mode |
+| `d` | Discard unstaged file/folder/hunk changes after confirmation in `diff` mode |
+| `e` | Open the selected file in `$EDITOR` near its first changed line |
+| Custom command keys | Run configured shell commands from the Git root |
+| `q` / `Ctrl-c` | Quit |
 
-Mouse hover changes focus. In the Files panel, `j` / `k` and wheel scrolling
-move through files and folders. Click a file to select it, click a folder in
-tree view to collapse or expand it, or click a hunk in the diff pane to select
-it. Drag visible text to copy the selected text to the clipboard.
+Mouse hover changes focus. Click files, folders, and hunks to select or expand
+them; use the wheel to scroll. Drag visible text to copy it.
 
-In the command output pane, use `j` / `k` or the mouse wheel to scroll,
-`PageDown` / `PageUp` to page, `g` / `G` to jump, and `Esc` / `q` to return to
-the diff.
-
-In the Ask AI answer pane, use the same scroll and close keys, and `y` to copy
-the answer text. The OpenCode process receives the Git root, focused file or
-hunk, selected visible text when present, read-only repository permissions, and
-web fetch/search access. Answers render Markdown for common formatting such as
-headings, lists, links, quotes, and code blocks.
+Command output and Ask AI panes use the same scroll keys; close them with `Esc`
+or `q`. Ask AI answers can be copied with `y`.
 
 ## Configuration
 
@@ -171,52 +80,15 @@ label = "commit and push"
 command = "git add . && com && git push"
 ```
 
-The `theme` setting is optional. Supported values are `gruvbox` (default) and
-`github-dark`.
+Supported themes are `gruvbox` (default) and `github-dark`.
 
-The Files panel groups changed files under collapsible parent directories. Each
-file row shows a colored, file-type icon based on its extension (with a generic
-icon for unknown or extensionless files) so files are easier to scan by type.
-Reviewed files swap the type icon for a check glyph.
+Keybind values must be single characters; use a literal space for `Space`.
+Unknown actions, invalid keys, conflicting keys, and duplicate custom command
+keys are rejected at startup. Remapping a built-in frees its default key for a
+custom command.
 
-### Built-in keybinds
-
-The `[keybinds]` table remaps selected built-in actions. Each value is a single
-character (use a literal space for `Space`). Unknown action names, invalid
-keys, and keys shared by two actions are rejected at startup. Special keys
-(`Tab`, `Enter`, `Esc`, arrows, `PageUp`/`PageDown`, `Home`/`End`) and
-`Ctrl-*` combos stay fixed and are not listed here.
-
-| Action                  | Default | Action            | Default |
-| ----------------------- | ------- | ----------------- | ------- |
-| `quit`                  | `q`     | `toggle_staging`  | `Space` |
-| `help`                  | `?`     | `discard`         | `d`     |
-| `toggle_files`          | `f`     | `editor`          | `e`     |
-| `ask_ai`                | `a`     | `explain_code`    | `x`     |
-| `unpublished_summary`   | `u`     | `copy_focused`    | `y`     |
-| `search`                | `/`     | `copy_file_diff`  | `Y`     |
-| `move_down`             | `j`     | `toggle_reviewed` | `r`     |
-| `move_up`               | `k`     |                   |         |
-| `next_match`            | `n`     |                   |         |
-| `prev_match`            | `N`     |                   |         |
-| `top`                   | `g`     |                   |         |
-| `bottom`                | `G`     |                   |         |
-
-Remapping a built-in frees its default key for custom commands, and the help
-overlay, keymap bar, and overlay close keys all follow the configured keys.
-
-### Custom commands
-
-Custom command keys are single characters. Custom command keys conflicting
-with any configured built-in keybind, and duplicate custom keys, are rejected
-at startup. Commands run from the Git repository root through the user shell,
-and `chunk` reloads the review source after completion.
-
-## Themes
-
-The default theme is Gruvbox (dark, hard contrast). Set `theme = "github-dark"`
-in `${XDG_CONFIG_HOME:-$HOME/.config}/chunk/config.toml` to use the GitHub dark
-palette.
+Custom commands run from the Git root through the user shell. After they finish,
+`chunk` shows stdout, stderr, and exit status, then reloads the review source.
 
 ## Development
 
@@ -225,22 +97,3 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
-
-Code map:
-
-- `src/main.rs`: CLI parsing and review source selection
-- `src/config.rs`: user config loading and validation
-- `src/keybind.rs`: configurable built-in keybind map and validation
-- `src/ask_ai.rs`: read-only OpenCode request and prompt boundary
-- `src/custom_command.rs`: configured shell command bindings and execution
-- `src/editor.rs`: external editor command resolution
-- `src/review_source.rs`: worktree vs PR behavior, reloads, mutation capability
-- `src/git.rs`: Git command boundary and source snapshot loading
-- `src/patch.rs`: unified diff parser
-- `src/model.rs`: parsed diff data structures
-- `src/app.rs`: selection, focus, scroll, reload, and staging session state
-- `src/runtime.rs`: terminal setup, event loop, mouse capture, live watcher
-- `src/ui.rs`: Ratatui layout and widget drawing
-- `src/rows.rs` and `src/rows/`: rendered sidebar, diff, status, and keybind rows
-- `src/viewport.rs`: viewport geometry, scroll clamping, render caches
-- `src/syntax.rs` and `src/theme.rs`: syntax adapter and palettes
