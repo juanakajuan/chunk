@@ -1,5 +1,5 @@
 use super::*;
-use crate::ask_ai::{AskAiResult, AskAiReviewMode};
+use crate::ask_ai::{AiHarness, AiSettings, AskAiResult, AskAiReviewMode};
 use crate::custom_command::CustomCommandResult;
 use crate::diff_render::RenderedDiffLines;
 use crate::keybind::{BuiltinAction, BuiltinKey, KeybindMap};
@@ -133,6 +133,17 @@ fn showing_files_panel_moves_focus_to_sidebar() {
 }
 
 #[test]
+fn initial_files_panel_focuses_root_folder() {
+    let app = app_with(changeset_with_paths(["src/app.rs", "README.md"]));
+
+    assert_eq!(app.focus, FocusPane::Sidebar);
+    assert_eq!(
+        app.sidebar_cursor_target,
+        Some(SidebarRowTarget::Folder(String::new()))
+    );
+}
+
+#[test]
 fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
     let mut app = app_with(changeset_with_paths([
         "src/app.rs",
@@ -142,6 +153,7 @@ fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
     ]));
     app.collapsed_tree_dirs.insert("src/bin".to_string());
     app.selected_file_index = 0;
+    app.sidebar_cursor_target = Some(SidebarRowTarget::File(0));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
@@ -171,8 +183,8 @@ fn clicking_tree_file_selects_corresponding_diff() {
     app.selected_file_index = 1;
     render_sidebar(&mut app);
 
-    app.handle_left_down(1, 4);
-    app.handle_left_up(1, 4);
+    app.handle_left_down(1, 5);
+    app.handle_left_up(1, 5);
 
     assert_eq!(app.focus, FocusPane::Sidebar);
     assert_eq!(
@@ -192,8 +204,8 @@ fn clicking_tree_folder_collapses_without_losing_selected_file() {
     app.selected_file_index = 1;
     render_sidebar(&mut app);
 
-    app.handle_left_down(1, 2);
-    app.handle_left_up(1, 2);
+    app.handle_left_down(1, 3);
+    app.handle_left_up(1, 3);
 
     assert!(app.collapsed_tree_dirs.contains("src/bin"));
     assert_eq!(
@@ -552,6 +564,7 @@ fn diff_space_without_hunks_sets_live_error_without_exiting() {
 fn discard_key_requires_confirmation() {
     let mut app = app_with(changeset_with_one_file());
     app.focus = FocusPane::Sidebar;
+    app.select_file(0);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
@@ -578,11 +591,12 @@ fn files_panel_hover_changes_pane_focus_without_changing_tree_focus() {
     ]));
     app.focus = FocusPane::Diff;
     app.selected_file_index = 3;
+    app.sidebar_cursor_target = Some(SidebarRowTarget::File(3));
     render_sidebar(&mut app);
 
     app.handle_hover(1, 1);
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(app.sidebar_cursor_target, None);
+    assert_eq!(app.sidebar_cursor_target, Some(SidebarRowTarget::File(3)));
     assert_eq!(
         app.selected_file().map(DiffFile::display_path),
         Some("README.md")
@@ -606,7 +620,10 @@ fn files_panel_hover_changes_focus_on_empty_panel_space() {
     app.handle_hover(1, 6);
 
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(app.sidebar_cursor_target, None);
+    assert_eq!(
+        app.sidebar_cursor_target,
+        Some(SidebarRowTarget::Folder(String::new()))
+    );
 }
 
 #[test]
@@ -619,9 +636,9 @@ fn keyboard_tree_navigation_can_discard_focused_folder() {
     ]));
     render_sidebar(&mut app);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
@@ -646,9 +663,9 @@ fn keyboard_tree_navigation_stages_focused_folder_paths() {
     ]));
     render_sidebar(&mut app);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
 
     let request = app
@@ -679,9 +696,9 @@ fn keyboard_tree_navigation_unstages_focused_staged_folder_paths() {
     let mut app = app_with(changeset);
     render_sidebar(&mut app);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
 
     let request = app
@@ -970,6 +987,8 @@ fn r_key_reviews_newly_selected_file_independently() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
     assert_eq!(
         app.selected_file().map(DiffFile::display_path),
         Some("b.txt")
@@ -1182,6 +1201,22 @@ fn ask_ai_key_from_files_panel_queues_file_context() {
 }
 
 #[test]
+fn ask_ai_request_uses_configured_harness() {
+    let mut app = app_with_config(AppConfig {
+        ai: AiSettings::with_harness(AiHarness::Codex),
+        ..AppConfig::default()
+    });
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    enter_ask_ai_question(&mut app, "Why changed?");
+
+    let (harness, request) = take_ask_ai_effect(&mut app).expect("Ask AI request should be queued");
+    assert_eq!(harness, AiHarness::Codex);
+    assert_eq!(request.question(), "Why changed?");
+}
+
+#[test]
 fn ask_ai_key_from_diff_pane_queues_hunk_context() {
     let mut changeset = changeset_with_one_file();
     changeset.title = "Tracked changes".to_string();
@@ -1263,6 +1298,76 @@ fn unpublished_summary_key_queues_tui_ai_request() {
                 == crate::ask_ai::UNPUBLISHED_SUMMARY_QUESTION
                 && !cancelling)
     );
+}
+
+#[test]
+fn unpublished_summary_uses_configured_harness() {
+    let mut app = app_with_config(AppConfig {
+        ai: AiSettings::with_harness(AiHarness::ClaudeCode),
+        ..AppConfig::default()
+    });
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(
+        take_unpublished_summary_effect(&mut app),
+        Some(AiHarness::ClaudeCode)
+    );
+}
+
+#[test]
+fn f2_harness_picker_sets_harness_and_queues_config_save() {
+    let mut app = app_with(changeset_with_one_file());
+
+    drive_harness_picker(&mut app, &[KeyCode::Char('3'), KeyCode::Enter]);
+
+    assert_eq!(app.ai_settings.harness, AiHarness::Codex);
+    assert!(!app.harness_picker_visible());
+    assert_eq!(
+        take_save_ai_harness_effect(&mut app),
+        Some(AiHarness::Codex)
+    );
+}
+
+#[test]
+fn harness_picker_enter_applies_highlighted_harness() {
+    let mut app = app_with(changeset_with_one_file());
+
+    drive_harness_picker(&mut app, &[KeyCode::Right, KeyCode::Enter]);
+
+    assert_eq!(app.ai_settings.harness, AiHarness::ClaudeCode);
+    assert_eq!(
+        take_save_ai_harness_effect(&mut app),
+        Some(AiHarness::ClaudeCode)
+    );
+}
+
+#[test]
+fn harness_picker_configures_model_and_native_effort() {
+    let mut app = app_with(changeset_with_one_file());
+
+    drive_harness_picker(
+        &mut app,
+        &[
+            KeyCode::Char('3'),
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Enter,
+        ],
+    );
+
+    assert_eq!(app.ai_settings.harness, AiHarness::Codex);
+    assert_eq!(app.ai_settings.codex.model(), Some("gpt-5.6-sol"));
+    assert_eq!(app.ai_settings.codex.effort(), Some("low"));
+    assert!(matches!(
+        app.effects.pop_front(),
+        Some(AppEffect::SaveAiSettings(settings))
+            if settings.codex.model() == Some("gpt-5.6-sol")
+                && settings.codex.effort() == Some("low")
+    ));
 }
 
 #[test]
@@ -1357,6 +1462,17 @@ fn app_with(changeset: Changeset) -> App {
     App::new(LoadedReview::worktree(changeset))
 }
 
+fn drive_harness_picker(app: &mut App, keys: &[KeyCode]) {
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.harness_picker_visible());
+
+    for &key in keys {
+        app.handle_key(KeyEvent::new(key, KeyModifiers::NONE))
+            .unwrap();
+    }
+}
+
 fn take_clipboard_request(app: &mut App) -> Option<ClipboardRequest> {
     app.take_effects()
         .into_iter()
@@ -1394,7 +1510,16 @@ fn take_ask_ai_request(app: &mut App) -> Option<AskAiRequest> {
     app.take_effects()
         .into_iter()
         .find_map(|effect| match effect {
-            AppEffect::RunAskAi(request) => Some(request),
+            AppEffect::RunAskAi { request, .. } => Some(request),
+            _ => None,
+        })
+}
+
+fn take_ask_ai_effect(app: &mut App) -> Option<(AiHarness, AskAiRequest)> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::RunAskAi { settings, request } => Some((settings.harness, request)),
             _ => None,
         })
 }
@@ -1408,7 +1533,25 @@ fn take_ask_ai_cancel_request(app: &mut App) -> bool {
 fn take_unpublished_summary_request(app: &mut App) -> bool {
     app.take_effects()
         .into_iter()
-        .any(|effect| matches!(effect, AppEffect::RunUnpublishedSummary))
+        .any(|effect| matches!(effect, AppEffect::RunUnpublishedSummary { .. }))
+}
+
+fn take_unpublished_summary_effect(app: &mut App) -> Option<AiHarness> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::RunUnpublishedSummary { settings } => Some(settings.harness),
+            _ => None,
+        })
+}
+
+fn take_save_ai_harness_effect(app: &mut App) -> Option<AiHarness> {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            AppEffect::SaveAiSettings(settings) => Some(settings.harness),
+            _ => None,
+        })
 }
 
 fn app_with_config(config: AppConfig) -> App {

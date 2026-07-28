@@ -13,7 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
-use crate::ask_ai::{AskAiContext, AskAiRequest, AskAiResult};
+use crate::ask_ai::{AiSettings, AskAiContext, AskAiRequest, AskAiResult};
 use crate::config::AppConfig;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::diff_render::DiffRenderState;
@@ -37,6 +37,7 @@ mod review_session;
 mod search;
 
 pub(crate) use keys::accepts_text_input;
+pub(crate) use overlay::AiPickerField;
 
 use diff_pane::DiffPaneState;
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
@@ -134,9 +135,15 @@ pub(crate) enum AppEffect {
     OpenEditor(EditorRequest),
     RunCustomCommand(CustomCommandBinding),
     CancelCustomCommand,
-    RunAskAi(AskAiRequest),
-    RunUnpublishedSummary,
+    RunAskAi {
+        settings: Box<AiSettings>,
+        request: AskAiRequest,
+    },
+    RunUnpublishedSummary {
+        settings: Box<AiSettings>,
+    },
     CancelAskAi,
+    SaveAiSettings(Box<AiSettings>),
     CopyToClipboard(ClipboardRequest),
 }
 
@@ -173,9 +180,15 @@ pub(crate) enum RuntimeEvent {
     EditorFinished(EditorOutcome),
     CustomCommandFinished(CustomCommandResult),
     AskAiFinished(AskAiResult),
+    AiSettingsSaved {
+        settings: AiSettings,
+        error: Option<String>,
+    },
     ClipboardWriteFinished(ClipboardWriteResult),
     LiveWatchFailed(String),
-    ReloadReviewSource { preserve_scroll: bool },
+    ReloadReviewSource {
+        preserve_scroll: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -207,6 +220,8 @@ pub(crate) struct App {
     keybinds: KeybindMap,
     /// User-selected UI and syntax palette.
     theme: ThemeName,
+    /// AI CLI used for Ask AI requests.
+    ai_settings: AiSettings,
     /// Deferred runtime effects requested by application behavior.
     effects: VecDeque<AppEffect>,
     /// First file index considered for sidebar rendering.
@@ -244,6 +259,8 @@ impl App {
         let LoadedReview { source, changeset } = review;
         let file_count = changeset.files.len();
         let diff_pane = DiffPaneState::new(&changeset);
+        let sidebar_cursor_target =
+            (file_count > 0).then(|| SidebarRowTarget::Folder(String::new()));
         Self {
             source,
             changeset,
@@ -258,10 +275,11 @@ impl App {
             custom_commands: config.commands,
             keybinds: config.keybinds,
             theme: config.theme,
+            ai_settings: config.ai,
             effects: VecDeque::new(),
             sidebar_scroll: 0,
             collapsed_tree_dirs: HashSet::new(),
-            sidebar_cursor_target: None,
+            sidebar_cursor_target,
             viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
             pending_left_click: None,
@@ -395,11 +413,29 @@ impl App {
         rows::help_overlay_lines(
             self.can_stage(),
             self.can_discard(),
+            self.ai_settings.harness,
             &self.custom_commands,
             self.keybinds,
             content_width,
             theme,
         )
+    }
+
+    pub(crate) fn harness_picker_lines(
+        &self,
+        content_width: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let selected = match &self.overlay {
+            Some(Overlay::HarnessPicker(picker)) => &picker.settings,
+            _ => &self.ai_settings,
+        };
+
+        let field = match &self.overlay {
+            Some(Overlay::HarnessPicker(picker)) => picker.field,
+            _ => AiPickerField::Harness,
+        };
+        rows::harness_picker_lines(&self.ai_settings, selected, field, content_width, theme)
     }
 
     fn can_stage(&self) -> bool {
@@ -500,6 +536,19 @@ impl App {
             RuntimeEvent::AskAiFinished(result) => {
                 self.set_ask_ai_result(result);
             }
+            RuntimeEvent::AiSettingsSaved { settings, error } => {
+                if let Some(error) = error {
+                    self.set_live_error(format!(
+                        "failed to save AI settings for {}: {error}",
+                        settings.harness.display_name()
+                    ));
+                } else {
+                    self.set_live_notice(format!(
+                        "AI settings saved: {}",
+                        settings.harness.display_name()
+                    ));
+                }
+            }
             RuntimeEvent::ClipboardWriteFinished(result) => {
                 if let Some(error) = result.error {
                     self.set_live_error(format!("copy failed: {error}"));
@@ -550,15 +599,27 @@ impl App {
     }
 
     fn queue_ask_ai_request_effect(&mut self, request: AskAiRequest) {
-        self.clear_effects(|effect| matches!(effect, AppEffect::RunAskAi(_)));
+        self.clear_effects(|effect| matches!(effect, AppEffect::RunAskAi { .. }));
         self.set_ask_ai_running(&request);
-        self.effects.push_back(AppEffect::RunAskAi(request));
+        self.effects.push_back(AppEffect::RunAskAi {
+            settings: Box::new(self.ai_settings.clone()),
+            request,
+        });
     }
 
     fn queue_unpublished_summary_effect(&mut self) {
-        self.clear_effects(|effect| matches!(effect, AppEffect::RunUnpublishedSummary));
+        self.clear_effects(|effect| matches!(effect, AppEffect::RunUnpublishedSummary { .. }));
         self.set_ask_ai_running_question(crate::ask_ai::UNPUBLISHED_SUMMARY_QUESTION);
-        self.effects.push_back(AppEffect::RunUnpublishedSummary);
+        self.effects.push_back(AppEffect::RunUnpublishedSummary {
+            settings: Box::new(self.ai_settings.clone()),
+        });
+    }
+
+    fn queue_ai_settings_save_effect(&mut self) {
+        self.clear_effects(|effect| matches!(effect, AppEffect::SaveAiSettings(_)));
+        self.effects.push_back(AppEffect::SaveAiSettings(Box::new(
+            self.ai_settings.clone(),
+        )));
     }
 
     fn queue_ask_ai_cancel_effect(&mut self) {
@@ -633,6 +694,13 @@ impl App {
 
         if is_ctrl_c(key) {
             return Ok(false);
+        }
+
+        if self.should_open_harness_picker(key) {
+            self.open_harness_picker();
+            self.text_selection.clear();
+            self.ensure_scroll_bounds();
+            return Ok(true);
         }
 
         if self.should_open_ask_ai_prompt(key) {
@@ -976,6 +1044,10 @@ impl App {
         self.overlay.is_none()
             && !self.search_prompt_open()
             && self.keybinds.action_for(key) == Some(BuiltinAction::AskAi)
+    }
+
+    fn should_open_harness_picker(&self, key: KeyEvent) -> bool {
+        self.overlay.is_none() && !self.search_prompt_open() && key.code == KeyCode::F(2)
     }
 
     fn should_queue_explain_code_request(&self, key: KeyEvent) -> bool {
@@ -1566,6 +1638,10 @@ fn fallback_sidebar_target_position(
 }
 
 fn folder_contains_path(folder_path: &str, path: &str) -> bool {
+    if folder_path.is_empty() {
+        return true;
+    }
+
     path.strip_prefix(folder_path)
         .is_some_and(|suffix| suffix.starts_with('/'))
 }

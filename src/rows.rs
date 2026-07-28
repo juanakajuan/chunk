@@ -7,7 +7,8 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::ask_ai::AskAiResult;
+use crate::app::AiPickerField;
+use crate::ask_ai::{AiHarness, AiSettings, AskAiResult};
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::Changeset;
@@ -202,6 +203,95 @@ pub(crate) fn search_status_lines(
     styled_status_lines(text, theme.accent, content_width, theme)
 }
 
+pub(crate) fn harness_picker_lines(
+    current: &AiSettings,
+    selected: &AiSettings,
+    field: AiPickerField,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let selected_harness_settings = selected.selected();
+    let current_harness_settings = current.selected();
+    let same_harness = selected.harness == current.harness;
+    let mut lines = Vec::new();
+    lines.extend(wrap_line(
+        Line::styled(
+            "Choose the harness, model, and native effort setting for Ask AI requests.",
+            color_style(theme.muted, theme.background_alt),
+        ),
+        content_width,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(ai_setting_line(
+        "Harness",
+        selected.harness.display_name(),
+        field == AiPickerField::Harness,
+        same_harness,
+        theme,
+    ));
+    lines.push(ai_setting_line(
+        "Model",
+        selected_harness_settings
+            .model()
+            .unwrap_or("harness default"),
+        field == AiPickerField::Model,
+        same_harness && selected_harness_settings.model() == current_harness_settings.model(),
+        theme,
+    ));
+    lines.push(ai_setting_line(
+        selected.harness.effort_label(),
+        selected_harness_settings
+            .effort()
+            .unwrap_or("model default"),
+        field == AiPickerField::Effort,
+        same_harness && selected_harness_settings.effort() == current_harness_settings.effort(),
+        theme,
+    ));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("←/→", help_command_style(theme)),
+        Span::styled(" change  ", help_style(theme.muted, theme)),
+        Span::styled("↑/↓", help_command_style(theme)),
+        Span::styled(" field  ", help_style(theme.muted, theme)),
+        Span::styled("Enter", help_command_style(theme)),
+        Span::styled(" apply  ", help_style(theme.muted, theme)),
+        Span::styled("Esc", help_command_style(theme)),
+        Span::styled(" cancel", help_style(theme.muted, theme)),
+    ]));
+
+    lines
+}
+
+fn ai_setting_line(
+    label: &str,
+    value: &str,
+    active: bool,
+    current: bool,
+    theme: Theme,
+) -> Line<'static> {
+    let marker = if active { ">" } else { " " };
+    let marker_style = if active {
+        color_style(theme.accent, theme.background_alt).add_modifier(Modifier::BOLD)
+    } else {
+        help_style(theme.muted, theme)
+    };
+    let name_style = if active {
+        color_style(theme.text, theme.background_alt).add_modifier(Modifier::BOLD)
+    } else {
+        help_style(theme.text, theme)
+    };
+    let current_label = if current { "  current" } else { "" };
+
+    Line::from(vec![
+        Span::styled(marker, marker_style),
+        Span::styled(" ", help_style(theme.text, theme)),
+        Span::styled(format!("{label:<9}"), help_command_style(theme)),
+        Span::styled(value.to_string(), name_style),
+        Span::styled(current_label, help_style(theme.muted, theme)),
+    ])
+}
+
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
     stage_hint: Option<&'static str>,
@@ -357,6 +447,7 @@ fn key_pair(keybinds: KeybindMap, first: BuiltinAction, second: BuiltinAction) -
 pub(crate) fn help_overlay_lines(
     can_stage: bool,
     can_discard: bool,
+    ai_harness: AiHarness,
     custom_commands: &[CustomCommandBinding],
     keybinds: KeybindMap,
     content_width: usize,
@@ -462,6 +553,10 @@ pub(crate) fn help_overlay_lines(
             action_entry(
                 BuiltinAction::UnpublishedSummary,
                 "Summarize unpublished changes with Ask AI",
+            ),
+            HelpEntry::text(
+                command_key("F2"),
+                format!("configure AI (current: {})", ai_harness.display_name()),
             ),
         ],
         content_width,
@@ -1021,12 +1116,33 @@ mod tests {
 
     #[test]
     fn help_overlay_groups_ai_actions_separately() {
-        let help = help_text(true);
+        let lines = help_lines(true, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        let help = lines.join("\n");
 
         assert!(help.contains("AI"));
-        assert!(help.contains("a  Ask AI about focused file or hunk"));
-        assert!(help.contains("x  Explain focused file or hunk with Ask AI"));
-        assert!(help.contains("u  Summarize unpublished changes with Ask AI"));
+        assert!(help_entry_exists(
+            &lines,
+            "a",
+            "Ask AI about focused file or hunk"
+        ));
+        assert!(help_entry_exists(
+            &lines,
+            "x",
+            "Explain focused file or hunk with Ask AI"
+        ));
+        assert!(help_entry_exists(
+            &lines,
+            "u",
+            "Summarize unpublished changes with Ask AI"
+        ));
+        assert!(help_entry_exists(
+            &lines,
+            "F2",
+            "configure AI (current: OpenCode)"
+        ));
     }
 
     #[test]
@@ -1075,6 +1191,7 @@ mod tests {
         let lines = help_overlay_lines(
             true,
             true,
+            AiHarness::OpenCode,
             &commands,
             KeybindMap::defaults(),
             80,
@@ -1096,6 +1213,7 @@ mod tests {
         let lines = help_overlay_lines(
             true,
             true,
+            AiHarness::OpenCode,
             &[],
             KeybindMap::defaults(),
             24,
@@ -1143,6 +1261,7 @@ mod tests {
         help_overlay_lines(
             can_stage,
             can_stage,
+            AiHarness::OpenCode,
             &[],
             KeybindMap::defaults(),
             content_width,
@@ -1163,6 +1282,12 @@ mod tests {
             .iter()
             .find_map(|line| line.find(needle))
             .unwrap_or_else(|| panic!("missing {needle:?} in {lines:#?}"))
+    }
+
+    fn help_entry_exists(lines: &[String], key: &str, description: &str) -> bool {
+        lines
+            .iter()
+            .any(|line| line.starts_with(key) && line.contains(description))
     }
 
     fn line_text(line: &Line<'_>) -> String {

@@ -377,13 +377,25 @@ impl TreeNode {
 }
 
 fn sidebar_entries(files: &[DiffFile], collapsed_dirs: &HashSet<String>) -> Vec<SidebarEntry> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+
     let mut root = TreeNode::default();
     for (index, file) in files.iter().enumerate() {
         root.insert_file(file.display_path(), index);
     }
 
-    let mut entries = Vec::new();
-    root.flatten("", 0, collapsed_dirs, &mut entries);
+    let expanded = !collapsed_dirs.contains("");
+    let mut entries = vec![SidebarEntry::Folder {
+        path: String::new(),
+        name: "/".to_string(),
+        depth: 0,
+        expanded,
+    }];
+    if expanded {
+        root.flatten("", 1, collapsed_dirs, &mut entries);
+    }
     entries
 }
 
@@ -462,6 +474,10 @@ fn active_file_hidden_by_folder(
 }
 
 fn path_is_inside_folder(path: &str, folder_path: &str) -> bool {
+    if folder_path.is_empty() {
+        return true;
+    }
+
     path.strip_prefix(folder_path)
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
@@ -591,8 +607,13 @@ fn render_folder_entry(
         .saturating_add(1)
         .saturating_add(display_width(folder_icon))
         .saturating_add(1);
+    let folder_label = if name == "/" {
+        name.to_string()
+    } else {
+        format!("{name}/")
+    };
     let label = truncate_to_width(
-        &format!("{name}/"),
+        &folder_label,
         content_capacity.saturating_sub(fixed_content_width),
     );
     let content_spans = vec![
@@ -694,11 +715,15 @@ mod tests {
             active_target: None,
         });
 
-        assert_eq!(rows.lines.len(), 1);
+        assert_eq!(rows.lines.len(), 2);
         assert!(rows.lines.iter().all(|line| line.width() <= content_width));
-        assert_eq!(rows.row_records.len(), 1);
-        assert_eq!(rows.row_records[0].target, SidebarRowTarget::File(0));
-        assert_eq!(rows.row_records[0].row_count, 1);
+        assert_eq!(rows.row_records.len(), 2);
+        assert_eq!(
+            rows.row_records[0].target,
+            SidebarRowTarget::Folder(String::new())
+        );
+        assert_eq!(rows.row_records[1].target, SidebarRowTarget::File(0));
+        assert!(rows.row_records.iter().all(|record| record.row_count == 1));
     }
 
     #[test]
@@ -723,7 +748,7 @@ mod tests {
             active_target: None,
         });
 
-        assert_eq!(rows.sidebar_scroll, 1);
+        assert_eq!(rows.sidebar_scroll, 2);
         assert_eq!(rows.lines.len(), 1);
         assert_eq!(rows.row_records.len(), 1);
         assert_eq!(rows.row_records[0].target, SidebarRowTarget::File(1));
@@ -894,12 +919,13 @@ mod tests {
 
         let texts = rows.lines.iter().map(line_text).collect::<Vec<_>>();
         assert!(texts[0].starts_with("▾ "), "rows were: {texts:?}");
-        assert!(texts[0].contains("src/"), "rows were: {texts:?}");
-        assert!(texts[1].contains("bin/"), "rows were: {texts:?}");
-        assert!(texts[2].contains("chunk.rs"), "rows were: {texts:?}");
-        assert!(texts[3].contains("app.rs"), "rows were: {texts:?}");
-        assert!(texts[4].contains("config.rs"), "rows were: {texts:?}");
-        assert!(texts[5].contains("README.md"), "rows were: {texts:?}");
+        assert!(texts[0].contains("/"), "rows were: {texts:?}");
+        assert!(texts[1].contains("src/"), "rows were: {texts:?}");
+        assert!(texts[2].contains("bin/"), "rows were: {texts:?}");
+        assert!(texts[3].contains("chunk.rs"), "rows were: {texts:?}");
+        assert!(texts[4].contains("app.rs"), "rows were: {texts:?}");
+        assert!(texts[5].contains("config.rs"), "rows were: {texts:?}");
+        assert!(texts[6].contains("README.md"), "rows were: {texts:?}");
 
         assert_eq!(
             rows.row_records
@@ -907,6 +933,7 @@ mod tests {
                 .map(|record| record.target.clone())
                 .collect::<Vec<_>>(),
             vec![
+                SidebarRowTarget::Folder(String::new()),
                 SidebarRowTarget::Folder("src".to_string()),
                 SidebarRowTarget::Folder("src/bin".to_string()),
                 SidebarRowTarget::File(1),
@@ -944,13 +971,13 @@ mod tests {
         });
 
         assert!(
-            rows.lines[0]
+            rows.lines[1]
                 .spans
                 .iter()
                 .all(|span| span.style.bg == Some(theme.selected))
         );
         assert!(
-            rows.lines[1]
+            rows.lines[0]
                 .spans
                 .iter()
                 .all(|span| span.style.bg != Some(theme.selected))
@@ -979,7 +1006,7 @@ mod tests {
             active_target: None,
         });
 
-        let folder_label = rows.lines[0].spans.last().expect("folder label span");
+        let folder_label = rows.lines[1].spans.last().expect("folder label span");
         assert_eq!(folder_label.content.as_ref(), "src/");
         assert_eq!(folder_label.style.fg, Some(theme.added));
         assert!(folder_label.style.add_modifier.contains(Modifier::BOLD));
@@ -1006,7 +1033,7 @@ mod tests {
             active_target: None,
         });
 
-        let folder_label = rows.lines[0].spans.last().expect("folder label span");
+        let folder_label = rows.lines[1].spans.last().expect("folder label span");
         assert_eq!(folder_label.content.as_ref(), "src/");
         assert_eq!(folder_label.style.fg, Some(theme.accent));
         assert!(folder_label.style.add_modifier.contains(Modifier::BOLD));
@@ -1051,6 +1078,7 @@ mod tests {
                 .map(|record| record.target.clone())
                 .collect::<Vec<_>>(),
             vec![
+                SidebarRowTarget::Folder(String::new()),
                 SidebarRowTarget::Folder("src".to_string()),
                 SidebarRowTarget::Folder("src/bin".to_string()),
                 SidebarRowTarget::File(0),

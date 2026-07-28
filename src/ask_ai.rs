@@ -1,6 +1,6 @@
-//! Read-only OpenCode requests for asking questions about the current diff.
+//! Read-only AI-harness requests for asking questions about the current diff.
 //!
-//! This module owns prompt/context construction and the OpenCode process
+//! This module owns prompt/context construction and the external AI process
 //! boundary. The app owns UI state; runtime owns task orchestration.
 
 use std::fs;
@@ -15,6 +15,10 @@ use crate::model::{DiffFile, DiffHunk, DiffLine, DiffLineKind};
 use crate::process::{ProcessOutcome, ProcessOutputCollector};
 
 const OPENCODE_PROGRAM: &str = "opencode";
+const CLAUDE_PROGRAM: &str = "claude";
+const CODEX_PROGRAM: &str = "codex";
+const CLAUDE_READ_ONLY_TOOLS: &str = "Read,Glob,Grep,LS,WebFetch,WebSearch";
+const CLAUDE_DISALLOWED_TOOLS: &str = "Bash,Edit,MultiEdit,Write,NotebookEdit,Task";
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
 const READ_ONLY_CONFIG_CONTENT: &str = r#"{"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled","permission":{"*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"glob":"allow","grep":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","skill":"deny","webfetch":"allow","websearch":"allow","external_directory":"deny"}}"#;
@@ -23,6 +27,172 @@ pub(crate) const UNPUBLISHED_SUMMARY_QUESTION: &str = "Summarize unpublished cha
 const UNPUBLISHED_SUMMARY_CONTEXT: &str = "unpublished changes";
 const UNPUBLISHED_SUMMARY_TITLE: &str = "chunk unpublished summary";
 const UNPUBLISHED_SUMMARY_ATTACHMENT_PREFIX: &str = "chunk-unpublished-summary";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AiHarness {
+    #[default]
+    OpenCode,
+    ClaudeCode,
+    Codex,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AiSettings {
+    pub(crate) harness: AiHarness,
+    pub(crate) opencode: AiHarnessSettings,
+    pub(crate) claude_code: AiHarnessSettings,
+    pub(crate) codex: AiHarnessSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AiHarnessSettings {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl AiHarness {
+    pub(crate) const ALL: [Self; 3] = [Self::OpenCode, Self::ClaudeCode, Self::Codex];
+    pub(crate) const CONFIG_VALUES: [&'static str; 3] = ["opencode", "claude-code", "codex"];
+
+    pub(crate) fn from_config_value(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|harness| harness.config_value() == value)
+    }
+
+    pub(crate) const fn config_value(self) -> &'static str {
+        match self {
+            Self::OpenCode => "opencode",
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenCode => "OpenCode",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    pub(crate) const fn program(self) -> &'static str {
+        match self {
+            Self::OpenCode => OPENCODE_PROGRAM,
+            Self::ClaudeCode => CLAUDE_PROGRAM,
+            Self::Codex => CODEX_PROGRAM,
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::OpenCode => Self::ClaudeCode,
+            Self::ClaudeCode => Self::Codex,
+            Self::Codex => Self::OpenCode,
+        }
+    }
+
+    pub(crate) fn previous(self) -> Self {
+        match self {
+            Self::OpenCode => Self::Codex,
+            Self::ClaudeCode => Self::OpenCode,
+            Self::Codex => Self::ClaudeCode,
+        }
+    }
+
+    pub(crate) const fn effort_label(self) -> &'static str {
+        match self {
+            Self::OpenCode => "Variant",
+            Self::ClaudeCode | Self::Codex => "Effort",
+        }
+    }
+
+    pub(crate) const fn model_choices(self) -> &'static [&'static str] {
+        match self {
+            Self::OpenCode => &[
+                "opencode/claude-fable-5",
+                "opencode/claude-opus-5",
+                "opencode/claude-sonnet-5",
+                "opencode/gpt-5.6-sol",
+                "opencode/gpt-5.6-terra",
+                "opencode/gpt-5.6-luna",
+            ],
+            Self::ClaudeCode => &["fable", "best", "opus", "sonnet", "haiku"],
+            Self::Codex => &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+        }
+    }
+
+    pub(crate) fn effort_choices(self, model: Option<&str>) -> &'static [&'static str] {
+        match self {
+            Self::OpenCode if model.is_some_and(|model| model.contains("/gpt-5.6-")) => {
+                &["none", "low", "medium", "high", "xhigh", "max"]
+            }
+            Self::OpenCode => &["low", "medium", "high", "xhigh", "max"],
+            Self::ClaudeCode if model == Some("haiku") => &[],
+            Self::ClaudeCode => &["low", "medium", "high", "xhigh", "max"],
+            Self::Codex if matches!(model, Some("gpt-5.6-sol" | "gpt-5.6-terra")) => {
+                &["low", "medium", "high", "xhigh", "max", "ultra"]
+            }
+            Self::Codex => &["low", "medium", "high", "xhigh", "max"],
+        }
+    }
+}
+
+impl AiSettings {
+    #[cfg(test)]
+    pub(crate) fn with_harness(harness: AiHarness) -> Self {
+        Self {
+            harness,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn selected(&self) -> &AiHarnessSettings {
+        self.for_harness(self.harness)
+    }
+
+    pub(crate) fn selected_mut(&mut self) -> &mut AiHarnessSettings {
+        self.for_harness_mut(self.harness)
+    }
+
+    pub(crate) fn for_harness(&self, harness: AiHarness) -> &AiHarnessSettings {
+        match harness {
+            AiHarness::OpenCode => &self.opencode,
+            AiHarness::ClaudeCode => &self.claude_code,
+            AiHarness::Codex => &self.codex,
+        }
+    }
+
+    pub(crate) fn for_harness_mut(&mut self, harness: AiHarness) -> &mut AiHarnessSettings {
+        match harness {
+            AiHarness::OpenCode => &mut self.opencode,
+            AiHarness::ClaudeCode => &mut self.claude_code,
+            AiHarness::Codex => &mut self.codex,
+        }
+    }
+}
+
+impl AiHarnessSettings {
+    pub(crate) fn new(model: Option<String>, effort: Option<String>) -> Self {
+        Self { model, effort }
+    }
+
+    pub(crate) fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub(crate) fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+
+    pub(crate) fn set_model(&mut self, model: Option<String>) {
+        self.model = model;
+    }
+
+    pub(crate) fn set_effort(&mut self, effort: Option<String>) {
+        self.effort = effort;
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AskAiRequest {
@@ -73,6 +243,7 @@ pub(crate) struct AskAiInvocation {
     args: Vec<String>,
     current_dir: PathBuf,
     env: Vec<(String, String)>,
+    stdin: Option<String>,
 }
 
 #[derive(Debug)]
@@ -304,24 +475,69 @@ impl AskAiResult {
 }
 
 impl AskAiInvocation {
-    pub(crate) fn new(request: &AskAiRequest, repo_root: &Path) -> Self {
-        let mut args = Self::run_args(repo_root, session_title(request));
-        args.push(build_prompt(request, repo_root));
-        Self::read_only(args, repo_root)
+    pub(crate) fn new(settings: &AiSettings, request: &AskAiRequest, repo_root: &Path) -> Self {
+        Self::prompt(
+            settings,
+            session_title(request),
+            build_prompt(request, repo_root),
+            repo_root,
+        )
     }
 
-    fn unpublished_summary(diff_path: &Path, repo_root: &Path) -> Self {
-        let mut args = Self::run_args(repo_root, UNPUBLISHED_SUMMARY_TITLE);
+    fn unpublished_summary_attachment(
+        settings: &AiSettings,
+        diff_path: &Path,
+        repo_root: &Path,
+    ) -> Self {
+        let mut args =
+            Self::opencode_run_args(settings.selected(), repo_root, UNPUBLISHED_SUMMARY_TITLE);
         args.extend([
             format!("--file={}", diff_path.display()),
             "--".to_string(),
-            build_unpublished_summary_prompt(repo_root, diff_path),
+            build_unpublished_summary_attachment_prompt(repo_root, diff_path),
         ]);
-        Self::read_only(args, repo_root)
+        Self::read_only(AiHarness::OpenCode, args, repo_root, None)
     }
 
-    fn run_args(repo_root: &Path, title: impl Into<String>) -> Vec<String> {
-        vec![
+    fn unpublished_summary_inline(
+        settings: &AiSettings,
+        diff_text: &str,
+        repo_root: &Path,
+    ) -> Self {
+        Self::prompt(
+            settings,
+            UNPUBLISHED_SUMMARY_TITLE,
+            build_unpublished_summary_inline_prompt(repo_root, diff_text),
+            repo_root,
+        )
+    }
+
+    fn prompt(
+        settings: &AiSettings,
+        title: impl Into<String>,
+        prompt: String,
+        repo_root: &Path,
+    ) -> Self {
+        let harness = settings.harness;
+        let harness_settings = settings.selected();
+        let (args, stdin) = match harness {
+            AiHarness::OpenCode => {
+                let mut args = Self::opencode_run_args(harness_settings, repo_root, title);
+                args.push(prompt);
+                (args, None)
+            }
+            AiHarness::ClaudeCode => (Self::claude_args(harness_settings, title), Some(prompt)),
+            AiHarness::Codex => (Self::codex_args(harness_settings, repo_root), Some(prompt)),
+        };
+        Self::read_only(harness, args, repo_root, stdin)
+    }
+
+    fn opencode_run_args(
+        settings: &AiHarnessSettings,
+        repo_root: &Path,
+        title: impl Into<String>,
+    ) -> Vec<String> {
+        let mut args = vec![
             "run".to_string(),
             "--pure".to_string(),
             "--format".to_string(),
@@ -330,30 +546,97 @@ impl AskAiInvocation {
             repo_root.display().to_string(),
             "--title".to_string(),
             title.into(),
-        ]
+        ];
+        push_option(&mut args, "--model", settings.model());
+        push_option(&mut args, "--variant", settings.effort());
+        args
     }
 
-    fn read_only(args: Vec<String>, repo_root: &Path) -> Self {
+    fn claude_args(settings: &AiHarnessSettings, title: impl Into<String>) -> Vec<String> {
+        let mut args = vec![
+            "-p".to_string(),
+            "--output-format".to_string(),
+            "text".to_string(),
+            "--input-format".to_string(),
+            "text".to_string(),
+            "--permission-mode".to_string(),
+            "dontAsk".to_string(),
+            "--tools".to_string(),
+            CLAUDE_READ_ONLY_TOOLS.to_string(),
+            "--disallowedTools".to_string(),
+            CLAUDE_DISALLOWED_TOOLS.to_string(),
+            "--no-session-persistence".to_string(),
+            "--name".to_string(),
+            title.into(),
+        ];
+        push_option(&mut args, "--model", settings.model());
+        push_option(&mut args, "--effort", settings.effort());
+        args
+    }
+
+    fn codex_args(settings: &AiHarnessSettings, repo_root: &Path) -> Vec<String> {
+        let mut args = vec![
+            "--ask-for-approval".to_string(),
+            "never".to_string(),
+            "--search".to_string(),
+            "exec".to_string(),
+            "--sandbox".to_string(),
+            "read-only".to_string(),
+            "--cd".to_string(),
+            repo_root.display().to_string(),
+            "--color".to_string(),
+            "never".to_string(),
+            "--ephemeral".to_string(),
+        ];
+        push_option(&mut args, "--model", settings.model());
+        if let Some(effort) = settings.effort() {
+            args.extend([
+                "--config".to_string(),
+                format!("model_reasoning_effort=\"{effort}\""),
+            ]);
+        }
+        args.push("-".to_string());
+        args
+    }
+
+    fn read_only(
+        harness: AiHarness,
+        args: Vec<String>,
+        repo_root: &Path,
+        stdin: Option<String>,
+    ) -> Self {
         Self {
-            program: OPENCODE_PROGRAM.to_string(),
+            program: harness.program().to_string(),
             args,
             current_dir: repo_root.to_path_buf(),
-            env: read_only_env(),
+            env: read_only_env(harness),
+            stdin,
         }
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
+        let stdin = if self.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
         command
             .args(&self.args)
             .current_dir(&self.current_dir)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (key, value) in &self.env {
             command.env(key, value);
         }
         command
+    }
+}
+
+fn push_option(args: &mut Vec<String>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        args.extend([flag.to_string(), value.to_string()]);
     }
 }
 
@@ -376,12 +659,22 @@ impl Drop for DiffAttachment {
 }
 
 pub(crate) fn run_unpublished_summary(
+    settings: AiSettings,
     diff_text: &str,
     repo_root: PathBuf,
     cancel: Receiver<()>,
 ) -> io::Result<AskAiResult> {
-    let attachment = DiffAttachment::write(diff_text)?;
-    let invocation = AskAiInvocation::unpublished_summary(attachment.path(), &repo_root);
+    let attachment = (settings.harness == AiHarness::OpenCode)
+        .then(|| DiffAttachment::write(diff_text))
+        .transpose()?;
+    let invocation = match attachment.as_ref() {
+        Some(attachment) => AskAiInvocation::unpublished_summary_attachment(
+            &settings,
+            attachment.path(),
+            &repo_root,
+        ),
+        None => AskAiInvocation::unpublished_summary_inline(&settings, diff_text, &repo_root),
+    };
 
     match run_invocation(invocation, &cancel)? {
         InvocationOutcome::Completed(output) => Ok(AskAiResult::unpublished_summary_from_output(
@@ -394,11 +687,12 @@ pub(crate) fn run_unpublished_summary(
 }
 
 pub(crate) fn run(
+    settings: AiSettings,
     request: AskAiRequest,
     repo_root: PathBuf,
     cancel: Receiver<()>,
 ) -> io::Result<AskAiResult> {
-    let invocation = AskAiInvocation::new(&request, &repo_root);
+    let invocation = AskAiInvocation::new(&settings, &request, &repo_root);
     match run_invocation(invocation, &cancel)? {
         InvocationOutcome::Completed(output) => {
             Ok(AskAiResult::from_output(request, repo_root, output))
@@ -415,11 +709,24 @@ enum InvocationOutcome {
 }
 
 fn run_invocation(
-    invocation: AskAiInvocation,
+    mut invocation: AskAiInvocation,
     cancel: &Receiver<()>,
 ) -> io::Result<InvocationOutcome> {
     let mut child = invocation.command().spawn()?;
     let mut output = ProcessOutputCollector::start(&mut child);
+    if let Some(stdin) = invocation.stdin.take() {
+        let Some(mut child_stdin) = child.stdin.take() else {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "AI harness stdin was unavailable",
+            ));
+        };
+        if let Err(error) = child_stdin.write_all(stdin.as_bytes())
+            && error.kind() != io::ErrorKind::BrokenPipe
+        {
+            return Err(error);
+        }
+    }
 
     loop {
         output.drain();
@@ -452,15 +759,36 @@ fn build_prompt(request: &AskAiRequest, repo_root: &Path) -> String {
     prompt
 }
 
-fn build_unpublished_summary_prompt(repo_root: &Path, diff_path: &Path) -> String {
+fn build_unpublished_summary_attachment_prompt(repo_root: &Path, diff_path: &Path) -> String {
     let mut prompt = String::new();
 
     push_read_only_instructions(&mut prompt);
+    push_unpublished_summary_request(&mut prompt, "attachment");
+    push_unpublished_summary_context(&mut prompt, repo_root);
+    prompt.push_str(&format!("Attached patch: {}\n", diff_path.display()));
+    prompt.push_str("The attachment is the complete input for this summary.\n");
+
+    prompt
+}
+
+fn build_unpublished_summary_inline_prompt(repo_root: &Path, diff_text: &str) -> String {
+    let mut prompt = String::new();
+
+    push_read_only_instructions(&mut prompt);
+    push_unpublished_summary_request(&mut prompt, "inline diff");
+    push_unpublished_summary_context(&mut prompt, repo_root);
+    prompt.push_str("The inline diff is the complete input for this summary.\n\n");
+    push_diff_block(&mut prompt, "Unpublished diff:\n", diff_text);
+
+    prompt
+}
+
+fn push_unpublished_summary_request(prompt: &mut String, diff_source: &str) {
     prompt.push_str("User request:\n");
     prompt.push_str(UNPUBLISHED_SUMMARY_QUESTION);
     prompt.push_str(". Explain all unpublished Git changes in a very concise summary.\n\n");
     prompt.push_str("Rules:\n");
-    prompt.push_str("- Summarize local commits that are not pushed plus staged, unstaged, and untracked worktree changes represented in the attachment.\n");
+    prompt.push_str(&format!("- Summarize local commits that are not pushed plus staged, unstaged, and untracked worktree changes represented in the {diff_source}.\n"));
     prompt.push_str("- Do not exclude staged changes.\n");
     prompt.push_str("- Group by intent or affected area when possible.\n");
     prompt.push_str("- Avoid line-by-line diff narration unless necessary.\n");
@@ -468,13 +796,12 @@ fn build_unpublished_summary_prompt(repo_root: &Path, diff_path: &Path) -> Strin
     prompt.push_str(
         "- Do not add a title; the pane already shows this is an unpublished changes summary.\n\n",
     );
+}
+
+fn push_unpublished_summary_context(prompt: &mut String, repo_root: &Path) {
     prompt.push_str("Structured review context:\n");
     prompt.push_str(&format!("Repository root: {}\n", repo_root.display()));
     prompt.push_str("Review source: Git diff for unpublished changes: local commits ahead of upstream/base plus worktree/index/untracked changes.\n");
-    prompt.push_str(&format!("Attached patch: {}\n", diff_path.display()));
-    prompt.push_str("The attachment is the complete input for this summary.\n");
-
-    prompt
 }
 
 fn push_read_only_instructions(prompt: &mut String) {
@@ -487,19 +814,18 @@ fn push_read_only_instructions(prompt: &mut String) {
     prompt.push_str(
         "- Internet lookup is allowed with read-only web fetch/search tools when useful.\n",
     );
-    prompt.push_str(
-        "- The OpenCode process is launched with edit, bash, task, skill, and external-directory permissions denied.\n\n",
-    );
+    prompt.push_str("- The selected AI harness is launched with read-only permissions or sandboxing where supported.\n\n");
 }
 
-fn read_only_env() -> Vec<(String, String)> {
-    vec![
-        (
+fn read_only_env(harness: AiHarness) -> Vec<(String, String)> {
+    let mut env = vec![("NO_COLOR".to_string(), "1".to_string())];
+    if harness == AiHarness::OpenCode {
+        env.push((
             "OPENCODE_CONFIG_CONTENT".to_string(),
             READ_ONLY_CONFIG_CONTENT.to_string(),
-        ),
-        ("NO_COLOR".to_string(), "1".to_string()),
-    ]
+        ));
+    }
+    env
 }
 
 fn push_user_question(prompt: &mut String, question: &str) {
@@ -537,7 +863,16 @@ fn push_selected_text(prompt: &mut String, selected_text: Option<&str>) {
 }
 
 fn push_diff_context(prompt: &mut String, diff_text: &str) {
-    prompt.push_str("\nDiff context with old/new line columns:\n```diff\n");
+    push_diff_block(
+        prompt,
+        "\nDiff context with old/new line columns:\n",
+        diff_text,
+    );
+}
+
+fn push_diff_block(prompt: &mut String, heading: &str, diff_text: &str) {
+    prompt.push_str(heading);
+    prompt.push_str("```diff\n");
     prompt.push_str(diff_text);
     if !diff_text.ends_with('\n') {
         prompt.push('\n');
@@ -725,9 +1060,7 @@ mod tests {
         assert!(prompt.contains("+new line"));
         assert!(prompt.contains("Do not edit, write, patch, stage, commit, push"));
         assert!(prompt.contains("Internet lookup is allowed"));
-        assert!(
-            prompt.contains("edit, bash, task, skill, and external-directory permissions denied")
-        );
+        assert!(prompt.contains("read-only permissions or sandboxing"));
     }
 
     #[test]
@@ -743,9 +1076,11 @@ mod tests {
         );
         let request = AskAiRequest::new("Explain this".to_string(), context);
 
-        let invocation = AskAiInvocation::new(&request, Path::new("/repo"));
+        let settings = AiSettings::with_harness(AiHarness::OpenCode);
+        let invocation = AskAiInvocation::new(&settings, &request, Path::new("/repo"));
 
         assert_eq!(invocation.program, "opencode");
+        assert_eq!(invocation.stdin, None);
         assert!(invocation.args.contains(&"run".to_string()));
         assert!(invocation.args.contains(&"--pure".to_string()));
         assert!(
@@ -780,9 +1115,15 @@ mod tests {
     #[test]
     fn unpublished_summary_invocation_attaches_patch_and_uses_read_only_config() {
         let diff_path = Path::new("/tmp/chunk-unpublished-summary.diff");
-        let invocation = AskAiInvocation::unpublished_summary(diff_path, Path::new("/repo"));
+        let settings = AiSettings::with_harness(AiHarness::OpenCode);
+        let invocation = AskAiInvocation::unpublished_summary_attachment(
+            &settings,
+            diff_path,
+            Path::new("/repo"),
+        );
 
         assert_eq!(invocation.program, "opencode");
+        assert_eq!(invocation.stdin, None);
         let prompt = invocation.args.last().expect("prompt arg should exist");
         assert_eq!(
             invocation.args[(invocation.args.len() - 3)..],
@@ -815,6 +1156,133 @@ mod tests {
         assert!(config.contains(r#""*":"deny""#));
         assert!(config.contains(r#""edit":"deny""#));
         assert!(config.contains(r#""bash":"deny""#));
+    }
+
+    #[test]
+    fn claude_invocation_uses_print_mode_and_stdin_prompt() {
+        let request = ask_request();
+
+        let settings = AiSettings::with_harness(AiHarness::ClaudeCode);
+        let invocation = AskAiInvocation::new(&settings, &request, Path::new("/repo"));
+
+        assert_eq!(invocation.program, "claude");
+        assert!(invocation.args.contains(&"-p".to_string()));
+        assert!(
+            invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["--permission-mode", "dontAsk"])
+        );
+        assert!(
+            invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["--tools", CLAUDE_READ_ONLY_TOOLS])
+        );
+        assert!(
+            invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["--disallowedTools", CLAUDE_DISALLOWED_TOOLS])
+        );
+        assert!(
+            invocation
+                .stdin
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("Explain this"))
+        );
+        assert!(
+            invocation
+                .env
+                .iter()
+                .all(|(key, _)| key != "OPENCODE_CONFIG_CONTENT")
+        );
+    }
+
+    #[test]
+    fn harness_invocations_use_native_model_and_effort_flags() {
+        let request = ask_request();
+
+        let mut opencode = AiSettings::with_harness(AiHarness::OpenCode);
+        opencode
+            .selected_mut()
+            .set_model(Some("opencode/gpt-5.6-sol".to_string()));
+        opencode.selected_mut().set_effort(Some("max".to_string()));
+        let invocation = AskAiInvocation::new(&opencode, &request, Path::new("/repo"));
+        assert!(has_option(
+            &invocation.args,
+            "--model",
+            "opencode/gpt-5.6-sol"
+        ));
+        assert!(has_option(&invocation.args, "--variant", "max"));
+
+        let mut claude = AiSettings::with_harness(AiHarness::ClaudeCode);
+        claude.selected_mut().set_model(Some("fable".to_string()));
+        claude.selected_mut().set_effort(Some("xhigh".to_string()));
+        let invocation = AskAiInvocation::new(&claude, &request, Path::new("/repo"));
+        assert!(has_option(&invocation.args, "--model", "fable"));
+        assert!(has_option(&invocation.args, "--effort", "xhigh"));
+
+        let mut codex = AiSettings::with_harness(AiHarness::Codex);
+        codex
+            .selected_mut()
+            .set_model(Some("gpt-5.6-terra".to_string()));
+        codex.selected_mut().set_effort(Some("ultra".to_string()));
+        let invocation = AskAiInvocation::new(&codex, &request, Path::new("/repo"));
+        assert!(has_option(&invocation.args, "--model", "gpt-5.6-terra"));
+        assert!(has_option(
+            &invocation.args,
+            "--config",
+            r#"model_reasoning_effort="ultra""#
+        ));
+    }
+
+    #[test]
+    fn codex_invocation_uses_read_only_exec_and_stdin_prompt() {
+        let request = ask_request();
+
+        let settings = AiSettings::with_harness(AiHarness::Codex);
+        let invocation = AskAiInvocation::new(&settings, &request, Path::new("/repo"));
+
+        assert_eq!(invocation.program, "codex");
+        assert_eq!(
+            invocation.args[..4],
+            ["--ask-for-approval", "never", "--search", "exec"]
+        );
+        assert!(
+            invocation
+                .args
+                .windows(2)
+                .any(|args| args == ["--sandbox", "read-only"])
+        );
+        assert!(invocation.args.contains(&"--ephemeral".to_string()));
+        assert_eq!(invocation.args.last().map(String::as_str), Some("-"));
+        assert!(
+            invocation
+                .stdin
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("Explain this"))
+        );
+    }
+
+    #[test]
+    fn non_opencode_unpublished_summary_embeds_diff_in_stdin() {
+        let settings = AiSettings::with_harness(AiHarness::Codex);
+        let invocation = AskAiInvocation::unpublished_summary_inline(
+            &settings,
+            "diff --git a/a b/a\n+new\n",
+            Path::new("/repo"),
+        );
+
+        let prompt = invocation.stdin.as_deref().expect("stdin prompt");
+        assert!(prompt.contains("Summarize unpublished changes"));
+        assert!(prompt.contains("inline diff is the complete input"));
+        assert!(prompt.contains("diff --git a/a b/a"));
+        assert!(prompt.contains("+new"));
+    }
+
+    fn has_option(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|args| args == [flag, value])
     }
 
     #[test]
@@ -897,6 +1365,7 @@ mod tests {
             ],
             current_dir: PathBuf::from("."),
             env: Vec::new(),
+            stdin: None,
         };
         let (cancel_sender, cancel) = mpsc::channel();
         let (done_sender, done) = mpsc::channel();

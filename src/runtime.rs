@@ -23,8 +23,9 @@ use ratatui::backend::CrosstermBackend;
 use crate::app::{
     App, AppEffect, ClipboardRequest, ClipboardWriteResult, EditorOutcome, RuntimeEvent,
 };
-use crate::ask_ai::{self, AskAiRequest, AskAiResult};
+use crate::ask_ai::{self, AiHarness, AiSettings, AskAiRequest, AskAiResult};
 use crate::clipboard;
+use crate::config;
 use crate::custom_command::{self, CustomCommandBinding, CustomCommandResult};
 use crate::editor::{EditorCommand, EditorRequest};
 use crate::git;
@@ -377,16 +378,19 @@ fn handle_app_effects(
                     task.request_cancel();
                 }
             }
-            AppEffect::RunAskAi(request) => {
-                start_requested_ask_ai(request, ask_ai_task);
+            AppEffect::RunAskAi { settings, request } => {
+                start_requested_ask_ai(*settings, request, ask_ai_task);
             }
-            AppEffect::RunUnpublishedSummary => {
-                start_requested_unpublished_summary(ask_ai_task);
+            AppEffect::RunUnpublishedSummary { settings } => {
+                start_requested_unpublished_summary(*settings, ask_ai_task);
             }
             AppEffect::CancelAskAi => {
                 if let Some(task) = ask_ai_task.as_ref() {
                     task.request_cancel();
                 }
+            }
+            AppEffect::SaveAiSettings(settings) => {
+                app.handle_runtime_event(save_ai_settings(*settings));
             }
             AppEffect::CopyToClipboard(request) => {
                 app.handle_runtime_event(write_clipboard_request(request));
@@ -403,6 +407,15 @@ fn write_clipboard_request(request: ClipboardRequest) -> RuntimeEvent {
         Err(error) => ClipboardWriteResult::failed(request, error.to_string()),
     };
     RuntimeEvent::ClipboardWriteFinished(result)
+}
+
+fn save_ai_settings(settings: AiSettings) -> RuntimeEvent {
+    RuntimeEvent::AiSettingsSaved {
+        error: config::save_ai_settings(&settings)
+            .err()
+            .map(|error| error.to_string()),
+        settings,
+    }
 }
 
 fn open_requested_editor(
@@ -459,6 +472,7 @@ fn start_requested_custom_command(
 }
 
 fn start_requested_ask_ai(
+    settings: AiSettings,
     request: AskAiRequest,
     ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
 ) {
@@ -467,35 +481,51 @@ fn start_requested_ask_ai(
     }
 
     let run_request = request.clone();
+    let fallback_harness = settings.harness;
     *ask_ai_task = Some(BackgroundTask::spawn(
-        move |cancel| run_ask_ai_request(run_request, cancel),
+        move |cancel| run_ask_ai_request(settings, run_request, cancel),
         move || {
             AskAiResult::not_started(
                 request,
                 None,
-                "OpenCode runner stopped before reporting a result",
+                ask_ai_runner_stopped_message(fallback_harness),
             )
         },
     ));
 }
 
-fn start_requested_unpublished_summary(ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>) {
+fn start_requested_unpublished_summary(
+    settings: AiSettings,
+    ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
+) {
     if ask_ai_task.is_some() {
         return;
     }
 
+    let fallback_harness = settings.harness;
     *ask_ai_task = Some(BackgroundTask::spawn(
-        run_unpublished_summary_request,
-        || {
+        move |cancel| run_unpublished_summary_request(settings, cancel),
+        move || {
             AskAiResult::unpublished_summary_not_started(
                 None,
-                "OpenCode runner stopped before reporting a result",
+                ask_ai_runner_stopped_message(fallback_harness),
             )
         },
     ));
 }
 
-fn run_ask_ai_request(request: AskAiRequest, cancel: Receiver<()>) -> AskAiResult {
+fn ask_ai_runner_stopped_message(harness: AiHarness) -> String {
+    format!(
+        "{} runner stopped before reporting a result",
+        harness.display_name()
+    )
+}
+
+fn run_ask_ai_request(
+    settings: AiSettings,
+    request: AskAiRequest,
+    cancel: Receiver<()>,
+) -> AskAiResult {
     let repo_root = match git::worktree_root() {
         Ok(root) => root,
         Err(error) => {
@@ -507,12 +537,12 @@ fn run_ask_ai_request(request: AskAiRequest, cancel: Receiver<()>) -> AskAiResul
         }
     };
 
-    ask_ai::run(request.clone(), repo_root.clone(), cancel).unwrap_or_else(|error| {
+    ask_ai::run(settings, request.clone(), repo_root.clone(), cancel).unwrap_or_else(|error| {
         AskAiResult::not_started(request, Some(repo_root), error.to_string())
     })
 }
 
-fn run_unpublished_summary_request(cancel: Receiver<()>) -> AskAiResult {
+fn run_unpublished_summary_request(settings: AiSettings, cancel: Receiver<()>) -> AskAiResult {
     let diff = match git::load_unpublished_diff_text() {
         Ok(diff) => diff,
         Err(error) => {
@@ -530,11 +560,10 @@ fn run_unpublished_summary_request(cancel: Receiver<()>) -> AskAiResult {
         );
     }
 
-    ask_ai::run_unpublished_summary(&diff.text, diff.repo_root.clone(), cancel).unwrap_or_else(
-        |error| {
+    ask_ai::run_unpublished_summary(settings, &diff.text, diff.repo_root.clone(), cancel)
+        .unwrap_or_else(|error| {
             AskAiResult::unpublished_summary_not_started(Some(diff.repo_root), error.to_string())
-        },
-    )
+        })
 }
 
 fn run_custom_command(command: &CustomCommandBinding, cancel: Receiver<()>) -> CustomCommandResult {

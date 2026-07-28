@@ -153,6 +153,10 @@ fn reloaded_sidebar_target(
 }
 
 fn folder_exists(changeset: &Changeset, folder_path: &str) -> bool {
+    if folder_path.is_empty() {
+        return !changeset.files.is_empty();
+    }
+
     changeset
         .files
         .iter()

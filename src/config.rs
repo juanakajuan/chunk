@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::Deserialize;
 
+use crate::ask_ai::{AiHarness, AiHarnessSettings, AiSettings};
 use crate::custom_command::{CommandKey, CustomCommandBinding};
 use crate::keybind::{BuiltinKey, KeybindMap, parse_action_name};
 use crate::theme::ThemeName;
@@ -16,6 +17,7 @@ use crate::theme::ThemeName;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AppConfig {
     pub(crate) theme: ThemeName,
+    pub(crate) ai: AiSettings,
     pub(crate) commands: Vec<CustomCommandBinding>,
     pub(crate) keybinds: KeybindMap,
 }
@@ -24,6 +26,13 @@ pub(crate) struct AppConfig {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     theme: Option<String>,
+    harness: Option<String>,
+    opencode_model: Option<String>,
+    opencode_variant: Option<String>,
+    claude_model: Option<String>,
+    claude_effort: Option<String>,
+    codex_model: Option<String>,
+    codex_effort: Option<String>,
     #[serde(default)]
     commands: Vec<RawCommand>,
     #[serde(default)]
@@ -48,6 +57,30 @@ pub(crate) fn load() -> Result<AppConfig> {
         return Ok(AppConfig::default());
     };
     load_from_path(&path)
+}
+
+pub(crate) fn save_ai_settings(settings: &AiSettings) -> Result<()> {
+    let Some(path) = config_path() else {
+        return Err(eyre!(
+            "could not determine config path: XDG_CONFIG_HOME and HOME are unset"
+        ));
+    };
+    save_ai_settings_to_path(&path, settings)
+}
+
+fn save_ai_settings_to_path(path: &Path, settings: &AiSettings) -> Result<()> {
+    let source = if path.exists() {
+        fs::read_to_string(path)
+            .wrap_err_with(|| format!("failed to read config {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let updated = set_ai_settings_source(&source, settings);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+    fs::write(path, updated).wrap_err_with(|| format!("failed to write config {}", path.display()))
 }
 
 fn load_from_path(path: &Path) -> Result<AppConfig> {
@@ -76,6 +109,21 @@ fn config_path_from_env(config_home: Option<OsString>, home: Option<OsString>) -
 fn parse(source: &str) -> Result<AppConfig> {
     let raw: RawConfig = toml::from_str(source)?;
     let theme = parse_theme(raw.theme.as_deref())?;
+    let harness = parse_harness(raw.harness.as_deref())?;
+    let ai = AiSettings {
+        harness,
+        opencode: parse_harness_settings(
+            AiHarness::OpenCode,
+            raw.opencode_model,
+            raw.opencode_variant,
+        )?,
+        claude_code: parse_harness_settings(
+            AiHarness::ClaudeCode,
+            raw.claude_model,
+            raw.claude_effort,
+        )?,
+        codex: parse_harness_settings(AiHarness::Codex, raw.codex_model, raw.codex_effort)?,
+    };
     let keybinds = parse_keybinds(raw.keybinds)?;
     let mut keys = HashSet::new();
     let mut commands = Vec::with_capacity(raw.commands.len());
@@ -92,9 +140,151 @@ fn parse(source: &str) -> Result<AppConfig> {
 
     Ok(AppConfig {
         theme,
+        ai,
         commands,
         keybinds,
     })
+}
+
+fn parse_harness(harness: Option<&str>) -> Result<AiHarness> {
+    let Some(harness) = harness else {
+        return Ok(AiHarness::default());
+    };
+
+    AiHarness::from_config_value(harness).ok_or_else(|| {
+        eyre!(
+            "invalid harness `{}`; expected one of: {}",
+            harness,
+            AiHarness::CONFIG_VALUES.join(", ")
+        )
+    })
+}
+
+fn parse_harness_settings(
+    harness: AiHarness,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<AiHarnessSettings> {
+    let model = model
+        .map(|model| validate_nonempty_ai_value(harness, "model", model))
+        .transpose()?;
+    let effort = effort
+        .map(|effort| validate_effort(harness, effort))
+        .transpose()?;
+    Ok(AiHarnessSettings::new(model, effort))
+}
+
+fn validate_nonempty_ai_value(harness: AiHarness, field: &str, value: String) -> Result<String> {
+    if value.trim().is_empty() {
+        return Err(eyre!("{} {field} cannot be empty", harness.display_name()));
+    }
+    Ok(value)
+}
+
+fn validate_effort(harness: AiHarness, effort: String) -> Result<String> {
+    if harness == AiHarness::OpenCode {
+        return validate_nonempty_ai_value(harness, "variant", effort);
+    }
+
+    const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+    let expected = match harness {
+        AiHarness::ClaudeCode => CLAUDE_EFFORTS,
+        AiHarness::Codex => CODEX_EFFORTS,
+        AiHarness::OpenCode => unreachable!(),
+    };
+    if expected.contains(&effort.as_str()) {
+        return Ok(effort);
+    }
+
+    Err(eyre!(
+        "invalid {} effort `{effort}`; expected one of: {}",
+        harness.display_name(),
+        expected.join(", ")
+    ))
+}
+
+fn set_ai_settings_source(source: &str, settings: &AiSettings) -> String {
+    let replacements = [
+        (
+            "harness",
+            Some(format!("\"{}\"", settings.harness.config_value())),
+        ),
+        (
+            "opencode_model",
+            quoted_config_value(settings.opencode.model()),
+        ),
+        (
+            "opencode_variant",
+            quoted_config_value(settings.opencode.effort()),
+        ),
+        (
+            "claude_model",
+            quoted_config_value(settings.claude_code.model()),
+        ),
+        (
+            "claude_effort",
+            quoted_config_value(settings.claude_code.effort()),
+        ),
+        ("codex_model", quoted_config_value(settings.codex.model())),
+        ("codex_effort", quoted_config_value(settings.codex.effort())),
+    ];
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let trailing_newline = source.ends_with('\n');
+    let mut top_level_end = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+
+    for (key, value) in replacements {
+        update_top_level_config_line(&mut lines, &mut top_level_end, key, value);
+    }
+
+    finish_config_lines(lines, trailing_newline || source.is_empty())
+}
+
+fn update_top_level_config_line(
+    lines: &mut Vec<String>,
+    top_level_end: &mut usize,
+    key: &str,
+    value: Option<String>,
+) {
+    let existing_index = lines[..*top_level_end]
+        .iter()
+        .position(|line| is_top_level_config_line(line, key));
+
+    match (existing_index, value) {
+        (Some(index), Some(value)) => lines[index] = format!("{key} = {value}"),
+        (Some(index), None) => {
+            lines.remove(index);
+            *top_level_end -= 1;
+        }
+        (None, Some(value)) => {
+            lines.insert(*top_level_end, format!("{key} = {value}"));
+            *top_level_end += 1;
+        }
+        (None, None) => {}
+    }
+}
+
+fn quoted_config_value(value: Option<&str>) -> Option<String> {
+    value.map(|value| format!("{value:?}"))
+}
+
+fn is_top_level_config_line(line: &str, expected_key: &str) -> bool {
+    let trimmed = line.trim_start();
+    !trimmed.starts_with('#')
+        && trimmed
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == expected_key)
+}
+
+fn finish_config_lines(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut source = lines.join("\n");
+    if trailing_newline {
+        source.push('\n');
+    }
+    source
 }
 
 fn parse_theme(theme: Option<&str>) -> Result<ThemeName> {
@@ -186,11 +376,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_ai_harness() {
+        let config = parse(r#"harness = "codex""#).unwrap();
+        assert_eq!(config.ai.harness, AiHarness::Codex);
+
+        let config = parse(r#"harness = "claude-code""#).unwrap();
+        assert_eq!(config.ai.harness, AiHarness::ClaudeCode);
+
+        let default_config = parse("").unwrap();
+        assert_eq!(default_config.ai.harness, AiHarness::OpenCode);
+    }
+
+    #[test]
+    fn parses_harness_specific_models_and_effort_names() {
+        let config = parse(
+            r#"
+opencode_model = "opencode/gpt-5.6-sol"
+opencode_variant = "max"
+claude_model = "fable"
+claude_effort = "xhigh"
+codex_model = "gpt-5.6-terra"
+codex_effort = "ultra"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.ai.opencode.model(), Some("opencode/gpt-5.6-sol"));
+        assert_eq!(config.ai.opencode.effort(), Some("max"));
+        assert_eq!(config.ai.claude_code.model(), Some("fable"));
+        assert_eq!(config.ai.claude_code.effort(), Some("xhigh"));
+        assert_eq!(config.ai.codex.model(), Some("gpt-5.6-terra"));
+        assert_eq!(config.ai.codex.effort(), Some("ultra"));
+    }
+
+    #[test]
     fn rejects_invalid_theme() {
         let error = parse(r#"theme = "solarized""#).unwrap_err();
 
         assert!(error.to_string().contains("invalid theme `solarized`"));
         assert!(error.to_string().contains("gruvbox, github-dark"));
+    }
+
+    #[test]
+    fn rejects_invalid_harness() {
+        let error = parse(r#"harness = "copilot""#).unwrap_err();
+
+        assert!(error.to_string().contains("invalid harness `copilot`"));
+        assert!(error.to_string().contains("opencode, claude-code, codex"));
     }
 
     #[test]
@@ -474,6 +706,100 @@ mod tests {
         let error = load_from_path(&path).unwrap_err();
         assert!(error.to_string().contains("invalid config"));
         assert!(format!("{error:?}").contains(path.to_str().unwrap()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_ai_settings_to_path_creates_or_updates_top_level_settings() {
+        let root = temp_root();
+        let path = root.join("chunk/config.toml");
+
+        save_ai_settings_to_path(&path, &AiSettings::with_harness(AiHarness::Codex)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "harness = \"codex\"\n");
+        assert_eq!(load_from_path(&path).unwrap().ai.harness, AiHarness::Codex);
+
+        fs::write(
+            &path,
+            r#"theme = "github-dark"
+
+[keybinds]
+quit = "Q"
+"#,
+        )
+        .unwrap();
+        save_ai_settings_to_path(&path, &AiSettings::with_harness(AiHarness::ClaudeCode)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"theme = "github-dark"
+
+harness = "claude-code"
+[keybinds]
+quit = "Q"
+"#
+        );
+        assert_eq!(
+            load_from_path(&path).unwrap().ai.harness,
+            AiHarness::ClaudeCode
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_ai_settings_to_path_replaces_existing_top_level_harness_only() {
+        let root = temp_root();
+        let path = root.join("chunk/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"harness = "opencode" # old
+
+[keybinds]
+harness = "H"
+"#,
+        )
+        .unwrap();
+
+        save_ai_settings_to_path(&path, &AiSettings::with_harness(AiHarness::Codex)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"harness = "codex"
+
+[keybinds]
+harness = "H"
+"#
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_ai_settings_persists_each_harness_profile() {
+        let root = temp_root();
+        let path = root.join("chunk/config.toml");
+        let mut settings = AiSettings::with_harness(AiHarness::Codex);
+        settings
+            .opencode
+            .set_model(Some("opencode/claude-fable-5".to_string()));
+        settings.opencode.set_effort(Some("xhigh".to_string()));
+        settings.claude_code.set_model(Some("fable".to_string()));
+        settings.claude_code.set_effort(Some("max".to_string()));
+        settings.codex.set_model(Some("gpt-5.6-sol".to_string()));
+        settings.codex.set_effort(Some("ultra".to_string()));
+
+        save_ai_settings_to_path(&path, &settings).unwrap();
+
+        let source = fs::read_to_string(&path).unwrap();
+        assert!(source.contains(r#"opencode_model = "opencode/claude-fable-5""#));
+        assert!(source.contains(r#"opencode_variant = "xhigh""#));
+        assert!(source.contains(r#"claude_model = "fable""#));
+        assert!(source.contains(r#"claude_effort = "max""#));
+        assert!(source.contains(r#"codex_model = "gpt-5.6-sol""#));
+        assert!(source.contains(r#"codex_effort = "ultra""#));
+        assert_eq!(load_from_path(&path).unwrap().ai, settings);
 
         fs::remove_dir_all(root).unwrap();
     }

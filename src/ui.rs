@@ -20,6 +20,7 @@ const PANE_BORDER_WIDTH: u16 = 2;
 const HELP_OVERLAY_WIDTH: u16 = 78;
 const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
 const HELP_SCROLLBAR_WIDTH: u16 = 1;
+const HARNESS_OVERLAY_WIDTH: u16 = 62;
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme();
@@ -33,6 +34,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     render_body(frame, chunks[0], app, theme);
     render_keybind_bar(frame, chunks[1], app, theme);
     render_help_overlay(frame, frame.area(), app, theme);
+    render_harness_picker_overlay(frame, frame.area(), app, theme);
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
@@ -248,6 +250,47 @@ fn render_help_scrollbar(
     render_scrollbar(frame, area, thumb, theme.background_alt, theme);
 }
 
+fn render_harness_picker_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+    if !app.harness_picker_visible() {
+        return;
+    }
+
+    let width = modal_width(area, HARNESS_OVERLAY_WIDTH);
+    let content_width = width.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let lines = app.harness_picker_lines(content_width, theme);
+    let height = modal_height(area, lines.len() as u16);
+    let area = centered_rect(area, width, height);
+    let block = Block::default()
+        .title(harness_picker_title(theme))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(
+            Style::default()
+                .fg(theme.border_active)
+                .bg(theme.background_alt),
+        )
+        .style(color_style(theme.text, theme.background_alt));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(color_style(theme.text, theme.background_alt)),
+        area,
+    );
+}
+
+fn harness_picker_title(theme: Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("─ ", color_style(theme.border_active, theme.background_alt)),
+        Span::styled(
+            "AI Harness",
+            color_style(theme.accent, theme.background_alt).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", color_style(theme.border_active, theme.background_alt)),
+    ])
+}
+
 fn render_scrollbar(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -343,21 +386,28 @@ fn saturating_u16(value: usize) -> u16 {
 }
 
 fn help_overlay_width(area: Rect) -> u16 {
+    modal_width(area, HELP_OVERLAY_WIDTH)
+}
+
+fn help_overlay_height(area: Rect, content_height: u16) -> u16 {
+    modal_height(area, content_height).min(HELP_OVERLAY_MAX_HEIGHT)
+}
+
+fn modal_width(area: Rect, preferred_width: u16) -> u16 {
     if area.width <= 4 {
         return area.width;
     }
 
-    HELP_OVERLAY_WIDTH.min(area.width - 4)
+    preferred_width.min(area.width - 4)
 }
 
-fn help_overlay_height(area: Rect, content_height: u16) -> u16 {
+fn modal_height(area: Rect, content_height: u16) -> u16 {
     if area.height <= 2 {
         return area.height;
     }
 
     content_height
         .saturating_add(PANE_BORDER_WIDTH)
-        .min(HELP_OVERLAY_MAX_HEIGHT)
         .min(area.height - 2)
 }
 

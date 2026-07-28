@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::text::Line;
 
-use crate::ask_ai::{AskAiContext, AskAiRequest, AskAiResult};
+use crate::ask_ai::{AiHarness, AiSettings, AskAiContext, AskAiRequest, AskAiResult};
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::rows;
@@ -30,6 +30,81 @@ pub(super) struct AskAiPromptState {
 pub(super) struct AskAiOutputState {
     pub(super) result: AskAiResult,
     pub(super) scroll: ScrollText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HarnessPickerState {
+    pub(super) settings: AiSettings,
+    pub(super) field: AiPickerField,
+}
+
+impl HarnessPickerState {
+    fn move_field(&mut self, direction: VerticalDirection) {
+        self.field = self.field.moved(direction);
+    }
+
+    fn change_value(&mut self, direction: VerticalDirection) {
+        match self.field {
+            AiPickerField::Harness => {
+                self.settings.harness = match direction {
+                    VerticalDirection::Down => self.settings.harness.next(),
+                    VerticalDirection::Up => self.settings.harness.previous(),
+                };
+            }
+            AiPickerField::Model => self.change_model(direction),
+            AiPickerField::Effort => self.change_effort(direction),
+        }
+    }
+
+    fn change_model(&mut self, direction: VerticalDirection) {
+        let harness = self.settings.harness;
+        let model = cycle_optional_choice(
+            self.settings.selected().model(),
+            harness.model_choices(),
+            direction,
+        );
+        self.settings.selected_mut().set_model(model);
+
+        let effort_is_supported = {
+            let selected = self.settings.selected();
+            selected
+                .effort()
+                .is_none_or(|effort| harness.effort_choices(selected.model()).contains(&effort))
+        };
+        if !effort_is_supported {
+            self.settings.selected_mut().set_effort(None);
+        }
+    }
+
+    fn change_effort(&mut self, direction: VerticalDirection) {
+        let harness = self.settings.harness;
+        let effort = cycle_optional_choice(
+            self.settings.selected().effort(),
+            harness.effort_choices(self.settings.selected().model()),
+            direction,
+        );
+        self.settings.selected_mut().set_effort(effort);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiPickerField {
+    Harness,
+    Model,
+    Effort,
+}
+
+impl AiPickerField {
+    fn moved(self, direction: VerticalDirection) -> Self {
+        match (self, direction) {
+            (Self::Harness, VerticalDirection::Down) => Self::Model,
+            (Self::Model, VerticalDirection::Down) => Self::Effort,
+            (Self::Effort, VerticalDirection::Down) => Self::Harness,
+            (Self::Harness, VerticalDirection::Up) => Self::Effort,
+            (Self::Model, VerticalDirection::Up) => Self::Harness,
+            (Self::Effort, VerticalDirection::Up) => Self::Model,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,11 +197,17 @@ pub(super) enum Overlay {
     },
     /// Completed Ask AI answer shown in the diff pane.
     AskAiOutput(AskAiOutputState),
+    /// AI harness picker. Applying a choice persists it to config.toml.
+    HarnessPicker(HarnessPickerState),
 }
 
 impl App {
     pub(crate) fn help_overlay_visible(&self) -> bool {
         matches!(self.overlay, Some(Overlay::Help { .. }))
+    }
+
+    pub(crate) fn harness_picker_visible(&self) -> bool {
+        matches!(self.overlay, Some(Overlay::HarnessPicker(_)))
     }
 
     pub(crate) fn help_overlay_scroll(&self) -> usize {
@@ -267,6 +348,7 @@ impl App {
             Some(Overlay::AskAiPrompt(_)) => self.handle_ask_ai_prompt_key(key),
             Some(Overlay::AskAiRunning { .. }) => self.handle_ask_ai_running_key(key),
             Some(Overlay::AskAiOutput(_)) => self.handle_ask_ai_output_key(key),
+            Some(Overlay::HarnessPicker(_)) => self.handle_harness_picker_key(key),
             None => {}
         }
     }
@@ -280,6 +362,7 @@ impl App {
             | Some(Overlay::CommandRunning { .. })
             | Some(Overlay::AskAiPrompt(_))
             | Some(Overlay::AskAiRunning { .. })
+            | Some(Overlay::HarnessPicker(_))
             | None => {}
         }
     }
@@ -291,6 +374,14 @@ impl App {
                 scroll: ScrollText::default(),
             }),
         };
+    }
+
+    pub(super) fn open_harness_picker(&mut self) {
+        self.live_error = None;
+        self.overlay = Some(Overlay::HarnessPicker(HarnessPickerState {
+            settings: self.ai_settings.clone(),
+            field: AiPickerField::Harness,
+        }));
     }
 
     fn help_scroll_mut(&mut self) -> Option<&mut ScrollText> {
@@ -311,6 +402,19 @@ impl App {
         match &mut self.overlay {
             Some(Overlay::AskAiPrompt(prompt)) => Some(prompt),
             _ => None,
+        }
+    }
+
+    fn harness_picker_mut(&mut self) -> Option<&mut HarnessPickerState> {
+        match &mut self.overlay {
+            Some(Overlay::HarnessPicker(picker)) => Some(picker),
+            _ => None,
+        }
+    }
+
+    fn with_harness_picker(&mut self, update: impl FnOnce(&mut HarnessPickerState)) {
+        if let Some(picker) = self.harness_picker_mut() {
+            update(picker);
         }
     }
 
@@ -444,5 +548,86 @@ impl App {
                 scroll_output_by_wheel(&mut output.scroll, direction);
             }
         });
+    }
+
+    fn handle_harness_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Enter => self.apply_selected_ai_settings(),
+            KeyCode::Char(choice @ ('1' | '2' | '3')) if accepts_text_input(key) => {
+                let harness = match choice {
+                    '1' => AiHarness::OpenCode,
+                    '2' => AiHarness::ClaudeCode,
+                    '3' => AiHarness::Codex,
+                    _ => unreachable!(),
+                };
+                self.with_harness_picker(|picker| picker.settings.harness = harness);
+            }
+            KeyCode::Down => {
+                self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Down));
+            }
+            KeyCode::Up => {
+                self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Up));
+            }
+            KeyCode::Right => {
+                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Down));
+            }
+            KeyCode::Left => {
+                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Up));
+            }
+            KeyCode::Char('l') if accepts_text_input(key) => {
+                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Down));
+            }
+            KeyCode::Char('h') if accepts_text_input(key) => {
+                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Up));
+            }
+            _ => match self.keybinds.action_for(key) {
+                Some(BuiltinAction::MoveDown) => {
+                    self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Down));
+                }
+                Some(BuiltinAction::MoveUp) => {
+                    self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Up));
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn apply_selected_ai_settings(&mut self) {
+        let Some(Overlay::HarnessPicker(picker)) = self.overlay.take() else {
+            return;
+        };
+        if self.ai_settings == picker.settings {
+            return;
+        }
+
+        self.ai_settings = picker.settings;
+        self.live_error = None;
+        self.set_live_notice(format!(
+            "AI settings: {}",
+            self.ai_settings.harness.display_name()
+        ));
+        self.queue_ai_settings_save_effect();
+    }
+}
+
+fn cycle_optional_choice(
+    current: Option<&str>,
+    choices: &[&str],
+    direction: VerticalDirection,
+) -> Option<String> {
+    // Position zero represents the unset value; choices occupy positions 1..=len.
+    let current_position = current
+        .and_then(|current| choices.iter().position(|choice| *choice == current))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let position_count = choices.len() + 1;
+    let next_position = match direction {
+        VerticalDirection::Down => (current_position + 1) % position_count,
+        VerticalDirection::Up => (current_position + position_count - 1) % position_count,
+    };
+    match next_position {
+        0 => None,
+        position => Some(choices[position - 1].to_string()),
     }
 }

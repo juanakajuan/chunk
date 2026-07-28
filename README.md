@@ -2,14 +2,14 @@
 
 `chunk` is a terminal diff reviewer for Git repositories. It shows a tree file
 list beside a syntax-highlighted unified diff, with live worktree refresh,
-file/hunk staging, guarded discard actions, mouse support, and optional OpenCode
-AI actions.
+file/hunk staging, guarded discard actions, mouse support, and optional AI
+actions through OpenCode, Claude Code, or Codex.
 
 ## Requirements
 
 - Rust 2024 toolchain
 - Git
-- [OpenCode](https://opencode.ai/) for Ask AI actions
+- [OpenCode](https://opencode.ai/), Claude Code, or Codex for Ask AI actions
 - A [Nerd Font](https://www.nerdfonts.com/) for file/status glyphs
 
 ## Usage
@@ -48,6 +48,7 @@ These are the default keys. Most single-character actions can be remapped in
 | `g` / `Home`, `G` / `End` | Jump to top or bottom |
 | `?` | Toggle in-app help |
 | `a`, `x`, `u` | Ask AI, explain selection, or summarize unpublished changes |
+| `F2` | Configure the AI harness, model, and effort; persist to `config.toml` |
 | `y`, `Y` | Copy focused path/hunk or selected file diff |
 | `r` | Toggle reviewed state for the selected file |
 | `Space` | Stage/unstage the selected file or hunk in `diff` mode |
@@ -69,6 +70,13 @@ exists.
 
 ```toml
 theme = "github-dark"
+harness = "codex"
+opencode_model = "opencode/claude-fable-5"
+opencode_variant = "xhigh"
+claude_model = "fable"
+claude_effort = "xhigh"
+codex_model = "gpt-5.6-sol"
+codex_effort = "high"
 
 [keybinds]
 quit = "Q"
@@ -81,6 +89,21 @@ command = "git add . && com && git push"
 ```
 
 Supported themes are `gruvbox` (default) and `github-dark`.
+
+Supported AI harnesses are `opencode` (default), `claude-code`, and `codex`.
+Press `F2` to configure and persist separate model/effort profiles for each:
+
+- OpenCode uses `provider/model` names and calls effort a model `variant`.
+  Presets include current Claude 5 and GPT-5.6 models; custom config values are
+  also accepted because available models and variants are provider-specific.
+- Claude Code presets use its rolling `fable`, `best`, `opus`, `sonnet`, and
+  `haiku` aliases. Its effort names are `low`, `medium`, `high`, `xhigh`, and
+  `max`.
+- Codex presets are `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. Its
+  picker uses `low`, `medium`, `high`, `xhigh`, `max`, and, where supported,
+  `ultra`.
+
+Leaving a model or effort unset inherits that harness's own default.
 
 Keybind values must be single characters; use a literal space for `Space`.
 Unknown actions, invalid keys, conflicting keys, and duplicate custom command
