@@ -181,44 +181,30 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
         return;
     }
 
-    let width = help_overlay_width(area);
-    let mut content_width = width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let mut lines = app.help_overlay_lines(content_width, theme);
-    let height = help_overlay_height(area, lines.len() as u16);
-    let visible_content_height = height.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let mut overflow = help_overlay_overflows(lines.len(), visible_content_height);
-    if overflow {
-        content_width = width.saturating_sub(PANE_BORDER_WIDTH + HELP_SCROLLBAR_WIDTH) as usize;
-        lines = app.help_overlay_lines(content_width, theme);
-        overflow = help_overlay_overflows(lines.len(), visible_content_height);
+    let mut lines = app.help_overlay_lines(HelpOverlayLayout::content_width(area), theme);
+    let mut layout = HelpOverlayLayout::new(area, lines.len());
+    if layout.overflows {
+        lines = app.help_overlay_lines(layout.scrollbar_content_width(), theme);
+        layout = layout.with_reserved_scrollbar(lines.len());
     }
-    app.clamp_help_overlay_scroll(lines.len(), visible_content_height);
+    app.clamp_help_overlay_scroll(lines.len(), layout.visible_content_height);
     let total_rows = lines.len();
     let scroll = app.help_overlay_scroll();
     let keybinds = app.keybinds();
-    let area = centered_rect(area, width, height);
+    let area = centered_rect(area, layout.width, layout.height);
     let lines = app.selectable_lines(
         Rect {
             x: area.x.saturating_add(1),
             y: area.y.saturating_add(1),
-            width: saturating_u16(content_width),
-            height: saturating_u16(visible_content_height),
+            width: saturating_u16(layout.content_width),
+            height: saturating_u16(layout.visible_content_height),
         },
         lines,
         scroll,
-        visible_content_height,
+        layout.visible_content_height,
         theme,
     );
-    let block = Block::default()
-        .title(help_overlay_title(theme, overflow, keybinds))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(
-            Style::default()
-                .fg(theme.border_active)
-                .bg(theme.background_alt),
-        )
-        .style(color_style(theme.text, theme.background_alt));
+    let block = modal_block(help_overlay_title(theme, layout.overflows, keybinds), theme);
 
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -228,12 +214,12 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             .style(color_style(theme.text, theme.background_alt)),
         area,
     );
-    if overflow {
+    if layout.overflows {
         render_help_scrollbar(
             frame,
             help_scrollbar_area(area),
             total_rows,
-            visible_content_height,
+            layout.visible_content_height,
             scroll,
             theme,
         );
@@ -292,16 +278,7 @@ fn render_harness_picker_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     let lines = app.harness_picker_lines(content_width, theme);
     let height = modal_height(area, lines.len() as u16);
     let area = centered_rect(area, width, height);
-    let block = Block::default()
-        .title(harness_picker_title(theme))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(
-            Style::default()
-                .fg(theme.border_active)
-                .bg(theme.background_alt),
-        )
-        .style(color_style(theme.text, theme.background_alt));
+    let block = modal_block(harness_picker_title(theme), theme);
 
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -321,6 +298,19 @@ fn harness_picker_title(theme: Theme) -> Line<'static> {
         ),
         Span::styled(" ", color_style(theme.border_active, theme.background_alt)),
     ])
+}
+
+fn modal_block(title: Line<'static>, theme: Theme) -> Block<'static> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(
+            Style::default()
+                .fg(theme.border_active)
+                .bg(theme.background_alt),
+        )
+        .style(color_style(theme.text, theme.background_alt))
 }
 
 fn render_scrollbar(
@@ -409,8 +399,44 @@ fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
         / denominator
 }
 
-fn help_overlay_overflows(line_count: usize, visible_height: usize) -> bool {
-    line_count > visible_height
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HelpOverlayLayout {
+    width: u16,
+    height: u16,
+    content_width: usize,
+    visible_content_height: usize,
+    overflows: bool,
+}
+
+impl HelpOverlayLayout {
+    fn content_width(area: Rect) -> usize {
+        help_overlay_width(area).saturating_sub(PANE_BORDER_WIDTH) as usize
+    }
+
+    fn new(area: Rect, line_count: usize) -> Self {
+        let width = help_overlay_width(area);
+        let height = help_overlay_height(area, line_count as u16);
+        let visible_content_height = height.saturating_sub(PANE_BORDER_WIDTH) as usize;
+
+        Self {
+            width,
+            height,
+            content_width: width.saturating_sub(PANE_BORDER_WIDTH) as usize,
+            visible_content_height,
+            overflows: line_count > visible_content_height,
+        }
+    }
+
+    fn scrollbar_content_width(self) -> usize {
+        self.width
+            .saturating_sub(PANE_BORDER_WIDTH + HELP_SCROLLBAR_WIDTH) as usize
+    }
+
+    fn with_reserved_scrollbar(mut self, line_count: usize) -> Self {
+        self.content_width = self.scrollbar_content_width();
+        self.overflows = line_count > self.visible_content_height;
+        self
+    }
 }
 
 fn saturating_u16(value: usize) -> u16 {
@@ -517,6 +543,24 @@ mod tests {
     use crate::model::{Changeset, CommitSummary, LocalBranch, RepositoryOverview};
     use crate::review_source::LoadedReview;
     use crate::theme::ThemeName;
+
+    #[test]
+    fn help_overlay_layout_preserves_first_pass_height_when_reserving_scrollbar() {
+        let area = Rect::new(0, 0, 100, 30);
+        let initial = HelpOverlayLayout::new(area, 30);
+
+        assert_eq!(initial.width, HELP_OVERLAY_WIDTH);
+        assert_eq!(initial.height, HELP_OVERLAY_MAX_HEIGHT);
+        assert_eq!(initial.content_width, 76);
+        assert_eq!(initial.visible_content_height, 22);
+        assert!(initial.overflows);
+
+        let remeasured = initial.with_reserved_scrollbar(22);
+
+        assert_eq!(remeasured.height, initial.height);
+        assert_eq!(remeasured.content_width, 75);
+        assert!(!remeasured.overflows);
+    }
 
     #[test]
     fn help_overlay_draws_custom_commands_from_config() {

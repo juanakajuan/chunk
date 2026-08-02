@@ -151,29 +151,27 @@ impl DiffRenderState {
             return;
         };
 
-        let layout_request = DiffLayoutRequest {
-            file_index: request.file_index,
-            file_id: file_id.as_str(),
-            content_width: request.content_width,
-            can_stage: request.can_stage,
-        };
         let hunk_offsets = self
             .layout_metrics(
                 &changeset.files[request.file_index],
-                layout_request,
+                request.layout_request(file_id.as_str()),
                 request.theme,
             )
             .map(|metrics| metrics.hunk_offsets.clone())
             .unwrap_or_default();
 
-        let render_request = DiffRenderRequest {
-            file_index: request.file_index,
-            file_id: file_id.as_str(),
-            content_width: request.content_width,
-            syntax_palette: request.theme.syntax,
-            can_stage: request.can_stage,
-            requested_rows: request.requested_rows,
-        };
+        self.render_selected_file(changeset, source, request, file_id.as_str(), hunk_offsets);
+    }
+
+    fn render_selected_file(
+        &mut self,
+        changeset: &mut Changeset,
+        source: &ReviewSource,
+        request: SelectedDiffRenderRequest,
+        file_id: &str,
+        hunk_offsets: Vec<usize>,
+    ) {
+        let render_request = request.render_request(file_id);
         let Some(render_target) = self.diff_lines_render_target(render_request) else {
             return;
         };
@@ -193,7 +191,7 @@ impl DiffRenderState {
         self.cache_diff_lines(
             render_request,
             RenderedDiffLines::new(
-                file_id.clone(),
+                file_id.to_string(),
                 request.content_width,
                 request.theme.syntax,
                 request.can_stage,
@@ -487,6 +485,28 @@ impl DiffRenderState {
             }
 
             lines[rendered_row - visible_start] = header_row;
+        }
+    }
+}
+
+impl SelectedDiffRenderRequest {
+    fn layout_request<'a>(self, file_id: &'a str) -> DiffLayoutRequest<'a> {
+        DiffLayoutRequest {
+            file_index: self.file_index,
+            file_id,
+            content_width: self.content_width,
+            can_stage: self.can_stage,
+        }
+    }
+
+    fn render_request<'a>(self, file_id: &'a str) -> DiffRenderRequest<'a> {
+        DiffRenderRequest {
+            file_index: self.file_index,
+            file_id,
+            content_width: self.content_width,
+            syntax_palette: self.theme.syntax,
+            can_stage: self.can_stage,
+            requested_rows: self.requested_rows,
         }
     }
 }

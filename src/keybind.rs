@@ -32,90 +32,56 @@ pub(crate) enum BuiltinAction {
     ToggleReviewed,
 }
 
-impl BuiltinAction {
-    pub(crate) const COUNT: usize = 19;
+struct ActionDescriptor {
+    action: BuiltinAction,
+    config_name: &'static str,
+    default_key: char,
+}
 
-    pub(crate) const ALL: [Self; Self::COUNT] = [
-        Self::Quit,
-        Self::Help,
-        Self::ToggleFiles,
-        Self::Search,
-        Self::MoveDown,
-        Self::MoveUp,
-        Self::NextMatch,
-        Self::PrevMatch,
-        Self::Top,
-        Self::Bottom,
-        Self::ToggleStaging,
-        Self::Discard,
-        Self::Editor,
-        Self::AskAi,
-        Self::ExplainCode,
-        Self::UnpublishedSummary,
-        Self::CopyFocused,
-        Self::CopyFileDiff,
-        Self::ToggleReviewed,
-    ];
-
-    /// Snake-case name used as the TOML key in `[keybinds]`.
-    const fn config_name(self) -> &'static str {
-        match self {
-            Self::Quit => "quit",
-            Self::Help => "help",
-            Self::ToggleFiles => "toggle_files",
-            Self::Search => "search",
-            Self::MoveDown => "move_down",
-            Self::MoveUp => "move_up",
-            Self::NextMatch => "next_match",
-            Self::PrevMatch => "prev_match",
-            Self::Top => "top",
-            Self::Bottom => "bottom",
-            Self::ToggleStaging => "toggle_staging",
-            Self::Discard => "discard",
-            Self::Editor => "editor",
-            Self::AskAi => "ask_ai",
-            Self::ExplainCode => "explain_code",
-            Self::UnpublishedSummary => "unpublished_summary",
-            Self::CopyFocused => "copy_focused",
-            Self::CopyFileDiff => "copy_file_diff",
-            Self::ToggleReviewed => "toggle_reviewed",
+impl ActionDescriptor {
+    const fn new(action: BuiltinAction, config_name: &'static str, default_key: char) -> Self {
+        Self {
+            action,
+            config_name,
+            default_key,
         }
     }
+}
+
+const BUILTIN_ACTIONS: [ActionDescriptor; 19] = [
+    ActionDescriptor::new(BuiltinAction::Quit, "quit", 'q'),
+    ActionDescriptor::new(BuiltinAction::Help, "help", '?'),
+    ActionDescriptor::new(BuiltinAction::ToggleFiles, "toggle_files", 'f'),
+    ActionDescriptor::new(BuiltinAction::Search, "search", '/'),
+    ActionDescriptor::new(BuiltinAction::MoveDown, "move_down", 'j'),
+    ActionDescriptor::new(BuiltinAction::MoveUp, "move_up", 'k'),
+    ActionDescriptor::new(BuiltinAction::NextMatch, "next_match", 'n'),
+    ActionDescriptor::new(BuiltinAction::PrevMatch, "prev_match", 'N'),
+    ActionDescriptor::new(BuiltinAction::Top, "top", 'g'),
+    ActionDescriptor::new(BuiltinAction::Bottom, "bottom", 'G'),
+    ActionDescriptor::new(BuiltinAction::ToggleStaging, "toggle_staging", ' '),
+    ActionDescriptor::new(BuiltinAction::Discard, "discard", 'd'),
+    ActionDescriptor::new(BuiltinAction::Editor, "editor", 'e'),
+    ActionDescriptor::new(BuiltinAction::AskAi, "ask_ai", 'a'),
+    ActionDescriptor::new(BuiltinAction::ExplainCode, "explain_code", 'x'),
+    ActionDescriptor::new(
+        BuiltinAction::UnpublishedSummary,
+        "unpublished_summary",
+        'u',
+    ),
+    ActionDescriptor::new(BuiltinAction::CopyFocused, "copy_focused", 'y'),
+    ActionDescriptor::new(BuiltinAction::CopyFileDiff, "copy_file_diff", 'Y'),
+    ActionDescriptor::new(BuiltinAction::ToggleReviewed, "toggle_reviewed", 'r'),
+];
+
+impl BuiltinAction {
+    pub(crate) const COUNT: usize = BUILTIN_ACTIONS.len();
 
     fn from_config_name(name: &str) -> Option<Self> {
-        Self::ALL
+        BUILTIN_ACTIONS
             .iter()
-            .copied()
-            .find(|action| action.config_name() == name)
-    }
-
-    /// Default single-character key.
-    const fn default_key(self) -> char {
-        match self {
-            Self::Quit => 'q',
-            Self::Help => '?',
-            Self::ToggleFiles => 'f',
-            Self::Search => '/',
-            Self::MoveDown => 'j',
-            Self::MoveUp => 'k',
-            Self::NextMatch => 'n',
-            Self::PrevMatch => 'N',
-            Self::Top => 'g',
-            Self::Bottom => 'G',
-            Self::ToggleStaging => ' ',
-            Self::Discard => 'd',
-            Self::Editor => 'e',
-            Self::AskAi => 'a',
-            Self::ExplainCode => 'x',
-            Self::UnpublishedSummary => 'u',
-            Self::CopyFocused => 'y',
-            Self::CopyFileDiff => 'Y',
-            Self::ToggleReviewed => 'r',
-        }
-    }
-
-    fn at(index: usize) -> Self {
-        Self::ALL[index]
+            .find(|descriptor| descriptor.config_name == name)
+            .map(|descriptor| descriptor.action)
     }
 }
 
@@ -173,7 +139,7 @@ impl KeybindMap {
     pub(crate) fn defaults() -> Self {
         Self {
             keys: std::array::from_fn(|index| {
-                BuiltinKey::from_char(BuiltinAction::at(index).default_key())
+                BuiltinKey::from_char(BUILTIN_ACTIONS[index].default_key)
             }),
         }
     }
@@ -204,9 +170,10 @@ impl KeybindMap {
         let KeyCode::Char(value) = key.code else {
             return None;
         };
-        BuiltinAction::ALL
-            .into_iter()
-            .find(|action| self.keys[*action as usize].value == value)
+        BUILTIN_ACTIONS
+            .iter()
+            .find(|descriptor| self.key(descriptor.action).value == value)
+            .map(|descriptor| descriptor.action)
     }
 
     /// Whether a character is reserved by any configured built-in key.
@@ -222,14 +189,15 @@ impl KeybindMap {
     /// Called after all config overrides are applied so that key swaps are
     /// permitted as long as the final set has no duplicates.
     pub(crate) fn validate(self) -> Result<()> {
-        for i in 0..BuiltinAction::COUNT {
-            for j in (i + 1)..BuiltinAction::COUNT {
-                if self.keys[i] == self.keys[j] {
+        for (index, first) in BUILTIN_ACTIONS.iter().enumerate() {
+            let first_key = self.key(first.action);
+            for second in BUILTIN_ACTIONS.iter().skip(index + 1) {
+                if first_key == self.key(second.action) {
                     return Err(eyre!(
                         "keybind key `{}` is bound to both `{}` and `{}`",
-                        self.keys[i].display(),
-                        BuiltinAction::at(i).config_name(),
-                        BuiltinAction::at(j).config_name(),
+                        first_key.display(),
+                        first.config_name,
+                        second.config_name,
                     ));
                 }
             }
@@ -244,9 +212,9 @@ pub(crate) fn parse_action_name(name: &str) -> Result<BuiltinAction> {
     BuiltinAction::from_config_name(name).ok_or_else(|| {
         eyre!(
             "unknown keybind action `{name}`; expected one of: {}",
-            BuiltinAction::ALL
+            BUILTIN_ACTIONS
                 .iter()
-                .map(|action| action.config_name())
+                .map(|descriptor| descriptor.config_name)
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -403,8 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn action_catalog_matches_enum_order() {
+        for (index, descriptor) in BUILTIN_ACTIONS.iter().enumerate() {
+            assert_eq!(descriptor.action as usize, index);
+        }
+    }
+
+    #[test]
     fn action_config_names_are_unique() {
-        let mut names: Vec<_> = BuiltinAction::ALL.iter().map(|a| a.config_name()).collect();
+        let mut names: Vec<_> = BUILTIN_ACTIONS
+            .iter()
+            .map(|descriptor| descriptor.config_name)
+            .collect();
         names.sort();
         let initial = names.len();
         names.dedup();

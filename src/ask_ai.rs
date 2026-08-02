@@ -285,13 +285,17 @@ impl AskAiContext {
         hunk_index: Option<usize>,
         selected_text: Option<String>,
     ) -> Self {
-        let focused_hunk = hunk_index
+        let (focused_hunk, diff_text) = hunk_index
             .and_then(|index| file.hunks.get(index).map(|hunk| (index, hunk)))
-            .map(|(index, hunk)| AskAiHunkContext::new(index, hunk));
-        let diff_text = focused_hunk
-            .as_ref()
-            .and_then(|hunk| file.hunks.get(hunk.index))
-            .map_or_else(|| file_diff_text(file), |hunk| hunk_diff_text(file, hunk));
+            .map_or_else(
+                || (None, file_diff_text(file)),
+                |(index, hunk)| {
+                    (
+                        Some(AskAiHunkContext::new(index, hunk)),
+                        hunk_diff_text(file, hunk),
+                    )
+                },
+            );
 
         Self {
             review_mode,
@@ -1083,12 +1087,7 @@ mod tests {
         assert_eq!(invocation.stdin, None);
         assert!(invocation.args.contains(&"run".to_string()));
         assert!(invocation.args.contains(&"--pure".to_string()));
-        assert!(
-            invocation
-                .args
-                .windows(2)
-                .any(|args| args == ["--dir", "/repo"])
-        );
+        assert!(has_option(&invocation.args, "--dir", "/repo"));
         assert!(
             !invocation
                 .args
@@ -1133,12 +1132,11 @@ mod tests {
                 prompt.clone(),
             ]
         );
-        assert!(
-            invocation
-                .args
-                .windows(2)
-                .any(|args| args == ["--title", UNPUBLISHED_SUMMARY_TITLE])
-        );
+        assert!(has_option(
+            &invocation.args,
+            "--title",
+            UNPUBLISHED_SUMMARY_TITLE
+        ));
 
         assert!(prompt.contains("Summarize unpublished changes"));
         assert!(prompt.contains("local commits that are not pushed"));
@@ -1167,24 +1165,17 @@ mod tests {
 
         assert_eq!(invocation.program, "claude");
         assert!(invocation.args.contains(&"-p".to_string()));
-        assert!(
-            invocation
-                .args
-                .windows(2)
-                .any(|args| args == ["--permission-mode", "dontAsk"])
-        );
-        assert!(
-            invocation
-                .args
-                .windows(2)
-                .any(|args| args == ["--tools", CLAUDE_READ_ONLY_TOOLS])
-        );
-        assert!(
-            invocation
-                .args
-                .windows(2)
-                .any(|args| args == ["--disallowedTools", CLAUDE_DISALLOWED_TOOLS])
-        );
+        assert!(has_option(&invocation.args, "--permission-mode", "dontAsk"));
+        assert!(has_option(
+            &invocation.args,
+            "--tools",
+            CLAUDE_READ_ONLY_TOOLS
+        ));
+        assert!(has_option(
+            &invocation.args,
+            "--disallowedTools",
+            CLAUDE_DISALLOWED_TOOLS
+        ));
         assert!(
             invocation
                 .stdin
@@ -1249,12 +1240,7 @@ mod tests {
             invocation.args[..4],
             ["--ask-for-approval", "never", "--search", "exec"]
         );
-        assert!(
-            invocation
-                .args
-                .windows(2)
-                .any(|args| args == ["--sandbox", "read-only"])
-        );
+        assert!(has_option(&invocation.args, "--sandbox", "read-only"));
         assert!(invocation.args.contains(&"--ephemeral".to_string()));
         assert_eq!(invocation.args.last().map(String::as_str), Some("-"));
         assert!(

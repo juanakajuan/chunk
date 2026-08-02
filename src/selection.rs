@@ -355,18 +355,16 @@ impl SelectedColumns {
 
 impl SelectionRange {
     fn between(surface: Rect, left: SelectionPoint, right: SelectionPoint) -> Self {
-        if (left.row, left.column) <= (right.row, right.column) {
-            Self {
-                surface,
-                start: left,
-                end: right,
-            }
+        let (start, end) = if (left.row, left.column) <= (right.row, right.column) {
+            (left, right)
         } else {
-            Self {
-                surface,
-                start: right,
-                end: left,
-            }
+            (right, left)
+        };
+
+        Self {
+            surface,
+            start,
+            end,
         }
     }
 

@@ -147,10 +147,7 @@ pub(crate) fn selected_hunk_header_rows(
     theme: Theme,
     can_stage: bool,
 ) -> Vec<Line<'static>> {
-    wrap_line(
-        hunk_header_line(hunk, theme, can_stage, true),
-        content_width,
-    )
+    render_hunk_header_rows(hunk, content_width, theme, can_stage, true)
 }
 
 fn push_hunk_lines_until(
@@ -163,9 +160,12 @@ fn push_hunk_lines_until(
     old_highlighter.advance_to(hunk.old_start);
     new_highlighter.advance_to(hunk.new_start);
 
-    lines.extend(wrap_line(
-        hunk_header_line(hunk, options.theme, options.can_stage, options.is_selected),
+    lines.extend(render_hunk_header_rows(
+        hunk,
         options.content_width,
+        options.theme,
+        options.can_stage,
+        options.is_selected,
     ));
     if lines.len() >= options.target_rows {
         return false;
@@ -245,11 +245,7 @@ fn hunk_new_line_rows(
     can_stage: bool,
 ) -> Vec<Option<u32>> {
     let mut rows = Vec::new();
-    let header_rows = wrap_line(
-        hunk_header_line(hunk, theme, can_stage, false),
-        content_width,
-    )
-    .len();
+    let header_rows = render_hunk_header_rows(hunk, content_width, theme, can_stage, false).len();
     rows.extend(std::iter::repeat_n(hunk.first_changed_line(), header_rows));
 
     let mut next_new_line = hunk.new_start.max(1);
@@ -273,11 +269,7 @@ fn hunk_new_line_rows(
 }
 
 fn diff_line_row_count(line: &DiffLine, content_width: usize) -> usize {
-    wrap_styled_spans(
-        vec![Span::raw(expand_tabs(&line.content))],
-        diff_content_width(content_width),
-    )
-    .len()
+    wrap_diff_content(vec![Span::raw(expand_tabs(&line.content))], content_width).len()
 }
 
 fn valid_line_number(line: Option<u32>, fallback: u32) -> u32 {
@@ -306,6 +298,19 @@ fn hunk_header_line(
     }
 
     Line::from(spans)
+}
+
+fn render_hunk_header_rows(
+    hunk: &DiffHunk,
+    content_width: usize,
+    theme: Theme,
+    can_stage: bool,
+    selected: bool,
+) -> Vec<Line<'static>> {
+    wrap_line(
+        hunk_header_line(hunk, theme, can_stage, selected),
+        content_width,
+    )
 }
 
 fn diff_line(
@@ -345,7 +350,7 @@ fn wrap_diff_line(
     style: DiffLineStyle,
     number_style: Style,
 ) -> Vec<Line<'static>> {
-    let content_rows = wrap_styled_spans(content_spans, diff_content_width(content_width));
+    let content_rows = wrap_diff_content(content_spans, content_width);
     content_rows
         .into_iter()
         .enumerate()
@@ -359,6 +364,13 @@ fn wrap_diff_line(
             Line::from(gutter_spans)
         })
         .collect()
+}
+
+fn wrap_diff_content(
+    content_spans: Vec<Span<'static>>,
+    content_width: usize,
+) -> Vec<Vec<Span<'static>>> {
+    wrap_styled_spans(content_spans, diff_content_width(content_width))
 }
 
 fn diff_gutter_spans(

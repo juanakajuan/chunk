@@ -233,12 +233,6 @@ enum SearchMatchKind {
     Inactive,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SearchStyledChar {
-    value: char,
-    style: Style,
-}
-
 fn highlight_line_search_matches(
     line: Line<'static>,
     matches: &[(usize, SearchMatch)],
@@ -251,32 +245,13 @@ fn highlight_line_search_matches(
 
     let style = line.style;
     let alignment = line.alignment;
-    let chars = line_search_chars(line.spans);
-    let spans = chars_to_search_spans(chars.into_iter().enumerate().map(|(index, character)| {
-        SearchStyledChar {
-            value: character.value,
-            style: search_style_for_char(index, character.style, matches, active_index, theme),
-        }
-    }));
+    let spans = highlight_search_spans(line.spans, matches, active_index, theme);
 
     Line {
         spans,
         style,
         alignment,
     }
-}
-
-fn line_search_chars(spans: Vec<Span<'static>>) -> Vec<SearchStyledChar> {
-    let mut chars = Vec::new();
-
-    for span in spans {
-        let style = span.style;
-        for value in span.content.chars() {
-            chars.push(SearchStyledChar { value, style });
-        }
-    }
-
-    chars
 }
 
 fn search_style_for_char(
@@ -324,15 +299,24 @@ fn search_match_contains(search_match: SearchMatch, index: usize) -> bool {
     index >= search_match.start && index < search_match.end
 }
 
-fn chars_to_search_spans(chars: impl IntoIterator<Item = SearchStyledChar>) -> Vec<Span<'static>> {
+fn highlight_search_spans(
+    input_spans: Vec<Span<'static>>,
+    matches: &[(usize, SearchMatch)],
+    active_index: Option<usize>,
+    theme: Theme,
+) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut index = 0;
 
-    for character in chars {
-        match spans.last_mut() {
-            Some(span) if span.style == character.style => {
-                span.content.to_mut().push(character.value);
+    for input_span in input_spans {
+        for value in input_span.content.chars() {
+            let style =
+                search_style_for_char(index, input_span.style, matches, active_index, theme);
+            match spans.last_mut() {
+                Some(span) if span.style == style => span.content.to_mut().push(value),
+                _ => spans.push(Span::styled(value.to_string(), style)),
             }
-            _ => spans.push(Span::styled(character.value.to_string(), character.style)),
+            index += 1;
         }
     }
 

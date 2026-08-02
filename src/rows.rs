@@ -459,20 +459,43 @@ pub(crate) fn help_overlay_lines(
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let action_entry =
-        |action, description| HelpEntry::text(command_key(keybinds.display(action)), description);
     let mut lines = Vec::new();
 
-    push_help_entries(
+    push_global_help_section(&mut lines, keybinds, content_width, theme);
+    push_custom_commands_section(&mut lines, custom_commands, content_width, theme);
+    push_sidebar_help_section(&mut lines, keybinds, content_width, theme);
+    push_repository_help_section(&mut lines, keybinds, content_width, theme);
+    push_diff_help_section(&mut lines, keybinds, content_width, theme);
+    push_ai_help_section(&mut lines, ai_harness, keybinds, content_width, theme);
+    push_mouse_help_section(&mut lines, content_width, theme);
+    push_worktree_help_section(
         &mut lines,
+        can_stage,
+        can_discard,
+        keybinds,
+        content_width,
+        theme,
+    );
+
+    lines
+}
+
+fn push_global_help_section(
+    lines: &mut Vec<Line<'static>>,
+    keybinds: KeybindMap,
+    content_width: usize,
+    theme: Theme,
+) {
+    push_help_entries(
+        lines,
         "Global",
         &[
-            action_entry(BuiltinAction::Help, "help/dismiss"),
-            action_entry(BuiltinAction::Quit, "close help or quit"),
+            action_entry(keybinds, BuiltinAction::Help, "help/dismiss"),
+            action_entry(keybinds, BuiltinAction::Quit, "close help or quit"),
             HelpEntry::text(command_key("Ctrl-c"), "quit"),
-            action_entry(BuiltinAction::ToggleFiles, "show or hide files"),
+            action_entry(keybinds, BuiltinAction::ToggleFiles, "show or hide files"),
             HelpEntry::text(key_names(["Tab", "Left", "Right", "Enter"]), "focus panes"),
-            action_entry(BuiltinAction::Search, "search"),
+            action_entry(keybinds, BuiltinAction::Search, "search"),
             HelpEntry::text(command_key("Enter"), "apply search"),
             HelpEntry::text(command_key("Esc"), "cancel or clear search"),
             HelpEntry::text(
@@ -494,11 +517,16 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+}
 
-    push_custom_commands_section(&mut lines, custom_commands, content_width, theme);
-
+fn push_sidebar_help_section(
+    lines: &mut Vec<Line<'static>>,
+    keybinds: KeybindMap,
+    content_width: usize,
+    theme: Theme,
+) {
     push_help_entries(
-        &mut lines,
+        lines,
         "Sidebar",
         &[
             HelpEntry::text(
@@ -506,17 +534,29 @@ pub(crate) fn help_overlay_lines(
                 "select file",
             ),
             action_entry(
+                keybinds,
                 BuiltinAction::ToggleReviewed,
                 "toggle reviewed for selected file",
             ),
-            action_entry(BuiltinAction::CopyFocused, "copy selected file path"),
+            action_entry(
+                keybinds,
+                BuiltinAction::CopyFocused,
+                "copy selected file path",
+            ),
         ],
         content_width,
         theme,
     );
+}
 
+fn push_repository_help_section(
+    lines: &mut Vec<Line<'static>>,
+    keybinds: KeybindMap,
+    content_width: usize,
+    theme: Theme,
+) {
     push_help_entries(
-        &mut lines,
+        lines,
         "Repository",
         &[
             HelpEntry::text(
@@ -524,6 +564,7 @@ pub(crate) fn help_overlay_lines(
                 "select branch or commit",
             ),
             action_entry(
+                keybinds,
                 BuiltinAction::CopyFocused,
                 "copy selected branch name or commit id",
             ),
@@ -531,9 +572,16 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+}
 
+fn push_diff_help_section(
+    lines: &mut Vec<Line<'static>>,
+    keybinds: KeybindMap,
+    content_width: usize,
+    theme: Theme,
+) {
     push_help_entries(
-        &mut lines,
+        lines,
         "Diff",
         &[
             HelpEntry::text(
@@ -548,15 +596,31 @@ pub(crate) fn help_overlay_lines(
                 ),
                 "next or previous hunk",
             ),
-            action_entry(BuiltinAction::CopyFocused, "copy selected hunk diff"),
-            action_entry(BuiltinAction::CopyFileDiff, "copy selected file diff"),
+            action_entry(
+                keybinds,
+                BuiltinAction::CopyFocused,
+                "copy selected hunk diff",
+            ),
+            action_entry(
+                keybinds,
+                BuiltinAction::CopyFileDiff,
+                "copy selected file diff",
+            ),
         ],
         content_width,
         theme,
     );
+}
 
+fn push_ai_help_section(
+    lines: &mut Vec<Line<'static>>,
+    ai_harness: AiHarness,
+    keybinds: KeybindMap,
+    content_width: usize,
+    theme: Theme,
+) {
     push_help_entries(
-        &mut lines,
+        lines,
         "AI",
         &[
             HelpEntry::new(
@@ -570,10 +634,12 @@ pub(crate) fn help_overlay_lines(
                 ],
             ),
             action_entry(
+                keybinds,
                 BuiltinAction::ExplainCode,
                 "Explain focused file or hunk with Ask AI",
             ),
             action_entry(
+                keybinds,
                 BuiltinAction::UnpublishedSummary,
                 "Summarize unpublished changes with Ask AI",
             ),
@@ -585,9 +651,11 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+}
 
+fn push_mouse_help_section(lines: &mut Vec<Line<'static>>, content_width: usize, theme: Theme) {
     push_help_entries(
-        &mut lines,
+        lines,
         "Mouse",
         &[
             HelpEntry::text(command_key("hover"), "focus pane"),
@@ -600,11 +668,21 @@ pub(crate) fn help_overlay_lines(
         content_width,
         theme,
     );
+}
 
+fn push_worktree_help_section(
+    lines: &mut Vec<Line<'static>>,
+    can_stage: bool,
+    can_discard: bool,
+    keybinds: KeybindMap,
+    content_width: usize,
+    theme: Theme,
+) {
     if can_stage || can_discard {
         let mut entries = Vec::new();
         if can_stage {
             entries.push(action_entry(
+                keybinds,
                 BuiltinAction::ToggleStaging,
                 "stage/unstage focused file or hunk",
             ));
@@ -622,14 +700,15 @@ pub(crate) fn help_overlay_lines(
             ));
         }
         entries.push(action_entry(
+            keybinds,
             BuiltinAction::Editor,
             "open selected file in $EDITOR",
         ));
-        push_help_entries(&mut lines, "Worktree-only", &entries, content_width, theme);
+        push_help_entries(lines, "Worktree-only", &entries, content_width, theme);
     } else {
-        push_help_section(&mut lines, "Worktree-only", theme);
+        push_help_section(lines, "Worktree-only", theme);
         push_help_message(
-            &mut lines,
+            lines,
             [HelpSegment::muted(
                 "Worktree actions unavailable in PR mode",
             )],
@@ -637,8 +716,14 @@ pub(crate) fn help_overlay_lines(
             theme,
         );
     }
+}
 
-    lines
+fn action_entry(
+    keybinds: KeybindMap,
+    action: BuiltinAction,
+    description: &'static str,
+) -> HelpEntry {
+    HelpEntry::text(command_key(keybinds.display(action)), description)
 }
 
 fn push_custom_commands_section(

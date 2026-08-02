@@ -70,6 +70,14 @@ enum CopyAction {
     SelectedFileDiff,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobalAiAction {
+    OpenHarnessPicker,
+    OpenPrompt,
+    ExplainCode,
+    SummarizeUnpublished,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StagingRequest {
     File {
@@ -389,34 +397,28 @@ impl App {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let branch_count = self.repository_overview.branches.len();
-        self.selected_branch_index = clamped_list_index(self.selected_branch_index, branch_count);
-        self.branch_scroll = visible_list_scroll(
+        let visible_rows = visible_list_rows(
             branch_count,
             self.selected_branch_index,
             self.branch_scroll,
             visible_height,
+            self.focus == FocusPane::Branches,
+            |selected_index| {
+                rows::branch_lines(
+                    &self.repository_overview.branches,
+                    selected_index,
+                    content_width,
+                    theme,
+                )
+            },
         );
-        let selected_index = (self.focus == FocusPane::Branches
-            && !self.repository_overview.branches.is_empty())
-        .then_some(self.selected_branch_index);
-        let lines = rows::branch_lines(
-            &self.repository_overview.branches,
-            selected_index,
-            content_width,
-            theme,
-        )
-        .into_iter()
-        .skip(self.branch_scroll)
-        .take(visible_height)
-        .collect::<Vec<_>>();
-        let mapped_row_count = lines
-            .len()
-            .min(branch_count.saturating_sub(self.branch_scroll));
+        self.selected_branch_index = visible_rows.selected_index;
+        self.branch_scroll = visible_rows.scroll;
         self.viewport
-            .begin_branches(area, self.branch_scroll, mapped_row_count);
+            .begin_branches(area, self.branch_scroll, visible_rows.mapped_row_count);
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
-            lines,
+            visible_rows.lines,
             0,
             visible_height,
             theme,
@@ -431,34 +433,28 @@ impl App {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let commit_count = self.repository_overview.commits.len();
-        self.selected_commit_index = clamped_list_index(self.selected_commit_index, commit_count);
-        self.commit_scroll = visible_list_scroll(
+        let visible_rows = visible_list_rows(
             commit_count,
             self.selected_commit_index,
             self.commit_scroll,
             visible_height,
+            self.focus == FocusPane::Commits,
+            |selected_index| {
+                rows::commit_lines(
+                    &self.repository_overview.commits,
+                    selected_index,
+                    content_width,
+                    theme,
+                )
+            },
         );
-        let selected_index = (self.focus == FocusPane::Commits
-            && !self.repository_overview.commits.is_empty())
-        .then_some(self.selected_commit_index);
-        let lines = rows::commit_lines(
-            &self.repository_overview.commits,
-            selected_index,
-            content_width,
-            theme,
-        )
-        .into_iter()
-        .skip(self.commit_scroll)
-        .take(visible_height)
-        .collect::<Vec<_>>();
-        let mapped_row_count = lines
-            .len()
-            .min(commit_count.saturating_sub(self.commit_scroll));
+        self.selected_commit_index = visible_rows.selected_index;
+        self.commit_scroll = visible_rows.scroll;
         self.viewport
-            .begin_commits(area, self.commit_scroll, mapped_row_count);
+            .begin_commits(area, self.commit_scroll, visible_rows.mapped_row_count);
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
-            lines,
+            visible_rows.lines,
             0,
             visible_height,
             theme,
@@ -862,31 +858,7 @@ impl App {
             return Ok(false);
         }
 
-        if self.should_open_harness_picker(key) {
-            self.open_harness_picker();
-            self.text_selection.clear();
-            self.ensure_scroll_bounds();
-            return Ok(true);
-        }
-
-        if self.should_open_ask_ai_prompt(key) {
-            self.open_ask_ai_prompt();
-            self.text_selection.clear();
-            self.ensure_scroll_bounds();
-            return Ok(true);
-        }
-
-        if self.should_queue_explain_code_request(key) {
-            self.queue_explain_code_request();
-            self.text_selection.clear();
-            self.ensure_scroll_bounds();
-            return Ok(true);
-        }
-
-        if self.should_queue_unpublished_summary_request(key) {
-            self.queue_unpublished_summary_request();
-            self.text_selection.clear();
-            self.ensure_scroll_bounds();
+        if self.handle_global_ai_key(key) {
             return Ok(true);
         }
 
@@ -1239,26 +1211,39 @@ impl App {
         }
     }
 
-    fn should_open_ask_ai_prompt(&self, key: KeyEvent) -> bool {
-        self.overlay.is_none()
-            && !self.search_prompt_open()
-            && self.keybinds.action_for(key) == Some(BuiltinAction::AskAi)
+    fn handle_global_ai_key(&mut self, key: KeyEvent) -> bool {
+        let Some(action) = self.global_ai_action_for_key(key) else {
+            return false;
+        };
+
+        match action {
+            GlobalAiAction::OpenHarnessPicker => self.open_harness_picker(),
+            GlobalAiAction::OpenPrompt => self.open_ask_ai_prompt(),
+            GlobalAiAction::ExplainCode => self.queue_explain_code_request(),
+            GlobalAiAction::SummarizeUnpublished => {
+                self.queue_unpublished_summary_request();
+            }
+        }
+        self.text_selection.clear();
+        self.ensure_scroll_bounds();
+        true
     }
 
-    fn should_open_harness_picker(&self, key: KeyEvent) -> bool {
-        self.overlay.is_none() && !self.search_prompt_open() && key.code == KeyCode::F(2)
-    }
+    fn global_ai_action_for_key(&self, key: KeyEvent) -> Option<GlobalAiAction> {
+        if self.overlay.is_some() || self.search_prompt_open() {
+            return None;
+        }
 
-    fn should_queue_explain_code_request(&self, key: KeyEvent) -> bool {
-        self.overlay.is_none()
-            && !self.search_prompt_open()
-            && self.keybinds.action_for(key) == Some(BuiltinAction::ExplainCode)
-    }
+        if key.code == KeyCode::F(2) {
+            return Some(GlobalAiAction::OpenHarnessPicker);
+        }
 
-    fn should_queue_unpublished_summary_request(&self, key: KeyEvent) -> bool {
-        self.overlay.is_none()
-            && !self.search_prompt_open()
-            && self.keybinds.action_for(key) == Some(BuiltinAction::UnpublishedSummary)
+        match self.keybinds.action_for(key) {
+            Some(BuiltinAction::AskAi) => Some(GlobalAiAction::OpenPrompt),
+            Some(BuiltinAction::ExplainCode) => Some(GlobalAiAction::ExplainCode),
+            Some(BuiltinAction::UnpublishedSummary) => Some(GlobalAiAction::SummarizeUnpublished),
+            _ => None,
+        }
     }
 
     fn focused_ask_ai_context(
@@ -1877,6 +1862,39 @@ fn saturating_u16(value: usize) -> u16 {
 
 fn clamped_list_index(index: usize, item_count: usize) -> usize {
     index.min(item_count.saturating_sub(1))
+}
+
+struct VisibleListRows {
+    selected_index: usize,
+    scroll: usize,
+    lines: Vec<Line<'static>>,
+    mapped_row_count: usize,
+}
+
+fn visible_list_rows(
+    item_count: usize,
+    selected_index: usize,
+    scroll: usize,
+    visible_height: usize,
+    focused: bool,
+    build_rows: impl FnOnce(Option<usize>) -> Vec<Line<'static>>,
+) -> VisibleListRows {
+    let selected_index = clamped_list_index(selected_index, item_count);
+    let scroll = visible_list_scroll(item_count, selected_index, scroll, visible_height);
+    let selected_for_render = (focused && item_count > 0).then_some(selected_index);
+    let lines = build_rows(selected_for_render)
+        .into_iter()
+        .skip(scroll)
+        .take(visible_height)
+        .collect::<Vec<_>>();
+    let mapped_row_count = lines.len().min(item_count.saturating_sub(scroll));
+
+    VisibleListRows {
+        selected_index,
+        scroll,
+        lines,
+        mapped_row_count,
+    }
 }
 
 fn visible_list_scroll(

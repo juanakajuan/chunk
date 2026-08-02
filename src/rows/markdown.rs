@@ -190,10 +190,7 @@ impl MarkdownRenderer {
         if let CodeBlockKind::Fenced(language) = kind
             && !language.is_empty()
         {
-            self.push_wrapped_line(Line::styled(
-                format!("```{language}"),
-                self.code_fence_style(),
-            ));
+            self.push_wrapped_line(Line::styled(format!("```{language}"), self.muted_style()));
         }
     }
 
@@ -228,7 +225,7 @@ impl MarkdownRenderer {
     fn append_inline_code(&mut self, text: &str) {
         self.ensure_line_prefix();
         self.current
-            .push(Span::styled(text.to_string(), self.inline_code_style()));
+            .push(Span::styled(text.to_string(), self.code_style()));
     }
 
     fn append_code_text(&mut self, text: &str) {
@@ -236,7 +233,7 @@ impl MarkdownRenderer {
             if row.is_empty() {
                 self.lines.push(Line::raw(""));
             } else {
-                self.push_wrapped_line(Line::styled(format!("  {row}"), self.code_block_style()));
+                self.push_wrapped_line(Line::styled(format!("  {row}"), self.code_style()));
             }
         }
     }
@@ -252,7 +249,7 @@ impl MarkdownRenderer {
         }
 
         for _ in 0..self.quote_depth {
-            self.current.push(Span::styled("│ ", self.quote_style()));
+            self.current.push(Span::styled("│ ", self.muted_style()));
         }
         if let Some(prefix) = &self.continuation_prefix {
             self.current
@@ -352,25 +349,13 @@ impl MarkdownRenderer {
         color_style(self.theme.muted, self.theme.background)
     }
 
-    fn quote_style(&self) -> Style {
-        color_style(self.theme.muted, self.theme.background)
-    }
-
     fn link_style(&self) -> Style {
         color_style(self.theme.syntax.link, self.theme.background)
             .add_modifier(Modifier::UNDERLINED)
     }
 
-    fn inline_code_style(&self) -> Style {
+    fn code_style(&self) -> Style {
         color_style(self.theme.syntax.string, self.theme.background_alt)
-    }
-
-    fn code_block_style(&self) -> Style {
-        color_style(self.theme.syntax.string, self.theme.background_alt)
-    }
-
-    fn code_fence_style(&self) -> Style {
-        color_style(self.theme.muted, self.theme.background)
     }
 }
 

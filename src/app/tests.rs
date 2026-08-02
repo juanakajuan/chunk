@@ -1703,85 +1703,78 @@ fn drive_harness_picker(app: &mut App, keys: &[KeyCode]) {
     }
 }
 
+fn take_effect<T>(app: &mut App, extract: impl FnMut(AppEffect) -> Option<T>) -> Option<T> {
+    app.take_effects().into_iter().find_map(extract)
+}
+
 fn take_clipboard_request(app: &mut App) -> Option<ClipboardRequest> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::CopyToClipboard(request) => Some(request),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::CopyToClipboard(request) => Some(request),
+        _ => None,
+    })
 }
 
 fn take_editor_request(app: &mut App) -> Option<crate::editor::EditorRequest> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::OpenEditor(request) => Some(request),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::OpenEditor(request) => Some(request),
+        _ => None,
+    })
 }
 
 fn take_custom_command_request(app: &mut App) -> Option<CustomCommandBinding> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::RunCustomCommand(command) => Some(command),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::RunCustomCommand(command) => Some(command),
+        _ => None,
+    })
 }
 
 fn take_custom_command_cancel_request(app: &mut App) -> bool {
-    app.take_effects()
-        .into_iter()
-        .any(|effect| matches!(effect, AppEffect::CancelCustomCommand))
+    take_effect(app, |effect| {
+        matches!(effect, AppEffect::CancelCustomCommand).then_some(())
+    })
+    .is_some()
 }
 
 fn take_ask_ai_request(app: &mut App) -> Option<AskAiRequest> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::RunAskAi { request, .. } => Some(request),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::RunAskAi { request, .. } => Some(request),
+        _ => None,
+    })
 }
 
 fn take_ask_ai_effect(app: &mut App) -> Option<(AiHarness, AskAiRequest)> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::RunAskAi { settings, request } => Some((settings.harness, request)),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::RunAskAi { settings, request } => Some((settings.harness, request)),
+        _ => None,
+    })
 }
 
 fn take_ask_ai_cancel_request(app: &mut App) -> bool {
-    app.take_effects()
-        .into_iter()
-        .any(|effect| matches!(effect, AppEffect::CancelAskAi))
+    take_effect(app, |effect| {
+        matches!(effect, AppEffect::CancelAskAi).then_some(())
+    })
+    .is_some()
 }
 
 fn take_unpublished_summary_request(app: &mut App) -> bool {
-    app.take_effects()
-        .into_iter()
-        .any(|effect| matches!(effect, AppEffect::RunUnpublishedSummary { .. }))
+    take_effect(app, |effect| {
+        matches!(effect, AppEffect::RunUnpublishedSummary { .. }).then_some(())
+    })
+    .is_some()
 }
 
 fn take_unpublished_summary_effect(app: &mut App) -> Option<AiHarness> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::RunUnpublishedSummary { settings } => Some(settings.harness),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::RunUnpublishedSummary { settings } => Some(settings.harness),
+        _ => None,
+    })
 }
 
 fn take_save_ai_harness_effect(app: &mut App) -> Option<AiHarness> {
-    app.take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            AppEffect::SaveAiSettings(settings) => Some(settings.harness),
-            _ => None,
-        })
+    take_effect(app, |effect| match effect {
+        AppEffect::SaveAiSettings(settings) => Some(settings.harness),
+        _ => None,
+    })
 }
 
 fn app_with_config(config: AppConfig) -> App {

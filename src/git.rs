@@ -170,27 +170,26 @@ pub(crate) fn toggle_staging_for_file(path: &str) -> Result<()> {
 }
 
 pub(crate) fn stage_files(paths: &[String]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-
-    let root = worktree_root()?;
-    let mut command = git_command(&root);
-    command.args(["add", "--"]);
-    command.args(paths);
-    checked_output(&mut command, "git add failed").map(|_| ())
+    run_git_path_action(paths, &["add"], "git add failed")
 }
 
 pub(crate) fn unstage_files(paths: &[String]) -> Result<()> {
+    run_git_path_action(
+        paths,
+        &["restore", "--staged"],
+        "git restore --staged failed",
+    )
+}
+
+fn run_git_path_action(paths: &[String], args: &[&str], context: &str) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
 
     let root = worktree_root()?;
     let mut command = git_command(&root);
-    command.args(["restore", "--staged", "--"]);
-    command.args(paths);
-    checked_output(&mut command, "git restore --staged failed").map(|_| ())
+    command.args(args).arg("--").args(paths);
+    checked_output(&mut command, context).map(|_| ())
 }
 
 pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Result<()> {
@@ -1011,7 +1010,7 @@ fn has_file_diff_in(root: &Path, path: &str, cached: bool) -> Result<bool> {
 mod tests {
     use std::fs;
     use std::io::Cursor;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -1114,13 +1113,7 @@ mod tests {
 
     #[test]
     fn toggle_hunk_staging_moves_only_selected_hunk() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::write("sample.txt", numbered_lines()).unwrap();
         run_git(["add", "sample.txt"]);
         run_git(["commit", "-m", "initial"]);
@@ -1156,21 +1149,13 @@ mod tests {
         let unstaged = git_output(["diff", "--", "sample.txt"]);
         assert!(unstaged.contains("line two"));
         assert!(unstaged.contains("line eighteen"));
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn toggle_hunk_staging_handles_git_quoted_paths() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
+        let _repo = TestRepo::new();
         let path = "tab\tfile.txt";
 
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
         fs::write(path, "old\n").unwrap();
         run_git(["add", path]);
         run_git(["commit", "-m", "initial"]);
@@ -1189,20 +1174,11 @@ mod tests {
         assert!(cached.contains("new"));
         let unstaged = git_output(["diff", "--", path]);
         assert!(unstaged.is_empty());
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn discard_hunk_reverts_only_selected_unstaged_hunk() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::write("sample.txt", numbered_lines()).unwrap();
         run_git(["add", "sample.txt"]);
         run_git(["commit", "-m", "initial"]);
@@ -1220,20 +1196,11 @@ mod tests {
         let content = fs::read_to_string("sample.txt").unwrap();
         assert!(content.contains("line 2\n"));
         assert!(content.contains("line eighteen\n"));
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn discard_file_reverts_unstaged_changes_and_preserves_index() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::write("sample.txt", numbered_lines()).unwrap();
         run_git(["add", "sample.txt"]);
         run_git(["commit", "-m", "initial"]);
@@ -1253,20 +1220,11 @@ mod tests {
         let content = fs::read_to_string("sample.txt").unwrap();
         assert!(content.contains("line two\n"));
         assert!(content.contains("line 18\n"));
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn discard_file_removes_untracked_file() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::write("sample.txt", "base\n").unwrap();
         run_git(["add", "sample.txt"]);
         run_git(["commit", "-m", "initial"]);
@@ -1276,26 +1234,17 @@ mod tests {
         discard_worktree_file("new.txt").unwrap();
 
         assert!(!Path::new("new.txt").exists());
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn worktree_diff_uses_root_relative_paths_for_untracked_files_from_subdir() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let repo = TestRepo::new();
         fs::create_dir_all("crates/clickup_graph/src/tui").unwrap();
         fs::write("crates/clickup_graph/src/tui/mod.rs", "base\n").unwrap();
         run_git(["add", "."]);
         run_git(["commit", "-m", "initial"]);
 
-        let subdir_cwd = CurrentDirGuard::enter(&root.join("crates/clickup_graph"));
+        let subdir_cwd = CurrentDirGuard::enter(&repo.root.join("crates/clickup_graph"));
         fs::write("src/tui/mod.rs", "changed\n").unwrap();
         fs::write("src/tui/app.rs", "new\n").unwrap();
 
@@ -1315,21 +1264,14 @@ mod tests {
         );
 
         drop(subdir_cwd);
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn unpublished_diff_text_includes_local_commits_index_worktree_and_untracked_files() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
+        let _repo = TestRepo::new();
         let remote = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
 
         run_git(["init", "--bare", remote.to_str().expect("remote path")]);
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
         run_git(["branch", "-M", "main"]);
         run_git([
             "remote",
@@ -1363,20 +1305,12 @@ mod tests {
         assert!(diff.text.contains("new.txt"));
         assert!(diff.text.contains("untracked change"));
 
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(remote).unwrap();
     }
 
     #[test]
     fn discard_files_reverts_multiple_worktree_paths() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::create_dir_all("src").unwrap();
         fs::write("src/a.txt", "a base\n").unwrap();
         fs::write("src/b.txt", "b base\n").unwrap();
@@ -1404,20 +1338,11 @@ mod tests {
             "outside changed\n"
         );
         assert!(git_output(["diff", "--", "src/a.txt", "src/b.txt"]).is_empty());
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn stage_files_stages_multiple_worktree_paths() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::create_dir_all("src").unwrap();
         fs::write("src/a.txt", "a base\n").unwrap();
         fs::write("src/b.txt", "b base\n").unwrap();
@@ -1447,20 +1372,11 @@ mod tests {
         assert!(!unstaged.contains("src/a.txt"));
         assert!(!unstaged.contains("src/b.txt"));
         assert!(unstaged.contains("outside.txt"));
-
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn unstage_files_unstages_multiple_worktree_paths() {
-        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
-        let root = temp_root();
-        let cwd = CurrentDirGuard::enter(&root);
-
-        run_git(["init"]);
-        run_git(["config", "user.email", "chunk@example.test"]);
-        run_git(["config", "user.name", "Chunk Test"]);
+        let _repo = TestRepo::new();
         fs::create_dir_all("src").unwrap();
         fs::write("src/a.txt", "a base\n").unwrap();
         fs::write("src/b.txt", "b base\n").unwrap();
@@ -1483,9 +1399,41 @@ mod tests {
         let unstaged = git_output(["diff", "--name-only"]);
         assert!(unstaged.contains("src/a.txt"));
         assert!(unstaged.contains("src/b.txt"));
+    }
 
-        drop(cwd);
-        fs::remove_dir_all(root).unwrap();
+    struct TestRepo {
+        root: PathBuf,
+        cwd: Option<CurrentDirGuard>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+            let root = temp_root();
+            let cwd = CurrentDirGuard::enter(&root);
+
+            run_git(["init"]);
+            run_git(["config", "user.email", "chunk@example.test"]);
+            run_git(["config", "user.name", "Chunk Test"]);
+
+            Self {
+                root,
+                cwd: Some(cwd),
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            drop(self.cwd.take());
+            if std::thread::panicking() {
+                let _ = fs::remove_dir_all(&self.root);
+            } else {
+                fs::remove_dir_all(&self.root).expect("remove test repository");
+            }
+        }
     }
 
     struct CurrentDirGuard {

@@ -542,27 +542,23 @@ fn render_file_entry(input: FileEntryRenderInput<'_>) -> Vec<Line<'static>> {
     let file_name = sidebar_file_label(file);
     let stats = format_file_stats(file);
     let stats_width = stats_width(&stats);
-    let content_capacity = content_width;
     let reserved_stats_width = stats_width
         .saturating_add(usize::from(stats_width > 0))
-        .min(content_capacity);
-    let fixed_content_width = display_width(&tree_prefix)
+        .min(content_width);
+    let leading_width = display_width(&tree_prefix)
         .saturating_add(display_width(icon))
-        .saturating_add(1)
-        .saturating_add(reserved_stats_width);
+        .saturating_add(1);
     let file_name = truncate_to_width(
         &file_name,
-        content_capacity.saturating_sub(fixed_content_width),
+        content_width.saturating_sub(leading_width.saturating_add(reserved_stats_width)),
     );
-    let used_without_padding = display_width(&tree_prefix)
-        .saturating_add(display_width(icon))
-        .saturating_add(1)
+    let used_without_padding = leading_width
         .saturating_add(display_width(&file_name))
         .saturating_add(stats_width);
     let padding = if stats_width == 0 {
         String::new()
     } else {
-        " ".repeat(content_capacity.saturating_sub(used_without_padding))
+        " ".repeat(content_width.saturating_sub(used_without_padding))
     };
 
     let mut content_spans = Vec::new();
@@ -628,7 +624,6 @@ fn render_folder_entry(
     let muted_style = color_style(theme.muted, row_background);
     let folder_icon = if expanded { "\u{e5fe}" } else { "\u{e5ff}" };
     let chevron = if expanded { "▾" } else { "▸" };
-    let content_capacity = content_width;
     let tree_prefix = tree_folder_prefix(depth);
     let fixed_content_width = display_width(&tree_prefix)
         .saturating_add(display_width(chevron))
@@ -642,7 +637,7 @@ fn render_folder_entry(
     };
     let label = truncate_to_width(
         &folder_label,
-        content_capacity.saturating_sub(fixed_content_width),
+        content_width.saturating_sub(fixed_content_width),
     );
     let content_spans = vec![
         Span::styled(tree_prefix, muted_style),

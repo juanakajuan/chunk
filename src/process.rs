@@ -186,24 +186,22 @@ pub(crate) struct ProcessOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProcessStatus {
-    success: bool,
-    code: Option<i32>,
-    cancelled: bool,
-    start_error: Option<String>,
+enum ProcessStatus {
+    Completed { success: bool, code: Option<i32> },
+    Cancelled { code: Option<i32> },
+    NotStarted { error: String },
 }
 
 impl ProcessOutcome {
     /// A process that ran to completion, successful or not.
     pub(crate) fn from_output(output: Output) -> Self {
+        let (stdout, stderr, status) = decode_output(output);
         Self {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            status: ProcessStatus {
-                success: output.status.success(),
-                code: output.status.code(),
-                cancelled: false,
-                start_error: None,
+            stdout,
+            stderr,
+            status: ProcessStatus::Completed {
+                success: status.success(),
+                code: status.code(),
             },
         }
     }
@@ -213,11 +211,9 @@ impl ProcessOutcome {
         Self {
             stdout: stdout.into(),
             stderr: String::new(),
-            status: ProcessStatus {
+            status: ProcessStatus::Completed {
                 success: true,
                 code: Some(0),
-                cancelled: false,
-                start_error: None,
             },
         }
     }
@@ -225,26 +221,18 @@ impl ProcessOutcome {
     /// A process killed on the caller's request, keeping whatever partial output
     /// it had produced.
     pub(crate) fn cancelled(output: Option<Output>) -> Self {
-        let (stdout, stderr, code) = output.map_or_else(
-            || (String::new(), String::new(), None),
-            |output| {
-                (
-                    String::from_utf8_lossy(&output.stdout).to_string(),
-                    String::from_utf8_lossy(&output.stderr).to_string(),
-                    output.status.code(),
-                )
-            },
-        );
+        let (stdout, stderr, code) = match output {
+            Some(output) => {
+                let (stdout, stderr, status) = decode_output(output);
+                (stdout, stderr, status.code())
+            }
+            None => (String::new(), String::new(), None),
+        };
 
         Self {
             stdout,
             stderr,
-            status: ProcessStatus {
-                success: false,
-                code,
-                cancelled: true,
-                start_error: None,
-            },
+            status: ProcessStatus::Cancelled { code },
         }
     }
 
@@ -254,12 +242,7 @@ impl ProcessOutcome {
         Self {
             stdout: String::new(),
             stderr: error.clone(),
-            status: ProcessStatus {
-                success: false,
-                code: None,
-                cancelled: false,
-                start_error: Some(error),
-            },
+            status: ProcessStatus::NotStarted { error },
         }
     }
 
@@ -272,25 +255,30 @@ impl ProcessOutcome {
     }
 
     pub(crate) fn success(&self) -> bool {
-        self.status.success
+        matches!(&self.status, ProcessStatus::Completed { success: true, .. })
     }
 
     pub(crate) fn cancelled_status(&self) -> bool {
-        self.status.cancelled
+        matches!(&self.status, ProcessStatus::Cancelled { .. })
     }
 
     /// One-line, human-readable description of how the process ended.
     pub(crate) fn status_text(&self) -> String {
-        if self.status.cancelled {
-            return "cancelled".to_string();
-        }
-        if let Some(error) = &self.status.start_error {
-            return format!("failed to start: {error}");
-        }
-
-        match self.status.code {
-            Some(code) => format!("exit {code}"),
-            None => "terminated by signal".to_string(),
+        match &self.status {
+            ProcessStatus::Completed {
+                code: Some(code), ..
+            } => format!("exit {code}"),
+            ProcessStatus::Completed { code: None, .. } => "terminated by signal".to_string(),
+            ProcessStatus::Cancelled { code: _ } => "cancelled".to_string(),
+            ProcessStatus::NotStarted { error } => format!("failed to start: {error}"),
         }
     }
+}
+
+fn decode_output(output: Output) -> (String, String, ExitStatus) {
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status,
+    )
 }

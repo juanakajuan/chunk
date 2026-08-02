@@ -108,6 +108,15 @@ impl<T: Send + 'static> BackgroundTask<T> {
     }
 }
 
+fn start_task_if_idle<T>(
+    slot: &mut Option<BackgroundTask<T>>,
+    start: impl FnOnce() -> BackgroundTask<T>,
+) {
+    if slot.is_none() {
+        *slot = Some(start());
+    }
+}
+
 /// Take a finished task's result and join its worker, or `None` while it runs.
 /// A worker that vanished without sending yields the task's fallback result.
 fn finish_task<T>(slot: &mut Option<BackgroundTask<T>>) -> Option<T> {
@@ -454,21 +463,19 @@ fn start_requested_custom_command(
     command: CustomCommandBinding,
     custom_command_task: &mut Option<BackgroundTask<CustomCommandResult>>,
 ) {
-    if custom_command_task.is_some() {
-        return;
-    }
-
-    let run_command = command.clone();
-    *custom_command_task = Some(BackgroundTask::spawn(
-        move |cancel| run_custom_command(&run_command, cancel),
-        move || {
-            CustomCommandResult::not_started(
-                &command,
-                None,
-                "command runner stopped before reporting a result",
-            )
-        },
-    ));
+    start_task_if_idle(custom_command_task, move || {
+        let run_command = command.clone();
+        BackgroundTask::spawn(
+            move |cancel| run_custom_command(&run_command, cancel),
+            move || {
+                CustomCommandResult::not_started(
+                    &command,
+                    None,
+                    "command runner stopped before reporting a result",
+                )
+            },
+        )
+    });
 }
 
 fn start_requested_ask_ai(
@@ -476,42 +483,38 @@ fn start_requested_ask_ai(
     request: AskAiRequest,
     ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
 ) {
-    if ask_ai_task.is_some() {
-        return;
-    }
-
-    let run_request = request.clone();
-    let fallback_harness = settings.harness;
-    *ask_ai_task = Some(BackgroundTask::spawn(
-        move |cancel| run_ask_ai_request(settings, run_request, cancel),
-        move || {
-            AskAiResult::not_started(
-                request,
-                None,
-                ask_ai_runner_stopped_message(fallback_harness),
-            )
-        },
-    ));
+    start_task_if_idle(ask_ai_task, move || {
+        let run_request = request.clone();
+        let fallback_harness = settings.harness;
+        BackgroundTask::spawn(
+            move |cancel| run_ask_ai_request(settings, run_request, cancel),
+            move || {
+                AskAiResult::not_started(
+                    request,
+                    None,
+                    ask_ai_runner_stopped_message(fallback_harness),
+                )
+            },
+        )
+    });
 }
 
 fn start_requested_unpublished_summary(
     settings: AiSettings,
     ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
 ) {
-    if ask_ai_task.is_some() {
-        return;
-    }
-
-    let fallback_harness = settings.harness;
-    *ask_ai_task = Some(BackgroundTask::spawn(
-        move |cancel| run_unpublished_summary_request(settings, cancel),
-        move || {
-            AskAiResult::unpublished_summary_not_started(
-                None,
-                ask_ai_runner_stopped_message(fallback_harness),
-            )
-        },
-    ));
+    start_task_if_idle(ask_ai_task, move || {
+        let fallback_harness = settings.harness;
+        BackgroundTask::spawn(
+            move |cancel| run_unpublished_summary_request(settings, cancel),
+            move || {
+                AskAiResult::unpublished_summary_not_started(
+                    None,
+                    ask_ai_runner_stopped_message(fallback_harness),
+                )
+            },
+        )
+    });
 }
 
 fn ask_ai_runner_stopped_message(harness: AiHarness) -> String {
