@@ -18,10 +18,12 @@ mod diff;
 mod file_summary;
 mod intraline;
 mod markdown;
+mod repository;
 mod sidebar;
 mod text;
 
 pub(crate) use diff::{diff_layout_counts, diff_lines_until, selected_hunk_header_rows};
+pub(crate) use repository::{branch_lines, commit_lines};
 pub(crate) use sidebar::{SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
 pub(crate) use sidebar::{sidebar_row_counts, sidebar_rows, visible_sidebar_targets};
 

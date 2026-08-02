@@ -12,7 +12,7 @@ use color_eyre::eyre::{Result, eyre};
 use crate::ask_ai::AskAiReviewMode;
 use crate::editor::EditorRequest;
 use crate::git;
-use crate::model::{Changeset, DiffFile, FileStatus};
+use crate::model::{Changeset, DiffFile, FileStatus, RepositoryOverview};
 
 const NO_TRACKED_CHANGES: &str = "No tracked changes";
 const NO_DIFF_MESSAGE: &str = "No diff to review. Make a tracked change, then run chunk diff.";
@@ -23,6 +23,7 @@ const NO_PR_DIFF_MESSAGE: &str = "No diff to review. Current branch has no chang
 pub(crate) struct LoadedReview {
     pub(crate) source: ReviewSource,
     pub(crate) changeset: Changeset,
+    pub(crate) repository_overview: RepositoryOverview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,19 @@ impl LoadedReview {
         Self {
             source: ReviewSource::worktree(),
             changeset,
+            repository_overview: RepositoryOverview::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worktree_with_repository_overview(
+        changeset: Changeset,
+        repository_overview: RepositoryOverview,
+    ) -> Self {
+        Self {
+            source: ReviewSource::worktree(),
+            changeset,
+            repository_overview,
         }
     }
 }
@@ -72,7 +86,12 @@ impl ReviewSource {
     pub(crate) fn load_worktree() -> Result<LoadedReview> {
         let source = Self::worktree();
         let changeset = source.reload()?;
-        Ok(LoadedReview { source, changeset })
+        let repository_overview = source.repository_overview()?;
+        Ok(LoadedReview {
+            source,
+            changeset,
+            repository_overview,
+        })
     }
 
     pub(crate) fn load_pull_request(base: Option<&str>) -> Result<LoadedReview> {
@@ -87,6 +106,7 @@ impl ReviewSource {
         Ok(LoadedReview {
             source,
             changeset: diff.changeset,
+            repository_overview: git::load_repository_overview()?,
         })
     }
 
@@ -109,6 +129,10 @@ impl ReviewSource {
             Self::Worktree(source) => source.reload(),
             Self::PullRequest(source) => source.reload(),
         }
+    }
+
+    pub(crate) fn repository_overview(&self) -> Result<RepositoryOverview> {
+        git::load_repository_overview()
     }
 
     pub(crate) fn load_source_snapshots(&self, file: &mut DiffFile) {

@@ -10,10 +10,14 @@ use std::process::{Child, Command, Output, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::model::{Changeset, DiffFile, DiffHunk, FileStage, SourceSnapshot};
+use crate::model::{
+    Changeset, CommitSummary, DiffFile, DiffHunk, FileStage, LocalBranch, RepositoryOverview,
+    SourceSnapshot,
+};
 use crate::patch::{hunk_overlaps_file, overlapping_hunk_patch, parse_unified_diff};
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 512 * 1024;
+const MAX_RECENT_COMMITS: &str = "100";
 const DEFAULT_BASE_REFS: [&str; 3] = ["origin/HEAD", "main", "master"];
 const GIT_DIFF_PATCH_ARGS: [&str; 4] = [
     "--no-color",
@@ -51,6 +55,72 @@ pub(crate) fn load_unpublished_diff_text() -> Result<LoadedUnpublishedDiff> {
     let text = load_unpublished_patch(&repo_root, &untracked_paths)?;
 
     Ok(LoadedUnpublishedDiff { repo_root, text })
+}
+
+pub(crate) fn load_repository_overview() -> Result<RepositoryOverview> {
+    let root = worktree_root()?;
+    Ok(RepositoryOverview {
+        branches: load_local_branches(&root)?,
+        commits: load_recent_commits(&root)?,
+    })
+}
+
+fn load_local_branches(root: &Path) -> Result<Vec<LocalBranch>> {
+    let output = checked_output(
+        git_command(root).args([
+            "for-each-ref",
+            "--format=%(HEAD)%00%(refname:short)",
+            "refs/heads",
+        ]),
+        "git branch listing failed",
+    )?;
+    let mut branches = parse_local_branches(&stdout_text(&output));
+    branches.sort_by_key(|branch| !branch.current);
+    Ok(branches)
+}
+
+fn parse_local_branches(output: &str) -> Vec<LocalBranch> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (head, name) = line.split_once('\0')?;
+            (!name.is_empty()).then(|| LocalBranch {
+                name: name.to_string(),
+                current: head == "*",
+            })
+        })
+        .collect()
+}
+
+fn load_recent_commits(root: &Path) -> Result<Vec<CommitSummary>> {
+    if git_stdout_in(root, ["rev-parse", "--verify", "HEAD"]).is_none() {
+        return Ok(Vec::new());
+    }
+
+    let output = checked_output(
+        git_command(root).args([
+            "log",
+            "--max-count",
+            MAX_RECENT_COMMITS,
+            "--pretty=format:%h%x00%s",
+            "HEAD",
+        ]),
+        "git commit listing failed",
+    )?;
+    Ok(parse_commit_summaries(&stdout_text(&output)))
+}
+
+fn parse_commit_summaries(output: &str) -> Vec<CommitSummary> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (short_id, subject) = line.split_once('\0')?;
+            (!short_id.is_empty()).then(|| CommitSummary {
+                short_id: short_id.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
@@ -948,6 +1018,46 @@ mod tests {
     use crate::model::{DiffHunk, FileStatus};
 
     static GIT_CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parses_local_branches_and_recognizes_current_branch() {
+        let branches = parse_local_branches(" \0feature/search\n*\0main\nmalformed\n");
+
+        assert_eq!(
+            branches,
+            vec![
+                LocalBranch {
+                    name: "feature/search".to_string(),
+                    current: false,
+                },
+                LocalBranch {
+                    name: "main".to_string(),
+                    current: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_recent_commit_summaries() {
+        let commits = parse_commit_summaries(
+            "abc1234\0feat: add panels\ndef5678\0fix: keep layout stable\nmalformed\n",
+        );
+
+        assert_eq!(
+            commits,
+            vec![
+                CommitSummary {
+                    short_id: "abc1234".to_string(),
+                    subject: "feat: add panels".to_string(),
+                },
+                CommitSummary {
+                    short_id: "def5678".to_string(),
+                    subject: "fix: keep layout stable".to_string(),
+                },
+            ]
+        );
+    }
 
     #[test]
     fn source_snapshots_load_only_pre_hunk_prefix() {

@@ -16,6 +16,7 @@ use crate::viewport::DiffScrollbar;
 
 const SIDEBAR_WIDTH: u16 = 34;
 const MIN_SPLIT_WIDTH: u16 = 100;
+const NARROW_SIDEBAR_HEIGHT: u16 = 12;
 const PANE_BORDER_WIDTH: u16 = 2;
 const HELP_OVERLAY_WIDTH: u16 = 78;
 const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
@@ -49,7 +50,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
         .constraints([Constraint::Length(sidebar_size), Constraint::Min(0)])
         .split(area);
 
-    render_sidebar(frame, chunks[0], app, theme);
+    render_sidebar_stack(frame, chunks[0], app, theme);
     render_diff(frame, chunks[1], app, theme);
 }
 
@@ -59,15 +60,50 @@ fn body_layout(area: Rect) -> (Direction, u16) {
         return (Direction::Horizontal, sidebar_width);
     }
 
-    (Direction::Vertical, area.height.min(9))
+    (Direction::Vertical, area.height.min(NARROW_SIDEBAR_HEIGHT))
 }
 
-fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+fn render_sidebar_stack(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Ratio(2, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+        ])
+        .split(area);
+
+    render_files(frame, chunks[0], app, theme);
+    render_branches(frame, chunks[1], app, theme);
+    render_commits(frame, chunks[2], app, theme);
+}
+
+fn render_files(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
     let lines = app.sidebar_rows(area, content_width, inner_height, theme);
     let block = pane_block(" Files ", app.focus(), FocusPane::Sidebar, theme);
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_branches(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+    let inner_height = area.height.saturating_sub(2).max(1) as usize;
+    let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let lines = app.branch_panel_rows(area, content_width, inner_height, theme);
+    frame.render_widget(
+        Paragraph::new(lines).block(passive_pane_block(" Branches ", theme)),
+        area,
+    );
+}
+
+fn render_commits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
+    let inner_height = area.height.saturating_sub(2).max(1) as usize;
+    let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let lines = app.commit_panel_rows(area, content_width, inner_height, theme);
+    frame.render_widget(
+        Paragraph::new(lines).block(passive_pane_block(" Commits ", theme)),
+        area,
+    );
 }
 
 fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
@@ -431,7 +467,14 @@ fn pane_block(
     target_focus: FocusPane,
     theme: Theme,
 ) -> Block<'static> {
-    let focused = current_focus == target_focus;
+    styled_pane_block(title, current_focus == target_focus, theme)
+}
+
+fn passive_pane_block(title: impl Into<String>, theme: Theme) -> Block<'static> {
+    styled_pane_block(title, false, theme)
+}
+
+fn styled_pane_block(title: impl Into<String>, focused: bool, theme: Theme) -> Block<'static> {
     let border_color = if focused {
         theme.border_active
     } else {
@@ -479,7 +522,7 @@ mod tests {
 
     use crate::config::AppConfig;
     use crate::custom_command::{CommandKey, CustomCommandBinding};
-    use crate::model::Changeset;
+    use crate::model::{Changeset, CommitSummary, LocalBranch, RepositoryOverview};
     use crate::review_source::LoadedReview;
     use crate::theme::ThemeName;
 
@@ -537,6 +580,43 @@ mod tests {
         assert!(
             has_accent_key,
             "footer f key should render with accent fill:\n{footer_debug}"
+        );
+    }
+
+    #[test]
+    fn sidebar_stack_draws_branches_and_commits_below_files() {
+        let mut app = App::with_config(
+            LoadedReview::worktree_with_repository_overview(
+                Changeset {
+                    title: String::new(),
+                    source_label: String::new(),
+                    files: Vec::new(),
+                },
+                RepositoryOverview {
+                    branches: vec![LocalBranch {
+                        name: "main".to_string(),
+                        current: true,
+                    }],
+                    commits: vec![CommitSummary {
+                        short_id: "abc1234".to_string(),
+                        subject: "Add repository panels".to_string(),
+                    }],
+                },
+            ),
+            AppConfig::default(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = buffer_text(terminal.backend().buffer());
+
+        assert!(buffer.contains("Files"), "buffer was {buffer}");
+        assert!(buffer.contains("Branches"), "buffer was {buffer}");
+        assert!(buffer.contains("* main"), "buffer was {buffer}");
+        assert!(buffer.contains("Commits"), "buffer was {buffer}");
+        assert!(
+            buffer.contains("abc1234 Add repository panels"),
+            "buffer was {buffer}"
         );
     }
 

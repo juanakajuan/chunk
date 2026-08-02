@@ -19,7 +19,7 @@ use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::diff_render::DiffRenderState;
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
-use crate::model::{Changeset, DiffFile, DiffHunk, FileStage};
+use crate::model::{Changeset, DiffFile, DiffHunk, FileStage, RepositoryOverview};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource, WorktreeMutation};
 use crate::rows::{self, SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
@@ -197,6 +197,8 @@ pub(crate) struct App {
     source: ReviewSource,
     /// Current diff data being reviewed.
     changeset: Changeset,
+    /// Read-only local branches and recent commits shown below Files.
+    repository_overview: RepositoryOverview,
     /// Last live reload/watch error, rendered above the diff when present.
     live_error: Option<String>,
     /// Last successful background/status event, rendered above the diff.
@@ -256,7 +258,11 @@ impl App {
     }
 
     pub(crate) fn with_config(review: LoadedReview, config: AppConfig) -> Self {
-        let LoadedReview { source, changeset } = review;
+        let LoadedReview {
+            source,
+            changeset,
+            repository_overview,
+        } = review;
         let file_count = changeset.files.len();
         let diff_pane = DiffPaneState::new(&changeset);
         let sidebar_cursor_target =
@@ -264,6 +270,7 @@ impl App {
         Self {
             source,
             changeset,
+            repository_overview,
             live_error: None,
             live_notice: None,
             selected_file_index: 0,
@@ -350,6 +357,40 @@ impl App {
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             rendered_rows.lines,
+            0,
+            visible_height,
+            theme,
+        )
+    }
+
+    pub(crate) fn branch_panel_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let lines = rows::branch_lines(&self.repository_overview.branches, theme);
+        self.text_selection.decorate_visible_lines(
+            pane_text_area(area, content_width, visible_height),
+            lines,
+            0,
+            visible_height,
+            theme,
+        )
+    }
+
+    pub(crate) fn commit_panel_rows(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let lines = rows::commit_lines(&self.repository_overview.commits, theme);
+        self.text_selection.decorate_visible_lines(
+            pane_text_area(area, content_width, visible_height),
+            lines,
             0,
             visible_height,
             theme,
@@ -642,8 +683,20 @@ impl App {
 
     pub(crate) fn reload_review_source(&mut self, preserve_scroll: bool) {
         match self.source.reload() {
-            Ok(changeset) => self.apply_reloaded_changeset(changeset, preserve_scroll),
+            Ok(changeset) => {
+                self.apply_reloaded_changeset(changeset, preserve_scroll);
+                self.reload_repository_overview();
+            }
             Err(error) => self.live_error = Some(format!("reload failed: {error}")),
+        }
+    }
+
+    fn reload_repository_overview(&mut self) {
+        match self.source.repository_overview() {
+            Ok(repository_overview) => self.repository_overview = repository_overview,
+            Err(error) => {
+                self.live_error = Some(format!("repository overview reload failed: {error}"));
+            }
         }
     }
 

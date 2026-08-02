@@ -1,5 +1,26 @@
 use std::sync::Arc;
 
+/// Read-only repository context shown below the changed-files tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RepositoryOverview {
+    pub(crate) branches: Vec<LocalBranch>,
+    pub(crate) commits: Vec<CommitSummary>,
+}
+
+/// One local Git branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalBranch {
+    pub(crate) name: String,
+    pub(crate) current: bool,
+}
+
+/// One recent commit reachable from `HEAD`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitSummary {
+    pub(crate) short_id: String,
+    pub(crate) subject: String,
+}
+
 /// A complete diff review session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Changeset {
