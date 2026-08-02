@@ -78,7 +78,6 @@ claude_effort = "xhigh"
 codex_model = "gpt-5.6-sol"
 codex_effort = "high"
 
-test1
 [keybinds]
 quit = "Q"
 discard = "D"

@@ -154,7 +154,10 @@ fn reloaded_sidebar_target(
 
 fn folder_exists(changeset: &Changeset, folder_path: &str) -> bool {
     if folder_path.is_empty() {
-        return !changeset.files.is_empty();
+        return changeset
+            .files
+            .iter()
+            .any(|file| !file.display_path().contains('/'));
     }
 
     changeset
@@ -270,6 +273,27 @@ mod tests {
         let replacement = ReviewSessionReplacement::plan(
             snapshot,
             changeset(vec![file("tests/a.rs", vec![hunk(1, 1, 1, 1)])]),
+            true,
+        );
+
+        assert_eq!(replacement.sidebar_target, None);
+    }
+
+    #[test]
+    fn replacement_drops_root_target_when_root_file_disappears() {
+        let current = changeset(vec![file("README.md", vec![hunk(1, 1, 1, 1)])]);
+        let snapshot = ReviewSessionSnapshot::capture(
+            Some(&current.files[0]),
+            0,
+            Some(&current.files[0].hunks[0]),
+            Some(0),
+            2,
+            Some(SidebarRowTarget::Folder(String::new())),
+        );
+
+        let replacement = ReviewSessionReplacement::plan(
+            snapshot,
+            changeset(vec![file("src/lib.rs", vec![hunk(1, 1, 1, 1)])]),
             true,
         );
 

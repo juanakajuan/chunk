@@ -349,6 +349,17 @@ impl TreeNode {
         collapsed_dirs: &HashSet<String>,
         entries: &mut Vec<SidebarEntry>,
     ) {
+        self.flatten_directories(prefix, depth, collapsed_dirs, entries);
+        self.flatten_files(depth, entries);
+    }
+
+    fn flatten_directories(
+        &self,
+        prefix: &str,
+        depth: usize,
+        collapsed_dirs: &HashSet<String>,
+        entries: &mut Vec<SidebarEntry>,
+    ) {
         for (name, node) in &self.dirs {
             let path = child_path(prefix, name);
             let expanded = !collapsed_dirs.contains(&path);
@@ -362,7 +373,9 @@ impl TreeNode {
                 node.flatten(&path, depth + 1, collapsed_dirs, entries);
             }
         }
+    }
 
+    fn flatten_files(&self, depth: usize, entries: &mut Vec<SidebarEntry>) {
         let mut files = self.files.iter().collect::<Vec<_>>();
         files.sort_by(|left, right| {
             left.name
@@ -386,15 +399,21 @@ fn sidebar_entries(files: &[DiffFile], collapsed_dirs: &HashSet<String>) -> Vec<
         root.insert_file(file.display_path(), index);
     }
 
-    let expanded = !collapsed_dirs.contains("");
-    let mut entries = vec![SidebarEntry::Folder {
-        path: String::new(),
-        name: "/".to_string(),
-        depth: 0,
-        expanded,
-    }];
-    if expanded {
-        root.flatten("", 1, collapsed_dirs, &mut entries);
+    let mut entries = Vec::new();
+    if root.files.is_empty() {
+        root.flatten("", 0, collapsed_dirs, &mut entries);
+    } else {
+        let expanded = !collapsed_dirs.contains("");
+        entries.push(SidebarEntry::Folder {
+            path: String::new(),
+            name: "/".to_string(),
+            depth: 0,
+            expanded,
+        });
+        if expanded {
+            root.flatten_files(1, &mut entries);
+            root.flatten_directories("", 1, collapsed_dirs, &mut entries);
+        }
     }
     entries
 }
@@ -920,12 +939,12 @@ mod tests {
         let texts = rows.lines.iter().map(line_text).collect::<Vec<_>>();
         assert!(texts[0].starts_with("▾ "), "rows were: {texts:?}");
         assert!(texts[0].contains("/"), "rows were: {texts:?}");
-        assert!(texts[1].contains("src/"), "rows were: {texts:?}");
-        assert!(texts[2].contains("bin/"), "rows were: {texts:?}");
-        assert!(texts[3].contains("chunk.rs"), "rows were: {texts:?}");
-        assert!(texts[4].contains("app.rs"), "rows were: {texts:?}");
-        assert!(texts[5].contains("config.rs"), "rows were: {texts:?}");
-        assert!(texts[6].contains("README.md"), "rows were: {texts:?}");
+        assert!(texts[1].contains("README.md"), "rows were: {texts:?}");
+        assert!(texts[2].contains("src/"), "rows were: {texts:?}");
+        assert!(texts[3].contains("bin/"), "rows were: {texts:?}");
+        assert!(texts[4].contains("chunk.rs"), "rows were: {texts:?}");
+        assert!(texts[5].contains("app.rs"), "rows were: {texts:?}");
+        assert!(texts[6].contains("config.rs"), "rows were: {texts:?}");
 
         assert_eq!(
             rows.row_records
@@ -934,12 +953,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 SidebarRowTarget::Folder(String::new()),
+                SidebarRowTarget::File(3),
                 SidebarRowTarget::Folder("src".to_string()),
                 SidebarRowTarget::Folder("src/bin".to_string()),
                 SidebarRowTarget::File(1),
                 SidebarRowTarget::File(0),
                 SidebarRowTarget::File(2),
-                SidebarRowTarget::File(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_omits_root_folder_when_only_nested_files_changed() {
+        let files = files_with_paths(["src/app.rs", "src/bin/chunk.rs"]);
+        let collapsed_dirs = HashSet::new();
+        let row_counts = test_row_counts(&files, 80, &collapsed_dirs);
+        let rows = sidebar_rows(SidebarRowsInput {
+            files: &files,
+            empty_message: "No tracked changes",
+            collapsed_dirs: &collapsed_dirs,
+            selected_file_index: 0,
+            sidebar_scroll: 0,
+            row_counts: &row_counts,
+            content_width: 80,
+            visible_height: 8,
+            theme: Theme::github_dark(),
+            reviewed_files: &HashSet::new(),
+            active_target: None,
+        });
+
+        let texts = rows.lines.iter().map(line_text).collect::<Vec<_>>();
+        assert!(texts[0].contains("src/"), "rows were: {texts:?}");
+        assert_eq!(
+            rows.row_records
+                .iter()
+                .map(|record| record.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                SidebarRowTarget::Folder("src".to_string()),
+                SidebarRowTarget::Folder("src/bin".to_string()),
+                SidebarRowTarget::File(1),
+                SidebarRowTarget::File(0),
             ]
         );
     }
@@ -971,7 +1025,7 @@ mod tests {
         });
 
         assert!(
-            rows.lines[1]
+            rows.lines[2]
                 .spans
                 .iter()
                 .all(|span| span.style.bg == Some(theme.selected))
@@ -1006,7 +1060,7 @@ mod tests {
             active_target: None,
         });
 
-        let folder_label = rows.lines[1].spans.last().expect("folder label span");
+        let folder_label = rows.lines[2].spans.last().expect("folder label span");
         assert_eq!(folder_label.content.as_ref(), "src/");
         assert_eq!(folder_label.style.fg, Some(theme.added));
         assert!(folder_label.style.add_modifier.contains(Modifier::BOLD));
@@ -1033,7 +1087,7 @@ mod tests {
             active_target: None,
         });
 
-        let folder_label = rows.lines[1].spans.last().expect("folder label span");
+        let folder_label = rows.lines[2].spans.last().expect("folder label span");
         assert_eq!(folder_label.content.as_ref(), "src/");
         assert_eq!(folder_label.style.fg, Some(theme.accent));
         assert!(folder_label.style.add_modifier.contains(Modifier::BOLD));
@@ -1071,7 +1125,7 @@ mod tests {
 
         assert!(joined.contains("bin/"));
         assert!(!joined.contains("chunk.rs"));
-        assert_eq!(visible_file_indices(&files, &collapsed_dirs), vec![0, 2, 3]);
+        assert_eq!(visible_file_indices(&files, &collapsed_dirs), vec![3, 0, 2]);
         assert_eq!(
             rows.row_records
                 .iter()
@@ -1079,11 +1133,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 SidebarRowTarget::Folder(String::new()),
+                SidebarRowTarget::File(3),
                 SidebarRowTarget::Folder("src".to_string()),
                 SidebarRowTarget::Folder("src/bin".to_string()),
                 SidebarRowTarget::File(0),
                 SidebarRowTarget::File(2),
-                SidebarRowTarget::File(3),
             ]
         );
     }

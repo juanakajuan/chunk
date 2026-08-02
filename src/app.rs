@@ -265,8 +265,11 @@ impl App {
         } = review;
         let file_count = changeset.files.len();
         let diff_pane = DiffPaneState::new(&changeset);
+        let collapsed_tree_dirs = HashSet::new();
         let sidebar_cursor_target =
-            (file_count > 0).then(|| SidebarRowTarget::Folder(String::new()));
+            rows::visible_sidebar_targets(&changeset.files, &collapsed_tree_dirs)
+                .into_iter()
+                .next();
         Self {
             source,
             changeset,
@@ -285,7 +288,7 @@ impl App {
             ai_settings: config.ai,
             effects: VecDeque::new(),
             sidebar_scroll: 0,
-            collapsed_tree_dirs: HashSet::new(),
+            collapsed_tree_dirs,
             sidebar_cursor_target,
             viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
@@ -1677,15 +1680,27 @@ fn fallback_sidebar_target_position(
     match direction {
         VerticalDirection::Down => visible_targets
             .iter()
-            .position(|target| {
-                matches!(target, SidebarRowTarget::File(index) if *index > selected_file_index)
+            .enumerate()
+            .filter_map(|(position, target)| match target {
+                SidebarRowTarget::File(index) if *index > selected_file_index => {
+                    Some((position, *index))
+                }
+                _ => None,
             })
+            .min_by_key(|(_, index)| *index)
+            .map(|(position, _)| position)
             .unwrap_or(visible_targets.len() - 1),
         VerticalDirection::Up => visible_targets
             .iter()
-            .rposition(|target| {
-                matches!(target, SidebarRowTarget::File(index) if *index < selected_file_index)
+            .enumerate()
+            .filter_map(|(position, target)| match target {
+                SidebarRowTarget::File(index) if *index < selected_file_index => {
+                    Some((position, *index))
+                }
+                _ => None,
             })
+            .max_by_key(|(_, index)| *index)
+            .map(|(position, _)| position)
             .unwrap_or(0),
     }
 }

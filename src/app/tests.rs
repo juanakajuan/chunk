@@ -144,6 +144,17 @@ fn initial_files_panel_focuses_root_folder() {
 }
 
 #[test]
+fn initial_files_panel_focuses_first_folder_when_root_is_hidden() {
+    let app = app_with(changeset_with_paths(["src/app.rs", "src/main.rs"]));
+
+    assert_eq!(app.focus, FocusPane::Sidebar);
+    assert_eq!(
+        app.sidebar_cursor_target,
+        Some(SidebarRowTarget::Folder("src".to_string()))
+    );
+}
+
+#[test]
 fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
     let mut app = app_with(changeset_with_paths([
         "src/app.rs",
@@ -183,8 +194,8 @@ fn clicking_tree_file_selects_corresponding_diff() {
     app.selected_file_index = 1;
     render_sidebar(&mut app);
 
-    app.handle_left_down(1, 5);
-    app.handle_left_up(1, 5);
+    app.handle_left_down(1, 6);
+    app.handle_left_up(1, 6);
 
     assert_eq!(app.focus, FocusPane::Sidebar);
     assert_eq!(
@@ -204,8 +215,8 @@ fn clicking_tree_folder_collapses_without_losing_selected_file() {
     app.selected_file_index = 1;
     render_sidebar(&mut app);
 
-    app.handle_left_down(1, 3);
-    app.handle_left_up(1, 3);
+    app.handle_left_down(1, 4);
+    app.handle_left_up(1, 4);
 
     assert!(app.collapsed_tree_dirs.contains("src/bin"));
     assert_eq!(
@@ -640,6 +651,8 @@ fn keyboard_tree_navigation_can_discard_focused_folder() {
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
 
@@ -663,6 +676,8 @@ fn keyboard_tree_navigation_stages_focused_folder_paths() {
     ]));
     render_sidebar(&mut app);
 
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
@@ -696,6 +711,8 @@ fn keyboard_tree_navigation_unstages_focused_staged_folder_paths() {
     let mut app = app_with(changeset);
     render_sidebar(&mut app);
 
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
