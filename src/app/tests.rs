@@ -3,7 +3,10 @@ use crate::ask_ai::{AiHarness, AiSettings, AskAiResult, AskAiReviewMode};
 use crate::custom_command::CustomCommandResult;
 use crate::diff_render::RenderedDiffLines;
 use crate::keybind::{BuiltinAction, BuiltinKey, KeybindMap};
-use crate::model::{DiffHunk, DiffLine, DiffLineKind, FileStatus, SourceSnapshot};
+use crate::model::{
+    CommitSummary, DiffHunk, DiffLine, DiffLineKind, FileStatus, LocalBranch, RepositoryOverview,
+    SourceSnapshot,
+};
 use crate::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -130,6 +133,188 @@ fn showing_files_panel_moves_focus_to_sidebar() {
 
     assert!(app.files_panel_visible);
     assert_eq!(app.focus, FocusPane::Sidebar);
+}
+
+#[test]
+fn tab_and_backtab_cycle_through_every_pane() {
+    let mut app = app_with_repository_overview();
+
+    for expected in [
+        FocusPane::Branches,
+        FocusPane::Commits,
+        FocusPane::Diff,
+        FocusPane::Sidebar,
+    ] {
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, expected);
+    }
+
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.focus, FocusPane::Diff);
+}
+
+#[test]
+fn repository_panes_have_independent_keyboard_selection_and_copy() {
+    let mut app = app_with_repository_overview();
+    app.focus = FocusPane::Branches;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_branch_index, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .unwrap();
+    let branch_copy = take_clipboard_request(&mut app).unwrap();
+    assert_eq!(branch_copy.text(), "topic");
+    assert_eq!(branch_copy.success_message(), "copied selected branch name");
+
+    app.focus = FocusPane::Commits;
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_commit_index, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .unwrap();
+    let commit_copy = take_clipboard_request(&mut app).unwrap();
+    assert_eq!(commit_copy.text(), "def5678");
+    assert_eq!(commit_copy.success_message(), "copied selected commit id");
+}
+
+#[test]
+fn repository_focus_adds_contextual_copy_hint_to_footer() {
+    let mut app = app_with_repository_overview();
+    app.focus = FocusPane::Branches;
+    let theme = Theme::github_dark();
+
+    assert!(line_text(&app.keybind_bar_line(theme)).contains("copy branch"));
+
+    app.focus = FocusPane::Commits;
+    assert!(line_text(&app.keybind_bar_line(theme)).contains("copy commit"));
+}
+
+#[test]
+fn only_the_focused_list_pane_highlights_its_selection() {
+    let mut app = app_with_repository_overview();
+    let theme = Theme::github_dark();
+
+    let files = render_sidebar(&mut app);
+    let branches = app.branch_panel_rows(Rect::new(0, 4, 40, 4), 38, 2, theme);
+    assert!(files.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.style.bg == Some(theme.selected))
+    }));
+    assert!(branches.iter().all(|line| {
+        line.spans
+            .iter()
+            .all(|span| span.style.bg != Some(theme.selected))
+    }));
+
+    app.focus = FocusPane::Branches;
+    let files = render_sidebar(&mut app);
+    let branches = app.branch_panel_rows(Rect::new(0, 4, 40, 4), 38, 2, theme);
+    let commits = app.commit_panel_rows(Rect::new(0, 9, 40, 4), 38, 2, theme);
+    assert!(files.iter().all(|line| {
+        line.spans
+            .iter()
+            .all(|span| span.style.bg != Some(theme.selected))
+    }));
+    assert!(
+        branches[0]
+            .spans
+            .iter()
+            .all(|span| span.style.bg == Some(theme.selected))
+    );
+    assert!(commits.iter().all(|line| {
+        line.spans
+            .iter()
+            .all(|span| span.style.bg != Some(theme.selected))
+    }));
+}
+
+#[test]
+fn repository_panel_mouse_selects_and_scrolls_the_pointed_list() {
+    let mut app = app_with_repository_overview();
+    render_repository_panels(&mut app, 2);
+
+    app.handle_left_down(1, 11);
+    app.handle_left_up(1, 11);
+    assert_eq!(app.focus, FocusPane::Commits);
+    assert_eq!(app.selected_commit_index, 1);
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.focus, FocusPane::Branches);
+    assert_eq!(app.selected_branch_index, 1);
+    assert_eq!(app.selected_commit_index, 1);
+}
+
+#[test]
+fn repository_panel_scroll_keeps_keyboard_selection_visible() {
+    let mut app = app_with_repository_overview();
+    app.repository_overview.branches.extend([
+        LocalBranch {
+            name: "release".to_string(),
+            current: false,
+        },
+        LocalBranch {
+            name: "next".to_string(),
+            current: false,
+        },
+    ]);
+    app.focus = FocusPane::Branches;
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    let lines = app.branch_panel_rows(Rect::new(0, 4, 40, 4), 38, 2, Theme::github_dark());
+
+    assert_eq!(app.branch_scroll, 2);
+    assert_eq!(line_text(&lines[1]).trim_end(), "  next");
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .all(|span| span.style.bg == Some(Theme::github_dark().selected))
+    );
+}
+
+#[test]
+fn repository_reload_preserves_selected_identities_after_reordering() {
+    let mut app = app_with_repository_overview();
+    app.selected_branch_index = 1;
+    app.selected_commit_index = 1;
+
+    app.apply_repository_overview(RepositoryOverview {
+        branches: vec![
+            LocalBranch {
+                name: "topic".to_string(),
+                current: false,
+            },
+            LocalBranch {
+                name: "main".to_string(),
+                current: true,
+            },
+        ],
+        commits: vec![
+            CommitSummary {
+                short_id: "def5678".to_string(),
+                subject: "Second".to_string(),
+            },
+            CommitSummary {
+                short_id: "abc1234".to_string(),
+                subject: "First".to_string(),
+            },
+        ],
+    });
+
+    assert_eq!(app.selected_branch_index, 0);
+    assert_eq!(app.selected_commit_index, 0);
 }
 
 #[test]
@@ -1479,6 +1664,34 @@ fn app_with(changeset: Changeset) -> App {
     App::new(LoadedReview::worktree(changeset))
 }
 
+fn app_with_repository_overview() -> App {
+    App::new(LoadedReview::worktree_with_repository_overview(
+        changeset_with_one_file(),
+        RepositoryOverview {
+            branches: vec![
+                LocalBranch {
+                    name: "main".to_string(),
+                    current: true,
+                },
+                LocalBranch {
+                    name: "topic".to_string(),
+                    current: false,
+                },
+            ],
+            commits: vec![
+                CommitSummary {
+                    short_id: "abc1234".to_string(),
+                    subject: "First".to_string(),
+                },
+                CommitSummary {
+                    short_id: "def5678".to_string(),
+                    subject: "Second".to_string(),
+                },
+            ],
+        },
+    ))
+}
+
 fn drive_harness_picker(app: &mut App, keys: &[KeyCode]) {
     app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
         .unwrap();
@@ -1649,6 +1862,21 @@ fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {
 
 fn render_sidebar(app: &mut App) -> Vec<Line<'static>> {
     app.sidebar_rows(Rect::new(0, 0, 40, 8), 38, 6, Theme::github_dark())
+}
+
+fn render_repository_panels(app: &mut App, visible_height: usize) {
+    app.branch_panel_rows(
+        Rect::new(0, 4, 40, 4),
+        38,
+        visible_height,
+        Theme::github_dark(),
+    );
+    app.commit_panel_rows(
+        Rect::new(0, 9, 40, 4),
+        38,
+        visible_height,
+        Theme::github_dark(),
+    );
 }
 
 fn pane_text(pane: &DiffPaneRows) -> String {

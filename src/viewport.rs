@@ -15,6 +15,12 @@ pub struct RenderedViewport {
     sidebar_view_height: usize,
     /// Last sidebar rectangle, used to map mouse events.
     sidebar_area: Option<Rect>,
+    /// Last branches rectangle and its visible item range.
+    branches_area: Option<Rect>,
+    branches_row_indices: Vec<usize>,
+    /// Last commits rectangle and its visible item range.
+    commits_area: Option<Rect>,
+    commits_row_indices: Vec<usize>,
     /// Last diff rectangle, used to map mouse events.
     diff_area: Option<Rect>,
     /// Last rendered diff scrollbar, used to draw and map mouse events.
@@ -67,6 +73,10 @@ impl RenderedViewport {
             diff_view_height: 1,
             sidebar_view_height: 1,
             sidebar_area: None,
+            branches_area: None,
+            branches_row_indices: Vec::new(),
+            commits_area: None,
+            commits_row_indices: Vec::new(),
             diff_area: None,
             diff_scrollbar: None,
             diff_status_rows: 0,
@@ -76,6 +86,10 @@ impl RenderedViewport {
 
     pub fn begin_frame(&mut self) {
         self.sidebar_area = None;
+        self.branches_area = None;
+        self.branches_row_indices.clear();
+        self.commits_area = None;
+        self.commits_row_indices.clear();
         self.diff_area = None;
         self.diff_scrollbar = None;
         self.sidebar_row_targets.clear();
@@ -98,6 +112,16 @@ impl RenderedViewport {
     pub fn begin_diff(&mut self, area: Rect, height: usize) {
         self.diff_area = Some(area);
         self.diff_view_height = height.max(1);
+    }
+
+    pub fn begin_branches(&mut self, area: Rect, first_index: usize, row_count: usize) {
+        self.branches_area = Some(area);
+        self.branches_row_indices = (first_index..first_index.saturating_add(row_count)).collect();
+    }
+
+    pub fn begin_commits(&mut self, area: Rect, first_index: usize, row_count: usize) {
+        self.commits_area = Some(area);
+        self.commits_row_indices = (first_index..first_index.saturating_add(row_count)).collect();
     }
 
     pub fn set_diff_scrollbar(&mut self, scrollbar: Option<DiffScrollbar>) {
@@ -137,6 +161,24 @@ impl RenderedViewport {
 
     pub fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
         self.sidebar_area
+            .is_some_and(|area| rect_contains(area, column, row))
+    }
+
+    pub fn branch_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        panel_index_at(self.branches_area?, &self.branches_row_indices, column, row)
+    }
+
+    pub fn commit_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        panel_index_at(self.commits_area?, &self.commits_row_indices, column, row)
+    }
+
+    pub fn is_branches_at(&self, column: u16, row: u16) -> bool {
+        self.branches_area
+            .is_some_and(|area| rect_contains(area, column, row))
+    }
+
+    pub fn is_commits_at(&self, column: u16, row: u16) -> bool {
+        self.commits_area
             .is_some_and(|area| rect_contains(area, column, row))
     }
 
@@ -291,6 +333,15 @@ fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height).saturating_sub(1)
 }
 
+fn panel_index_at(area: Rect, row_indices: &[usize], column: u16, row: u16) -> Option<usize> {
+    if !rect_inner_contains(area, column, row) {
+        return None;
+    }
+
+    let row_offset = row.saturating_sub(area.y + 1) as usize;
+    row_indices.get(row_offset).copied()
+}
+
 fn ratio_ceil(value: usize, numerator: usize, denominator: usize) -> usize {
     if denominator == 0 {
         return 0;
@@ -354,6 +405,18 @@ mod tests {
             Some(SidebarRowTarget::File(2))
         );
         assert_eq!(viewport.sidebar_target_at(1, 4), None);
+    }
+
+    #[test]
+    fn repository_panel_mapping_includes_scroll_offset() {
+        let mut viewport = RenderedViewport::new();
+        viewport.begin_branches(Rect::new(0, 4, 20, 5), 3, 3);
+        viewport.begin_commits(Rect::new(0, 9, 20, 4), 8, 2);
+
+        assert_eq!(viewport.branch_index_at(1, 5), Some(3));
+        assert_eq!(viewport.branch_index_at(1, 7), Some(5));
+        assert_eq!(viewport.commit_index_at(1, 10), Some(8));
+        assert_eq!(viewport.commit_index_at(1, 12), None);
     }
 
     #[test]

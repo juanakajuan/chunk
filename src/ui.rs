@@ -90,20 +90,16 @@ fn render_branches(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Them
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
     let lines = app.branch_panel_rows(area, content_width, inner_height, theme);
-    frame.render_widget(
-        Paragraph::new(lines).block(passive_pane_block(" Branches ", theme)),
-        area,
-    );
+    let block = pane_block(" Branches ", app.focus(), FocusPane::Branches, theme);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_commits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
     let inner_height = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
     let lines = app.commit_panel_rows(area, content_width, inner_height, theme);
-    frame.render_widget(
-        Paragraph::new(lines).block(passive_pane_block(" Commits ", theme)),
-        area,
-    );
+    let block = pane_block(" Commits ", app.focus(), FocusPane::Commits, theme);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
@@ -468,10 +464,6 @@ fn pane_block(
     theme: Theme,
 ) -> Block<'static> {
     styled_pane_block(title, current_focus == target_focus, theme)
-}
-
-fn passive_pane_block(title: impl Into<String>, theme: Theme) -> Block<'static> {
-    styled_pane_block(title, false, theme)
 }
 
 fn styled_pane_block(title: impl Into<String>, focused: bool, theme: Theme) -> Block<'static> {

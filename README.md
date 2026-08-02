@@ -40,8 +40,8 @@ These are the default keys. Most single-character actions can be remapped in
 
 | Keys | Action |
 | ---- | ------ |
-| `j` / `k` | Move in the file list or scroll the diff |
-| `Tab`, `Left`, `Right`, `Enter` | Change focus between files and diff |
+| `j` / `k` | Move in the focused list or scroll the diff |
+| `Tab` / `Shift-Tab`, `Left`, `Right`, `Enter` | Change focus between panes |
 | `f` | Toggle the file list |
 | `/`, `n`, `N` | Search the selected file; jump next/previous match or hunk |
 | `PageDown` / `Ctrl-d`, `PageUp` / `Ctrl-u` | Page the diff |
@@ -49,7 +49,7 @@ These are the default keys. Most single-character actions can be remapped in
 | `?` | Toggle in-app help |
 | `a`, `x`, `u` | Ask AI, explain selection, or summarize unpublished changes |
 | `F2` | Configure the AI harness, model, and effort; persist to `config.toml` |
-| `y`, `Y` | Copy focused path/hunk or selected file diff |
+| `y`, `Y` | Copy the focused path, branch, commit, or hunk; or the selected file diff |
 | `r` | Toggle reviewed state for the selected file |
 | `Space` | Stage/unstage the selected file or hunk in `diff` mode |
 | `d` | Discard unstaged file/folder/hunk changes after confirmation in `diff` mode |
@@ -57,8 +57,9 @@ These are the default keys. Most single-character actions can be remapped in
 | Custom command keys | Run configured shell commands from the Git root |
 | `q` / `Ctrl-c` | Quit |
 
-Mouse hover changes focus. Click files, folders, and hunks to select or expand
-them; use the wheel to scroll. Drag visible text to copy it.
+Mouse hover changes focus. Click files, folders, branches, commits, and hunks to
+select or expand them; use the wheel to move or scroll the pointed pane. Drag
+visible text to copy it.
 
 Command output and Ask AI panes use the same scroll keys; close them with `Esc`
 or `q`. Ask AI answers can be copied with `y`.

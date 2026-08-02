@@ -79,7 +79,7 @@ impl<'a> FocusedReviewTarget<'a> {
         match self.focus {
             FocusPane::Sidebar if self.files_panel_visible => Some("stage file"),
             FocusPane::Diff => Some("stage hunk"),
-            FocusPane::Sidebar => None,
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits => None,
         }
     }
 
@@ -88,8 +88,14 @@ impl<'a> FocusedReviewTarget<'a> {
         selected_text: Option<String>,
         missing_file_message: &'static str,
     ) -> Result<AskAiFocusedTarget<'a>, FocusedReviewTargetError> {
+        let file_context = match self.focus {
+            FocusPane::Sidebar if self.files_panel_visible => true,
+            FocusPane::Diff => false,
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits => {
+                return Err(FocusedReviewTargetError::new(missing_file_message));
+            }
+        };
         let file = self.require_selected_file(missing_file_message)?;
-        let file_context = self.focus == FocusPane::Sidebar && self.files_panel_visible;
 
         Ok(AskAiFocusedTarget {
             file: file.file,
@@ -110,9 +116,9 @@ impl<'a> FocusedReviewTarget<'a> {
             FocusPane::Diff => self
                 .require_selected_hunk("no selected hunk to copy")
                 .map(FocusedCopyTarget::HunkDiff),
-            FocusPane::Sidebar => Err(FocusedReviewTargetError::new(
-                "no visible file path to copy",
-            )),
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits => Err(
+                FocusedReviewTargetError::new("no visible file path to copy"),
+            ),
         }
     }
 
@@ -131,7 +137,7 @@ impl<'a> FocusedReviewTarget<'a> {
                 .require_selected_hunk("no selected hunk to stage")
                 .map(FocusedMutationTarget::Hunk)
                 .map(Some),
-            FocusPane::Sidebar => Ok(None),
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits => Ok(None),
         }
     }
 
@@ -147,7 +153,7 @@ impl<'a> FocusedReviewTarget<'a> {
                 .require_selected_hunk("no selected hunk to discard")
                 .map(FocusedMutationTarget::Hunk)
                 .map(Some),
-            FocusPane::Sidebar => Ok(None),
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits => Ok(None),
         }
     }
 

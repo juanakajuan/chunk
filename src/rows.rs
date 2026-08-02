@@ -297,6 +297,7 @@ fn ai_setting_line(
 pub(crate) fn keybind_bar_line(
     files_panel_visible: bool,
     stage_hint: Option<&'static str>,
+    copy_hint: Option<&'static str>,
     keybinds: KeybindMap,
     theme: Theme,
 ) -> Line<'static> {
@@ -314,6 +315,9 @@ pub(crate) fn keybind_bar_line(
     }
     if let Some(stage_hint) = stage_hint {
         hints.push((keybinds.display(BuiltinAction::ToggleStaging), stage_hint));
+    }
+    if let Some(copy_hint) = copy_hint {
+        hints.push((keybinds.display(BuiltinAction::CopyFocused), copy_hint));
     }
     hints.push((keybinds.display(BuiltinAction::Search), "search"));
     hints.push((move_keys, "move"));
@@ -513,6 +517,23 @@ pub(crate) fn help_overlay_lines(
 
     push_help_entries(
         &mut lines,
+        "Repository",
+        &[
+            HelpEntry::text(
+                action_keys(keybinds, [BuiltinAction::MoveDown, BuiltinAction::MoveUp]),
+                "select branch or commit",
+            ),
+            action_entry(
+                BuiltinAction::CopyFocused,
+                "copy selected branch name or commit id",
+            ),
+        ],
+        content_width,
+        theme,
+    );
+
+    push_help_entries(
+        &mut lines,
         "Diff",
         &[
             HelpEntry::text(
@@ -571,6 +592,7 @@ pub(crate) fn help_overlay_lines(
         &[
             HelpEntry::text(command_key("hover"), "focus pane"),
             HelpEntry::text(command_key("click file"), "select file"),
+            HelpEntry::text(command_key("click branch/commit"), "select repository item"),
             HelpEntry::text(command_key("click hunk"), "select hunk"),
             HelpEntry::text(command_key("wheel"), "scroll pointed pane"),
             HelpEntry::text(command_key("drag text"), "copy selection"),
@@ -1093,6 +1115,7 @@ mod tests {
         for section in [
             "Global",
             "Sidebar",
+            "Repository",
             "Diff",
             "AI",
             "Mouse",
@@ -1154,6 +1177,15 @@ mod tests {
 
         assert!(worktree_help.contains("r      toggle reviewed for selected file"));
         assert!(pr_help.contains("r      toggle reviewed for selected file"));
+    }
+
+    #[test]
+    fn help_overlay_describes_repository_panel_actions() {
+        let help = help_text(true);
+
+        assert!(help.contains("select branch or commit"));
+        assert!(help.contains("copy selected branch name or commit id"));
+        assert!(help.contains("click branch/commit"));
     }
 
     #[test]
@@ -1239,7 +1271,13 @@ mod tests {
     #[test]
     fn keybind_bar_colors_key_tokens_with_accent_fill() {
         let theme = Theme::github_dark();
-        let line = keybind_bar_line(true, Some("stage file"), KeybindMap::defaults(), theme);
+        let line = keybind_bar_line(
+            true,
+            Some("stage file"),
+            None,
+            KeybindMap::defaults(),
+            theme,
+        );
         let key_span = line
             .spans
             .iter()

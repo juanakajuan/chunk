@@ -51,12 +51,16 @@ const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FocusPane {
     Sidebar,
+    Branches,
+    Commits,
     Diff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingLeftClick {
     Sidebar { target: SidebarRowTarget },
+    Branch { index: usize },
+    Commit { index: usize },
     Diff { hunk_index: Option<usize> },
 }
 
@@ -232,6 +236,12 @@ pub(crate) struct App {
     collapsed_tree_dirs: HashSet<String>,
     /// Active Files-panel tree row, if it differs from the selected file fallback.
     sidebar_cursor_target: Option<SidebarRowTarget>,
+    /// Active local branch and scroll offset in the Branches panel.
+    selected_branch_index: usize,
+    branch_scroll: usize,
+    /// Active recent commit and scroll offset in the Commits panel.
+    selected_commit_index: usize,
+    commit_scroll: usize,
     /// Rendered viewport geometry and row mapping.
     viewport: RenderedViewport,
     /// Visible text rows and active drag-to-copy selection.
@@ -290,6 +300,10 @@ impl App {
             sidebar_scroll: 0,
             collapsed_tree_dirs,
             sidebar_cursor_target,
+            selected_branch_index: 0,
+            branch_scroll: 0,
+            selected_commit_index: 0,
+            commit_scroll: 0,
             viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
             pending_left_click: None,
@@ -349,6 +363,7 @@ impl App {
             theme,
             reviewed_files: &self.reviewed_files,
             active_target: self.sidebar_cursor_target.as_ref(),
+            focused: self.focus == FocusPane::Sidebar,
         });
         self.sidebar_scroll = rendered_rows.sidebar_scroll;
         self.viewport.begin_sidebar_rows();
@@ -373,7 +388,32 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let lines = rows::branch_lines(&self.repository_overview.branches, theme);
+        let branch_count = self.repository_overview.branches.len();
+        self.selected_branch_index = clamped_list_index(self.selected_branch_index, branch_count);
+        self.branch_scroll = visible_list_scroll(
+            branch_count,
+            self.selected_branch_index,
+            self.branch_scroll,
+            visible_height,
+        );
+        let selected_index = (self.focus == FocusPane::Branches
+            && !self.repository_overview.branches.is_empty())
+        .then_some(self.selected_branch_index);
+        let lines = rows::branch_lines(
+            &self.repository_overview.branches,
+            selected_index,
+            content_width,
+            theme,
+        )
+        .into_iter()
+        .skip(self.branch_scroll)
+        .take(visible_height)
+        .collect::<Vec<_>>();
+        let mapped_row_count = lines
+            .len()
+            .min(branch_count.saturating_sub(self.branch_scroll));
+        self.viewport
+            .begin_branches(area, self.branch_scroll, mapped_row_count);
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             lines,
@@ -390,7 +430,32 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let lines = rows::commit_lines(&self.repository_overview.commits, theme);
+        let commit_count = self.repository_overview.commits.len();
+        self.selected_commit_index = clamped_list_index(self.selected_commit_index, commit_count);
+        self.commit_scroll = visible_list_scroll(
+            commit_count,
+            self.selected_commit_index,
+            self.commit_scroll,
+            visible_height,
+        );
+        let selected_index = (self.focus == FocusPane::Commits
+            && !self.repository_overview.commits.is_empty())
+        .then_some(self.selected_commit_index);
+        let lines = rows::commit_lines(
+            &self.repository_overview.commits,
+            selected_index,
+            content_width,
+            theme,
+        )
+        .into_iter()
+        .skip(self.commit_scroll)
+        .take(visible_height)
+        .collect::<Vec<_>>();
+        let mapped_row_count = lines
+            .len()
+            .min(commit_count.saturating_sub(self.commit_scroll));
+        self.viewport
+            .begin_commits(area, self.commit_scroll, mapped_row_count);
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
             lines,
@@ -432,6 +497,7 @@ impl App {
         rows::keybind_bar_line(
             self.files_panel_visible,
             self.stage_keybind_hint(),
+            self.repository_copy_keybind_hint(),
             self.keybinds,
             theme,
         )
@@ -496,6 +562,14 @@ impl App {
         }
 
         self.focused_review_target().stage_keybind_hint()
+    }
+
+    fn repository_copy_keybind_hint(&self) -> Option<&'static str> {
+        match self.focus {
+            FocusPane::Branches => Some("copy branch"),
+            FocusPane::Commits => Some("copy commit"),
+            FocusPane::Sidebar | FocusPane::Diff => None,
+        }
     }
 
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
@@ -696,11 +770,47 @@ impl App {
 
     fn reload_repository_overview(&mut self) {
         match self.source.repository_overview() {
-            Ok(repository_overview) => self.repository_overview = repository_overview,
+            Ok(repository_overview) => self.apply_repository_overview(repository_overview),
             Err(error) => {
                 self.live_error = Some(format!("repository overview reload failed: {error}"));
             }
         }
+    }
+
+    fn apply_repository_overview(&mut self, repository_overview: RepositoryOverview) {
+        let selected_branch = self
+            .repository_overview
+            .branches
+            .get(self.selected_branch_index)
+            .map(|branch| branch.name.as_str());
+        let selected_commit = self
+            .repository_overview
+            .commits
+            .get(self.selected_commit_index)
+            .map(|commit| commit.short_id.as_str());
+        self.selected_branch_index = selected_branch
+            .and_then(|name| {
+                repository_overview
+                    .branches
+                    .iter()
+                    .position(|branch| branch.name == name)
+            })
+            .unwrap_or_else(|| {
+                repository_overview
+                    .branches
+                    .iter()
+                    .position(|branch| branch.current)
+                    .unwrap_or(0)
+            });
+        self.selected_commit_index = selected_commit
+            .and_then(|short_id| {
+                repository_overview
+                    .commits
+                    .iter()
+                    .position(|commit| commit.short_id == short_id)
+            })
+            .unwrap_or(0);
+        self.repository_overview = repository_overview;
     }
 
     fn apply_reloaded_changeset(&mut self, changeset: Changeset, preserve_scroll: bool) {
@@ -801,7 +911,8 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Tab => self.toggle_focus(),
+            KeyCode::Tab => self.cycle_focus(VerticalDirection::Down),
+            KeyCode::BackTab => self.cycle_focus(VerticalDirection::Up),
             KeyCode::Left if self.files_panel_visible => self.focus = FocusPane::Sidebar,
             KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
             KeyCode::Esc => self.clear_search_query(),
@@ -960,6 +1071,14 @@ impl App {
                     SidebarRowTarget::Folder(path) => self.toggle_tree_folder(&path),
                 }
             }
+            PendingLeftClick::Branch { index } => {
+                self.focus = FocusPane::Branches;
+                self.select_branch(index);
+            }
+            PendingLeftClick::Commit { index } => {
+                self.focus = FocusPane::Commits;
+                self.select_commit(index);
+            }
             PendingLeftClick::Diff { hunk_index } => {
                 self.focus = FocusPane::Diff;
                 if let Some(index) = hunk_index {
@@ -987,6 +1106,14 @@ impl App {
     fn pending_left_click_at(&self, column: u16, row: u16) -> Option<PendingLeftClick> {
         if let Some(target) = self.sidebar_target_at(column, row) {
             return Some(PendingLeftClick::Sidebar { target });
+        }
+
+        if let Some(index) = self.viewport.branch_index_at(column, row) {
+            return Some(PendingLeftClick::Branch { index });
+        }
+
+        if let Some(index) = self.viewport.commit_index_at(column, row) {
+            return Some(PendingLeftClick::Commit { index });
         }
 
         if self.is_diff_at(column, row) {
@@ -1024,6 +1151,8 @@ impl App {
 
         match focus {
             FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, MOUSE_WHEEL_STEP),
+            FocusPane::Branches => self.move_branch_cursor_by(direction, MOUSE_WHEEL_STEP),
+            FocusPane::Commits => self.move_commit_cursor_by(direction, MOUSE_WHEEL_STEP),
             FocusPane::Diff => self.scroll_diff_by(direction, MOUSE_WHEEL_STEP),
         }
     }
@@ -1031,6 +1160,14 @@ impl App {
     fn pane_at(&self, column: u16, row: u16) -> Option<FocusPane> {
         if self.is_sidebar_at(column, row) {
             return Some(FocusPane::Sidebar);
+        }
+
+        if self.viewport.is_branches_at(column, row) {
+            return Some(FocusPane::Branches);
+        }
+
+        if self.viewport.is_commits_at(column, row) {
+            return Some(FocusPane::Commits);
         }
 
         self.is_diff_at(column, row).then_some(FocusPane::Diff)
@@ -1066,15 +1203,21 @@ impl App {
         Some((drag, scrollbar.scroll_for_drag(row, drag)))
     }
 
-    fn toggle_focus(&mut self) {
+    fn cycle_focus(&mut self, direction: VerticalDirection) {
         if !self.files_panel_visible {
             self.focus = FocusPane::Diff;
             return;
         }
 
-        self.focus = match self.focus {
-            FocusPane::Sidebar => FocusPane::Diff,
-            FocusPane::Diff => FocusPane::Sidebar,
+        self.focus = match (self.focus, direction) {
+            (FocusPane::Sidebar, VerticalDirection::Down)
+            | (FocusPane::Commits, VerticalDirection::Up) => FocusPane::Branches,
+            (FocusPane::Branches, VerticalDirection::Down)
+            | (FocusPane::Diff, VerticalDirection::Up) => FocusPane::Commits,
+            (FocusPane::Commits, VerticalDirection::Down)
+            | (FocusPane::Sidebar, VerticalDirection::Up) => FocusPane::Diff,
+            (FocusPane::Diff, VerticalDirection::Down)
+            | (FocusPane::Branches, VerticalDirection::Up) => FocusPane::Sidebar,
         };
     }
 
@@ -1208,6 +1351,17 @@ impl App {
     }
 
     fn queue_focused_target_copy(&mut self) {
+        if matches!(self.focus, FocusPane::Branches | FocusPane::Commits) {
+            match self.focused_repository_copy() {
+                Some((text, success_message)) => self.queue_clipboard_text(text, success_message),
+                None if self.focus == FocusPane::Branches => {
+                    self.set_copy_error("no selected branch to copy")
+                }
+                None => self.set_copy_error("no selected commit to copy"),
+            }
+            return;
+        }
+
         let copy = match self.focused_review_target().copy() {
             Ok(FocusedCopyTarget::FilePath(target)) => Ok((
                 target.file.display_path().to_string(),
@@ -1224,6 +1378,22 @@ impl App {
         match copy {
             Ok((text, success_message)) => self.queue_clipboard_text(text, success_message),
             Err(message) => self.set_copy_error(message),
+        }
+    }
+
+    fn focused_repository_copy(&self) -> Option<(String, &'static str)> {
+        match self.focus {
+            FocusPane::Branches => self
+                .repository_overview
+                .branches
+                .get(self.selected_branch_index)
+                .map(|branch| (branch.name.clone(), "copied selected branch name")),
+            FocusPane::Commits => self
+                .repository_overview
+                .commits
+                .get(self.selected_commit_index)
+                .map(|commit| (commit.short_id.clone(), "copied selected commit id")),
+            FocusPane::Sidebar | FocusPane::Diff => None,
         }
     }
 
@@ -1284,7 +1454,49 @@ impl App {
     fn move_by(&mut self, direction: VerticalDirection) {
         match self.focus {
             FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, 1),
+            FocusPane::Branches => self.move_branch_cursor_by(direction, 1),
+            FocusPane::Commits => self.move_commit_cursor_by(direction, 1),
             FocusPane::Diff => self.scroll_diff_by(direction, 1),
+        }
+    }
+
+    fn move_branch_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let branch_count = self.repository_overview.branches.len();
+        if branch_count == 0 {
+            return;
+        }
+
+        self.selected_branch_index = direction.shift_clamped(
+            self.selected_branch_index.min(branch_count - 1),
+            amount,
+            branch_count - 1,
+        );
+    }
+
+    fn move_commit_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let commit_count = self.repository_overview.commits.len();
+        if commit_count == 0 {
+            return;
+        }
+
+        self.selected_commit_index = direction.shift_clamped(
+            self.selected_commit_index.min(commit_count - 1),
+            amount,
+            commit_count - 1,
+        );
+    }
+
+    fn select_branch(&mut self, index: usize) {
+        let branch_count = self.repository_overview.branches.len();
+        if branch_count > 0 {
+            self.selected_branch_index = index.min(branch_count - 1);
+        }
+    }
+
+    fn select_commit(&mut self, index: usize) {
+        let commit_count = self.repository_overview.commits.len();
+        if commit_count > 0 {
+            self.selected_commit_index = index.min(commit_count - 1);
         }
     }
 
@@ -1661,6 +1873,36 @@ impl App {
 
 fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
+}
+
+fn clamped_list_index(index: usize, item_count: usize) -> usize {
+    index.min(item_count.saturating_sub(1))
+}
+
+fn visible_list_scroll(
+    item_count: usize,
+    selected_index: usize,
+    scroll: usize,
+    visible_height: usize,
+) -> usize {
+    if item_count == 0 {
+        return 0;
+    }
+
+    let visible_height = visible_height.max(1);
+    let selected_index = selected_index.min(item_count - 1);
+    let max_scroll = item_count.saturating_sub(visible_height);
+    if selected_index < scroll {
+        return selected_index.min(max_scroll);
+    }
+    if selected_index >= scroll.saturating_add(visible_height) {
+        return selected_index
+            .saturating_add(1)
+            .saturating_sub(visible_height)
+            .min(max_scroll);
+    }
+
+    scroll.min(max_scroll)
 }
 
 fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Rect {

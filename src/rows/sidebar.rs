@@ -32,6 +32,7 @@ pub(crate) struct SidebarRowsInput<'a> {
     pub(crate) theme: Theme,
     pub(crate) reviewed_files: &'a HashSet<String>,
     pub(crate) active_target: Option<&'a SidebarRowTarget>,
+    pub(crate) focused: bool,
 }
 
 pub(crate) struct SidebarRowCountsInput<'a> {
@@ -57,6 +58,7 @@ struct SidebarRenderContext<'a> {
     content_width: usize,
     reviewed_files: &'a HashSet<String>,
     active_target: SidebarRowTarget,
+    focused: bool,
     theme: Theme,
 }
 
@@ -94,6 +96,7 @@ pub(crate) fn sidebar_rows(input: SidebarRowsInput<'_>) -> RenderedSidebarRows {
         content_width: input.content_width,
         reviewed_files: input.reviewed_files,
         active_target,
+        focused: input.focused,
         theme: input.theme,
     };
 
@@ -430,7 +433,7 @@ fn render_sidebar_entry(
     entry: &SidebarEntry,
     context: &SidebarRenderContext<'_>,
 ) -> Vec<Line<'static>> {
-    let is_selected = entry.matches_target(&context.active_target);
+    let is_selected = context.focused && entry.matches_target(&context.active_target);
     match entry {
         SidebarEntry::File { index, depth } => {
             let Some(file) = context.files.get(*index) else {
@@ -457,13 +460,14 @@ fn render_sidebar_entry(
                 name,
                 *depth,
                 *expanded,
-                is_selected
-                    || active_file_hidden_by_folder(
-                        context.files,
-                        &context.active_target,
-                        path,
-                        *expanded,
-                    ),
+                context.focused
+                    && (is_selected
+                        || active_file_hidden_by_folder(
+                            context.files,
+                            &context.active_target,
+                            path,
+                            *expanded,
+                        )),
                 folder_stage,
                 context.content_width,
                 context.theme,
@@ -573,7 +577,12 @@ fn render_file_entry(input: FileEntryRenderInput<'_>) -> Vec<Line<'static>> {
     ]);
     push_stat_spans(&mut content_spans, file, row_background, theme);
 
-    vec![Line::from(content_spans)]
+    vec![fill_selected_row(
+        Line::from(content_spans),
+        is_selected,
+        content_width,
+        theme,
+    )]
 }
 
 fn sidebar_file_name_style(file: &DiffFile, row_background: Color, theme: Theme) -> Style {
@@ -644,7 +653,28 @@ fn render_folder_entry(
         Span::styled(label, folder_name_style),
     ];
 
-    vec![Line::from(content_spans)]
+    vec![fill_selected_row(
+        Line::from(content_spans),
+        contains_hidden_selection,
+        content_width,
+        theme,
+    )]
+}
+
+fn fill_selected_row(
+    mut line: Line<'static>,
+    selected: bool,
+    content_width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    if selected {
+        let padding = content_width.saturating_sub(line.width());
+        line.spans.push(Span::styled(
+            " ".repeat(padding),
+            color_style(theme.text, theme.selected),
+        ));
+    }
+    line
 }
 
 fn folder_stage(files: &[DiffFile], folder_path: &str) -> FileStage {
@@ -732,6 +762,7 @@ mod tests {
             theme: Theme::github_dark(),
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
 
         assert_eq!(rows.lines.len(), 2);
@@ -765,6 +796,7 @@ mod tests {
             theme: Theme::github_dark(),
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
 
         assert_eq!(rows.sidebar_scroll, 2);
@@ -793,6 +825,28 @@ mod tests {
         assert!(rows[0].width() <= 32, "row was: {text}");
         assert!(text.contains("+588"), "row was: {text}");
         assert!(text.contains("-63"), "row was: {text}");
+    }
+
+    #[test]
+    fn active_file_row_uses_selected_background_across_full_width() {
+        let file = diff_file_with_path("src/main.rs");
+        let theme = Theme::github_dark();
+        let rows = render_file_entry(FileEntryRenderInput {
+            file: &file,
+            is_selected: true,
+            content_width: 32,
+            is_reviewed: false,
+            depth: 1,
+            theme,
+        });
+
+        assert_eq!(rows[0].width(), 32);
+        assert!(
+            rows[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme.selected))
+        );
     }
 
     #[test]
@@ -934,6 +988,7 @@ mod tests {
             theme: Theme::github_dark(),
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
 
         let texts = rows.lines.iter().map(line_text).collect::<Vec<_>>();
@@ -980,6 +1035,7 @@ mod tests {
             theme: Theme::github_dark(),
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
 
         let texts = rows.lines.iter().map(line_text).collect::<Vec<_>>();
@@ -1022,6 +1078,7 @@ mod tests {
             theme,
             reviewed_files: &HashSet::new(),
             active_target: Some(&active_target),
+            focused: true,
         });
 
         assert!(
@@ -1030,6 +1087,7 @@ mod tests {
                 .iter()
                 .all(|span| span.style.bg == Some(theme.selected))
         );
+        assert_eq!(rows.lines[2].width(), 80);
         assert!(
             rows.lines[0]
                 .spans
@@ -1058,6 +1116,7 @@ mod tests {
             theme,
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
 
         let folder_label = rows.lines[2].spans.last().expect("folder label span");
@@ -1085,6 +1144,7 @@ mod tests {
             theme,
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
 
         let folder_label = rows.lines[2].spans.last().expect("folder label span");
@@ -1115,6 +1175,7 @@ mod tests {
             theme: Theme::github_dark(),
             reviewed_files: &HashSet::new(),
             active_target: None,
+            focused: true,
         });
         let joined = rows
             .lines
