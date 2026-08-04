@@ -1,9 +1,9 @@
 //! Terminal application session state.
 //!
-//! `App` owns selection, focus, scroll state, and live reload errors. Review
-//! source behavior lives in `review_source`; terminal and watch orchestration
-//! live in `runtime`; diff row rendering lives in `diff_render` while `ui`
-//! draws Ratatui widgets.
+//! `App` owns global selection, focus, overlays, and live reload errors. The
+//! selected review diff owns its navigation, rendering, search, and geometry;
+//! terminal/watch orchestration lives in `runtime`, while `ui` draws Ratatui
+//! widgets.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -16,17 +16,16 @@ use ratatui::text::Line;
 use crate::ask_ai::{AiSettings, AskAiContext, AskAiRequest, AskAiResult};
 use crate::config::AppConfig;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
-use crate::diff_render::DiffRenderState;
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
-use crate::model::{Changeset, DiffFile, DiffHunk, FileStage, RepositoryOverview};
+use crate::model::{Changeset, DiffFile, FileStage, RepositoryOverview};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource, WorktreeMutation};
 use crate::rows::{self, SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
 use crate::scroll_text::VerticalDirection;
 use crate::selection::TextSelection;
 use crate::theme::{Theme, ThemeName};
-use crate::viewport::{DiffScrollbar, DiffScrollbarDrag, RenderedViewport, ViewportScrollInput};
+use crate::viewport::{DiffScrollbar, RenderedViewport};
 
 mod diff_frame;
 mod diff_pane;
@@ -35,15 +34,16 @@ mod keys;
 mod overlay;
 mod review_session;
 mod search;
+mod selected_diff;
 
 pub(crate) use keys::accepts_text_input;
 pub(crate) use overlay::AiPickerField;
 
-use diff_pane::DiffPaneState;
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
 use review_session::{ReviewSessionReplacement, ReviewSessionSnapshot};
+use selected_diff::SelectedDiffPane;
 
 const MOUSE_WHEEL_STEP: usize = 3;
 const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
@@ -217,10 +217,8 @@ pub(crate) struct App {
     live_notice: Option<String>,
     /// Index into `changeset.files`.
     selected_file_index: usize,
-    /// Diff-pane scroll, hunk selection, search, and render-derived navigation state.
-    diff_pane: DiffPaneState,
-    /// Rendered diff-row cache and layout metrics.
-    diff_render: DiffRenderState,
+    /// Selected review diff, including navigation, search, rendering, and geometry.
+    selected_diff: SelectedDiffPane,
     /// Pane receiving keyboard and mouse wheel actions.
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
@@ -256,8 +254,6 @@ pub(crate) struct App {
     text_selection: TextSelection,
     /// Deferred plain click target, cancelled if the press becomes a drag.
     pending_left_click: Option<PendingLeftClick>,
-    /// Active mouse drag against the rendered diff scrollbar.
-    diff_scrollbar_drag: Option<DiffScrollbarDrag>,
     /// Display paths marked reviewed in this session. Keyed by `display_path`
     /// so review state survives reloads as long as file identity stays stable.
     reviewed_files: HashSet<String>,
@@ -281,8 +277,7 @@ impl App {
             changeset,
             repository_overview,
         } = review;
-        let file_count = changeset.files.len();
-        let diff_pane = DiffPaneState::new(&changeset);
+        let selected_diff = SelectedDiffPane::new(&changeset);
         let collapsed_tree_dirs = HashSet::new();
         let sidebar_cursor_target =
             rows::visible_sidebar_targets(&changeset.files, &collapsed_tree_dirs)
@@ -295,8 +290,7 @@ impl App {
             live_error: None,
             live_notice: None,
             selected_file_index: 0,
-            diff_pane,
-            diff_render: DiffRenderState::new(file_count),
+            selected_diff,
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             overlay: None,
@@ -315,13 +309,13 @@ impl App {
             viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
             pending_left_click: None,
-            diff_scrollbar_drag: None,
             reviewed_files: HashSet::new(),
         }
     }
 
     pub(crate) fn begin_render_frame(&mut self) {
         self.viewport.begin_frame();
+        self.selected_diff.invalidate_frame();
         self.text_selection.begin_frame();
     }
 
@@ -584,15 +578,11 @@ impl App {
         self.changeset.files.get(self.selected_file_index)
     }
 
-    fn selected_hunk(&self) -> Option<&DiffHunk> {
-        self.diff_pane.selected_hunk(self.selected_file())
-    }
-
     fn focused_review_target(&self) -> FocusedReviewTarget<'_> {
         FocusedReviewTarget::new(
             &self.changeset.files,
             self.selected_file_index,
-            self.diff_pane.selected_hunk_index(),
+            self.selected_diff.selected_hunk_index(),
             self.focus,
             self.files_panel_visible,
         )
@@ -600,29 +590,11 @@ impl App {
 
     fn ensure_scroll_bounds(&mut self) {
         let selected_file = self.changeset.files.get(self.selected_file_index);
-        let selected_file_id = selected_file.map(|file| file.id.as_str());
-        let diff_render_max_scroll = self.diff_render.max_scroll(
-            self.selected_file_index,
-            selected_file_id,
-            selected_file.map_or(0, DiffFile::line_count),
-            self.viewport.diff_view_height(),
-        );
-        let scrollbar_max_scroll = selected_file_id
-            .map(|file_id| {
-                self.viewport
-                    .diff_scrollbar_max_scroll(self.selected_file_index, file_id)
-            })
-            .unwrap_or(0);
-        let input = ViewportScrollInput {
-            diff_scroll: self.diff_pane.scroll(),
-            sidebar_scroll: self.sidebar_scroll,
-            file_count: self.changeset.files.len(),
-            diff_max_scroll: diff_render_max_scroll.max(scrollbar_max_scroll),
-        };
-
-        self.sidebar_scroll = self
-            .diff_pane
-            .ensure_bounds(selected_file, &self.viewport, input);
+        self.selected_diff
+            .ensure_bounds(self.selected_file_index, selected_file);
+        if self.changeset.files.is_empty() {
+            self.sidebar_scroll = 0;
+        }
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
@@ -810,19 +782,24 @@ impl App {
     }
 
     fn apply_reloaded_changeset(&mut self, changeset: Changeset, preserve_scroll: bool) {
+        let diff_position = self
+            .selected_diff
+            .capture_reload_position(self.selected_file());
         let snapshot = ReviewSessionSnapshot::capture(
             self.selected_file(),
             self.selected_file_index,
-            self.selected_hunk(),
-            self.diff_pane.selected_hunk_index(),
-            self.diff_pane.scroll(),
             self.sidebar_cursor_target.clone(),
         );
-        let replacement = ReviewSessionReplacement::plan(snapshot, changeset, preserve_scroll);
-        self.apply_review_session_replacement(replacement);
+        let replacement = ReviewSessionReplacement::plan(snapshot, changeset);
+        self.apply_review_session_replacement(replacement, diff_position, preserve_scroll);
     }
 
-    fn apply_review_session_replacement(&mut self, replacement: ReviewSessionReplacement) {
+    fn apply_review_session_replacement(
+        &mut self,
+        replacement: ReviewSessionReplacement,
+        diff_position: selected_diff::DiffReloadPosition,
+        preserve_scroll: bool,
+    ) {
         self.changeset = replacement.changeset;
         self.live_error = None;
         if matches!(self.overlay, Some(Overlay::Discard(_))) {
@@ -831,20 +808,21 @@ impl App {
         self.text_selection.clear();
         self.selected_file_index = replacement.selected_file_index;
         self.sidebar_cursor_target = replacement.sidebar_target;
-        self.diff_pane
-            .set_selected_hunk_index(replacement.selected_hunk_index);
-        self.diff_pane.set_scroll(replacement.diff_scroll);
+        self.selected_diff.review_reloaded(
+            self.changeset.files.get(self.selected_file_index),
+            replacement.kept_file_selection,
+            preserve_scroll,
+            diff_position,
+        );
         self.clear_render_caches();
-        self.invalidate_search_matches();
         self.ensure_scroll_bounds();
     }
 
     fn clear_render_caches(&mut self) {
-        self.diff_render.clear(self.changeset.files.len());
-        self.viewport.clear_diff_geometry();
+        self.selected_diff
+            .clear_render_cache(self.changeset.files.len());
         self.text_selection.clear();
         self.pending_left_click = None;
-        self.diff_scrollbar_drag = None;
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -1000,13 +978,12 @@ impl App {
     }
 
     fn handle_left_down(&mut self, column: u16, row: u16) {
-        self.diff_scrollbar_drag = None;
+        self.selected_diff.cancel_scrollbar_drag();
         self.pending_left_click = None;
 
-        if let Some((drag, scroll)) = self.diff_scrollbar_drag_at(column, row) {
+        if let Some(scroll) = self.selected_diff.start_scrollbar_drag(column, row) {
             self.focus = FocusPane::Diff;
             self.text_selection.clear();
-            self.diff_scrollbar_drag = Some(drag);
             self.scroll_diff_to(scroll);
             return;
         }
@@ -1016,7 +993,7 @@ impl App {
     }
 
     fn handle_left_up(&mut self, column: u16, row: u16) {
-        if self.diff_scrollbar_drag.take().is_some() {
+        if self.selected_diff.finish_scrollbar_drag() {
             return;
         }
 
@@ -1054,10 +1031,8 @@ impl App {
             PendingLeftClick::Diff { hunk_index } => {
                 self.focus = FocusPane::Diff;
                 if let Some(index) = hunk_index {
-                    self.diff_pane.set_selected_hunk_index(Some(index));
-                    self.diff_pane.center_selected_hunk(
-                        &self.diff_render,
-                        self.viewport.diff_view_height(),
+                    self.selected_diff.select_hunk(
+                        index,
                         self.selected_file_index,
                         self.changeset.files.get(self.selected_file_index),
                     );
@@ -1098,16 +1073,12 @@ impl App {
     }
 
     fn drag_diff_scrollbar(&mut self, row: u16) -> bool {
-        let Some(drag) = self.diff_scrollbar_drag else {
+        let Some(scroll) = self.selected_diff.drag_scrollbar(row) else {
             return false;
-        };
-        let Some(scrollbar) = self.viewport.diff_scrollbar() else {
-            self.diff_scrollbar_drag = None;
-            return true;
         };
 
         self.focus = FocusPane::Diff;
-        self.scroll_diff_to(scrollbar.scroll_for_drag(row, drag));
+        self.scroll_diff_to(scroll);
         true
     }
 
@@ -1154,25 +1125,16 @@ impl App {
     }
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
-        self.viewport.is_diff_at(column, row)
+        self.selected_diff.contains(column, row)
     }
 
     fn diff_hunk_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        let visible_row = self.viewport.diff_row_at(column, row)?;
-        let diff_row = visible_row.checked_sub(self.viewport.diff_status_rows())?;
-
-        self.diff_pane.hunk_index_at_rendered_row(
-            &self.diff_render,
+        self.selected_diff.hunk_index_at(
+            column,
+            row,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
-            self.diff_pane.scroll().saturating_add(diff_row),
         )
-    }
-
-    fn diff_scrollbar_drag_at(&self, column: u16, row: u16) -> Option<(DiffScrollbarDrag, usize)> {
-        let scrollbar = self.viewport.diff_scrollbar()?;
-        let drag = scrollbar.drag_at(column, row)?;
-        Some((drag, scrollbar.scroll_for_drag(row, drag)))
     }
 
     fn cycle_focus(&mut self, direction: VerticalDirection) {
@@ -1532,49 +1494,44 @@ impl App {
 
         self.selected_file_index = index.min(self.changeset.files.len() - 1);
         self.sidebar_cursor_target = Some(SidebarRowTarget::File(self.selected_file_index));
-        self.diff_pane
+        self.selected_diff
             .select_file(self.changeset.files.get(self.selected_file_index));
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
-        self.diff_pane.scroll_page(
+        self.selected_diff.scroll_page(
             direction,
-            &self.viewport,
-            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
     }
 
     fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
-        self.diff_pane.scroll_by(
+        self.selected_diff.scroll_by(
             direction,
             amount,
-            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
     }
 
     fn scroll_diff_to(&mut self, scroll: usize) {
-        self.diff_pane.scroll_to(
+        self.selected_diff.scroll_to(
             scroll,
-            &self.diff_render,
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
     }
 
     fn scroll_diff_to_top(&mut self) {
-        self.diff_pane.scroll_to_top(
-            &self.diff_render,
+        self.selected_diff.scroll_to_top(
             self.selected_file_index,
             self.changeset.files.get(self.selected_file_index),
         );
     }
 
     fn scroll_diff_to_bottom(&mut self) {
-        self.diff_pane
+        self.selected_diff
             .scroll_to_bottom(self.changeset.files.get(self.selected_file_index));
     }
 
@@ -1842,13 +1799,8 @@ impl App {
     fn editor_line(&self, file: &DiffFile) -> Option<u32> {
         if self.focus == FocusPane::Diff {
             return self
-                .diff_pane
-                .editor_line(
-                    &self.viewport,
-                    &self.diff_render,
-                    self.selected_file_index,
-                    file,
-                )
+                .selected_diff
+                .editor_line(self.selected_file_index, file)
                 .or_else(|| file.first_changed_line());
         }
 

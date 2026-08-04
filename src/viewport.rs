@@ -1,7 +1,8 @@
 //! Rendered viewport geometry for terminal panes.
 //!
-//! This module owns terminal geometry, row hit-testing, scroll clamping, and
-//! scrollbar geometry. `diff_render` owns wrapped diff rows and layout metrics.
+//! This module owns terminal geometry and row hit-testing. The application
+//! viewport tracks the navigation panels, while `DiffViewport` is owned by the
+//! selected-diff module together with its scrollbar interaction state.
 
 use ratatui::layout::Rect;
 
@@ -9,8 +10,6 @@ use crate::rows::SidebarRowTarget;
 
 #[derive(Debug)]
 pub struct RenderedViewport {
-    /// Current diff viewport height, updated by the renderer.
-    diff_view_height: usize,
     /// Current sidebar viewport height, updated by the renderer.
     sidebar_view_height: usize,
     /// Last sidebar rectangle, used to map mouse events.
@@ -21,29 +20,17 @@ pub struct RenderedViewport {
     /// Last commits rectangle and its visible item range.
     commits_area: Option<Rect>,
     commits_row_indices: Vec<usize>,
-    /// Last diff rectangle, used to map mouse events.
-    diff_area: Option<Rect>,
-    /// Last rendered diff scrollbar, used to draw and map mouse events.
-    diff_scrollbar: Option<DiffScrollbar>,
-    /// Live-status rows stacked above the diff rows, used to map mouse events
-    /// back to diff rows. Produced by the diff frame, read by hit-testing.
-    diff_status_rows: usize,
     /// Rendered sidebar row to file or folder target mapping for click handling.
     sidebar_row_targets: Vec<SidebarRowTarget>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViewportScrollInput {
-    pub diff_scroll: usize,
-    pub sidebar_scroll: usize,
-    pub file_count: usize,
-    pub diff_max_scroll: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViewportScrollState {
-    pub diff_scroll: usize,
-    pub sidebar_scroll: usize,
+#[derive(Debug)]
+pub struct DiffViewport {
+    view_height: usize,
+    area: Option<Rect>,
+    scrollbar: Option<DiffScrollbar>,
+    /// Status rows stacked above diff content in the pane's inner area.
+    status_rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,16 +57,12 @@ pub struct DiffScrollbarDrag {
 impl RenderedViewport {
     pub fn new() -> Self {
         Self {
-            diff_view_height: 1,
             sidebar_view_height: 1,
             sidebar_area: None,
             branches_area: None,
             branches_row_indices: Vec::new(),
             commits_area: None,
             commits_row_indices: Vec::new(),
-            diff_area: None,
-            diff_scrollbar: None,
-            diff_status_rows: 0,
             sidebar_row_targets: Vec::new(),
         }
     }
@@ -90,28 +73,13 @@ impl RenderedViewport {
         self.branches_row_indices.clear();
         self.commits_area = None;
         self.commits_row_indices.clear();
-        self.diff_area = None;
-        self.diff_scrollbar = None;
         self.sidebar_row_targets.clear();
-    }
-
-    pub fn clear_diff_geometry(&mut self) {
-        self.diff_scrollbar = None;
-    }
-
-    pub fn diff_view_height(&self) -> usize {
-        self.diff_view_height
     }
 
     pub fn begin_sidebar(&mut self, area: Rect, height: usize) {
         self.sidebar_area = Some(area);
         self.sidebar_view_height = height.max(1);
         self.sidebar_row_targets.clear();
-    }
-
-    pub fn begin_diff(&mut self, area: Rect, height: usize) {
-        self.diff_area = Some(area);
-        self.diff_view_height = height.max(1);
     }
 
     pub fn begin_branches(&mut self, area: Rect, first_index: usize, row_count: usize) {
@@ -122,22 +90,6 @@ impl RenderedViewport {
     pub fn begin_commits(&mut self, area: Rect, first_index: usize, row_count: usize) {
         self.commits_area = Some(area);
         self.commits_row_indices = (first_index..first_index.saturating_add(row_count)).collect();
-    }
-
-    pub fn set_diff_scrollbar(&mut self, scrollbar: Option<DiffScrollbar>) {
-        self.diff_scrollbar = scrollbar;
-    }
-
-    pub fn diff_scrollbar(&self) -> Option<&DiffScrollbar> {
-        self.diff_scrollbar.as_ref()
-    }
-
-    pub fn set_diff_status_rows(&mut self, rows: usize) {
-        self.diff_status_rows = rows;
-    }
-
-    pub fn diff_status_rows(&self) -> usize {
-        self.diff_status_rows
     }
 
     pub fn begin_sidebar_rows(&mut self) {
@@ -181,14 +133,60 @@ impl RenderedViewport {
         self.commits_area
             .is_some_and(|area| rect_contains(area, column, row))
     }
+}
 
-    pub fn is_diff_at(&self, column: u16, row: u16) -> bool {
-        self.diff_area
+impl DiffViewport {
+    pub fn new() -> Self {
+        Self {
+            view_height: 1,
+            area: None,
+            scrollbar: None,
+            status_rows: 0,
+        }
+    }
+
+    pub fn invalidate_frame(&mut self) {
+        self.area = None;
+        self.scrollbar = None;
+    }
+
+    pub fn clear(&mut self) {
+        self.invalidate_frame();
+        self.status_rows = 0;
+    }
+
+    pub fn view_height(&self) -> usize {
+        self.view_height
+    }
+
+    pub fn begin(&mut self, area: Rect, height: usize) {
+        self.area = Some(area);
+        self.view_height = height.max(1);
+    }
+
+    pub fn set_scrollbar(&mut self, scrollbar: Option<DiffScrollbar>) {
+        self.scrollbar = scrollbar;
+    }
+
+    pub fn scrollbar(&self) -> Option<&DiffScrollbar> {
+        self.scrollbar.as_ref()
+    }
+
+    pub fn set_status_rows(&mut self, rows: usize) {
+        self.status_rows = rows;
+    }
+
+    pub fn status_rows(&self) -> usize {
+        self.status_rows
+    }
+
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        self.area
             .is_some_and(|area| rect_contains(area, column, row))
     }
 
-    pub fn diff_row_at(&self, column: u16, row: u16) -> Option<usize> {
-        let area = self.diff_area?;
+    pub fn visible_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.area?;
         if !rect_inner_contains(area, column, row) {
             return None;
         }
@@ -196,32 +194,18 @@ impl RenderedViewport {
         Some(row.saturating_sub(area.y + 1) as usize)
     }
 
-    pub fn clamped_scrolls(&self, input: ViewportScrollInput) -> ViewportScrollState {
-        let diff_scroll = input.diff_scroll.min(input.diff_max_scroll);
-        let sidebar_scroll = if input.file_count == 0 {
-            0
-        } else {
-            input.sidebar_scroll
-        };
-
-        ViewportScrollState {
-            diff_scroll,
-            sidebar_scroll,
-        }
-    }
-
-    pub fn diff_scrollbar_max_scroll(&self, file_index: usize, file_id: &str) -> usize {
-        self.matching_diff_scrollbar(file_index, Some(file_id))
+    pub fn scrollbar_max_scroll(&self, file_index: usize, file_id: &str) -> usize {
+        self.matching_scrollbar(file_index, Some(file_id))
             .map_or(0, DiffScrollbar::max_scroll)
     }
 
-    fn matching_diff_scrollbar(
+    fn matching_scrollbar(
         &self,
         file_index: usize,
         file_id: Option<&str>,
     ) -> Option<&DiffScrollbar> {
         let file_id = file_id?;
-        self.diff_scrollbar
+        self.scrollbar
             .as_ref()
             .filter(|scrollbar| scrollbar.matches_file(file_index, file_id))
     }
@@ -367,28 +351,6 @@ fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
 mod tests {
     use super::*;
     use crate::rows::SidebarRowTarget;
-
-    #[test]
-    fn clamped_scrolls_leave_sidebar_scroll_for_sidebar_renderer() {
-        let mut viewport = RenderedViewport::new();
-        viewport.begin_sidebar(Rect::default(), 3);
-
-        let scrolls = viewport.clamped_scrolls(ViewportScrollInput {
-            diff_scroll: 0,
-            sidebar_scroll: 0,
-            file_count: 6,
-            diff_max_scroll: 0,
-        });
-        assert_eq!(scrolls.sidebar_scroll, 0);
-
-        let scrolls = viewport.clamped_scrolls(ViewportScrollInput {
-            diff_scroll: 0,
-            sidebar_scroll: 99,
-            file_count: 6,
-            diff_max_scroll: 0,
-        });
-        assert_eq!(scrolls.sidebar_scroll, 99);
-    }
 
     #[test]
     fn sidebar_row_mapping_records_visible_rows() {

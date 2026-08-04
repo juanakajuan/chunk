@@ -14,9 +14,9 @@ use ratatui::text::Line;
 #[test]
 fn diff_scroll_bounds_use_rendered_rows_when_available() {
     let mut app = app_with(changeset_with_one_file());
-    app.viewport.begin_diff(Rect::default(), 3);
-    app.diff_pane.set_scroll(99);
-    app.diff_render.cache_test_diff_lines(
+    app.selected_diff.begin_test_frame(Rect::default(), 3);
+    app.selected_diff.set_scroll(99);
+    app.selected_diff.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -30,15 +30,15 @@ fn diff_scroll_bounds_use_rendered_rows_when_available() {
 
     app.ensure_scroll_bounds();
 
-    assert_eq!(app.diff_pane.scroll(), 5);
+    assert_eq!(app.selected_diff.scroll(), 5);
 }
 
 #[test]
 fn reload_preserves_selected_file_and_scroll_by_path() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
     app.selected_file_index = 1;
-    app.viewport.begin_diff(Rect::default(), 3);
-    app.diff_pane.set_scroll(4);
+    app.selected_diff.begin_test_frame(Rect::default(), 3);
+    app.selected_diff.set_scroll(4);
 
     app.apply_reloaded_changeset(changeset_with_paths(["b.txt", "a.txt"]), true);
 
@@ -47,24 +47,24 @@ fn reload_preserves_selected_file_and_scroll_by_path() {
         Some("b.txt")
     );
     assert_eq!(app.selected_file_index, 0);
-    assert_eq!(app.diff_pane.scroll(), 4);
+    assert_eq!(app.selected_diff.scroll(), 4);
 }
 
 #[test]
 fn reload_preserves_selected_hunk_by_coordinates() {
     let mut app = app_with(changeset_with_two_hunk_file());
-    app.diff_pane.set_selected_hunk_index(Some(1));
+    app.selected_diff.set_selected_hunk_index(Some(1));
 
     app.apply_reloaded_changeset(changeset_with_two_hunk_file(), true);
 
-    assert_eq!(app.diff_pane.selected_hunk_index(), Some(1));
+    assert_eq!(app.selected_diff.selected_hunk_index(), Some(1));
 }
 
 #[test]
 fn reload_clamps_scroll_when_selected_file_shrinks() {
     let mut app = app_with(changeset_with_paths(["sample.txt"]));
-    app.viewport.begin_diff(Rect::default(), 3);
-    app.diff_pane.set_scroll(99);
+    app.selected_diff.begin_test_frame(Rect::default(), 3);
+    app.selected_diff.set_scroll(99);
 
     app.apply_reloaded_changeset(changeset_with_short_file("sample.txt"), true);
 
@@ -72,14 +72,14 @@ fn reload_clamps_scroll_when_selected_file_shrinks() {
         app.selected_file().map(DiffFile::display_path),
         Some("sample.txt")
     );
-    assert_eq!(app.diff_pane.scroll(), 0);
+    assert_eq!(app.selected_diff.scroll(), 0);
 }
 
 #[test]
 fn reload_resets_selection_and_scroll_when_selected_file_disappears() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
     app.selected_file_index = 1;
-    app.diff_pane.set_scroll(4);
+    app.selected_diff.set_scroll(4);
 
     app.apply_reloaded_changeset(changeset_with_paths(["a.txt"]), true);
 
@@ -87,7 +87,7 @@ fn reload_resets_selection_and_scroll_when_selected_file_disappears() {
         app.selected_file().map(DiffFile::display_path),
         Some("a.txt")
     );
-    assert_eq!(app.diff_pane.scroll(), 0);
+    assert_eq!(app.selected_diff.scroll(), 0);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn hiding_files_panel_moves_focus_to_diff() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
     app.selected_file_index = 1;
     app.sidebar_scroll = 1;
-    app.diff_pane.set_scroll(3);
+    app.selected_diff.set_scroll(3);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
         .unwrap();
@@ -104,7 +104,7 @@ fn hiding_files_panel_moves_focus_to_diff() {
     assert_eq!(app.focus, FocusPane::Diff);
     assert_eq!(app.selected_file_index, 1);
     assert_eq!(app.sidebar_scroll, 1);
-    assert_eq!(app.diff_pane.scroll(), 3);
+    assert_eq!(app.selected_diff.scroll(), 3);
 }
 
 #[test]
@@ -464,8 +464,8 @@ fn ctrl_c_exits_tui() {
 fn hunk_jump_uses_cached_wrapped_offsets() {
     let mut app = app_with(changeset_with_two_hunk_file());
     let theme = Theme::github_dark();
-    app.viewport.begin_diff(Rect::default(), 3);
-    app.diff_render.cache_test_diff_lines(
+    app.selected_diff.begin_test_frame(Rect::default(), 3);
+    app.selected_diff.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -480,21 +480,21 @@ fn hunk_jump_uses_cached_wrapped_offsets() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.scroll(), 79);
-    assert_eq!(app.diff_pane.selected_hunk_index(), Some(1));
+    assert_eq!(app.selected_diff.scroll(), 79);
+    assert_eq!(app.selected_diff.selected_hunk_index(), Some(1));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.scroll(), 0);
-    assert_eq!(app.diff_pane.selected_hunk_index(), Some(0));
+    assert_eq!(app.selected_diff.scroll(), 0);
+    assert_eq!(app.selected_diff.selected_hunk_index(), Some(0));
 }
 
 #[test]
 fn hunk_jump_handles_missing_and_single_offsets() {
     let mut app = app_with(changeset_with_one_file());
     let theme = Theme::github_dark();
-    app.viewport.begin_diff(Rect::default(), 3);
-    app.diff_render.cache_test_diff_lines(
+    app.selected_diff.begin_test_frame(Rect::default(), 3);
+    app.selected_diff.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -506,13 +506,13 @@ fn hunk_jump_handles_missing_and_single_offsets() {
         )
         .with_hunk_offsets(Vec::new()),
     );
-    app.diff_pane.set_scroll(4);
+    app.selected_diff.set_scroll(4);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.scroll(), 4);
+    assert_eq!(app.selected_diff.scroll(), 4);
 
-    app.diff_render.cache_test_diff_lines(
+    app.selected_diff.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -524,23 +524,23 @@ fn hunk_jump_handles_missing_and_single_offsets() {
         )
         .with_hunk_offsets(vec![5]),
     );
-    app.diff_pane.set_scroll(0);
+    app.selected_diff.set_scroll(0);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.scroll(), 4);
+    assert_eq!(app.selected_diff.scroll(), 4);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.scroll(), 4);
+    assert_eq!(app.selected_diff.scroll(), 4);
 }
 
 #[test]
 fn scrolling_diff_selects_hunk_at_top_visible_row() {
     let mut app = app_with(changeset_with_two_hunk_file());
     let theme = Theme::github_dark();
-    app.viewport.begin_diff(Rect::default(), 3);
-    app.diff_render.cache_test_diff_lines(
+    app.selected_diff.begin_test_frame(Rect::default(), 3);
+    app.selected_diff.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -555,15 +555,15 @@ fn scrolling_diff_selects_hunk_at_top_visible_row() {
 
     app.scroll_diff_by(VerticalDirection::Down, 80);
 
-    assert_eq!(app.diff_pane.selected_hunk_index(), Some(1));
+    assert_eq!(app.selected_diff.selected_hunk_index(), Some(1));
 }
 
 #[test]
 fn selected_hunk_style_is_applied_to_visible_cached_rows() {
     let theme = Theme::github_dark();
     let mut app = app_with(changeset_with_two_hunk_file());
-    app.diff_pane.set_selected_hunk_index(Some(1));
-    app.diff_pane.set_scroll(8);
+    app.selected_diff.set_selected_hunk_index(Some(1));
+    app.selected_diff.set_scroll(8);
 
     let pane = render_diff_pane(&mut app, theme);
 
@@ -578,8 +578,9 @@ fn selected_hunk_style_is_applied_to_visible_cached_rows() {
 fn diff_click_selects_hunk_under_pointer() {
     let mut app = app_with(changeset_with_two_hunk_file());
     let theme = Theme::github_dark();
-    app.viewport.begin_diff(Rect::new(0, 0, 80, 10), 8);
-    app.diff_render.cache_test_diff_lines(
+    app.selected_diff
+        .begin_test_frame(Rect::new(0, 0, 80, 10), 8);
+    app.selected_diff.cache_test_diff_lines(
         0,
         RenderedDiffLines::new(
             "0".to_string(),
@@ -596,8 +597,8 @@ fn diff_click_selects_hunk_under_pointer() {
     app.handle_left_up(1, 6);
 
     assert_eq!(app.focus, FocusPane::Diff);
-    assert_eq!(app.diff_pane.selected_hunk_index(), Some(1));
-    assert_eq!(app.diff_pane.scroll(), 1);
+    assert_eq!(app.selected_diff.selected_hunk_index(), Some(1));
+    assert_eq!(app.selected_diff.scroll(), 1);
 }
 
 #[test]
@@ -686,10 +687,10 @@ fn diff_pane_editor_request_uses_visible_diff_line() {
 
     render_diff_pane(&mut app, theme);
     let second_hunk_offset = app
-        .diff_render
+        .selected_diff
         .hunk_offset(0, "0", 1)
         .expect("second hunk offset should be cached");
-    app.diff_pane.set_scroll(second_hunk_offset + 2);
+    app.selected_diff.set_scroll(second_hunk_offset + 2);
     render_diff_pane(&mut app, theme);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
@@ -728,7 +729,7 @@ fn diff_scrollbar_click_and_drag_update_scroll() {
         modifiers: KeyModifiers::NONE,
     });
 
-    let clicked_scroll = app.diff_pane.scroll();
+    let clicked_scroll = app.selected_diff.scroll();
     assert_eq!(app.focus, FocusPane::Diff);
     assert!(clicked_scroll > 0);
 
@@ -739,7 +740,7 @@ fn diff_scrollbar_click_and_drag_update_scroll() {
         modifiers: KeyModifiers::NONE,
     });
 
-    assert!(app.diff_pane.scroll() < clicked_scroll);
+    assert!(app.selected_diff.scroll() < clicked_scroll);
 }
 
 #[test]
@@ -932,11 +933,11 @@ fn search_prompt_applies_query_scrolls_to_first_match_and_highlights_it() {
     enter_search_query(&mut app, "target");
     let pane = render_diff_pane(&mut app, theme);
 
-    assert_eq!(app.diff_pane.search_match_count(), 2);
-    assert_eq!(app.diff_pane.active_search_index(), Some(0));
-    let active_row = app.diff_pane.active_search_match_row().unwrap();
-    assert!(active_row >= app.diff_pane.scroll());
-    assert!(active_row < app.diff_pane.scroll() + app.viewport.diff_view_height());
+    assert_eq!(app.selected_diff.search_match_count(), 2);
+    assert_eq!(app.selected_diff.active_search_index(), Some(0));
+    let active_row = app.selected_diff.active_search_match_row().unwrap();
+    assert!(active_row >= app.selected_diff.scroll());
+    assert!(active_row < app.selected_diff.scroll() + app.selected_diff.view_height());
     assert!(pane.lines.iter().any(|line| {
         line.spans
             .iter()
@@ -957,11 +958,11 @@ fn search_next_and_previous_cycle_matches() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.active_search_index(), Some(1));
+    assert_eq!(app.selected_diff.active_search_index(), Some(1));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.diff_pane.active_search_index(), Some(0));
+    assert_eq!(app.selected_diff.active_search_index(), Some(0));
 }
 
 #[test]
@@ -982,9 +983,9 @@ fn esc_clears_active_search_without_exiting() {
         .unwrap();
 
     assert!(keep_running);
-    assert!(app.diff_pane.active_search_query().is_none());
-    assert_eq!(app.diff_pane.search_match_count(), 0);
-    assert_eq!(app.diff_pane.active_search_index(), None);
+    assert!(app.selected_diff.active_search_query().is_none());
+    assert_eq!(app.selected_diff.search_match_count(), 0);
+    assert_eq!(app.selected_diff.active_search_index(), None);
 }
 
 #[test]
@@ -1001,9 +1002,9 @@ fn esc_in_search_prompt_clears_previous_search() {
         .unwrap();
 
     assert!(keep_running);
-    assert!(!app.diff_pane.search_prompt_open());
-    assert!(app.diff_pane.active_search_query().is_none());
-    assert_eq!(app.diff_pane.search_match_count(), 0);
+    assert!(!app.selected_diff.search_prompt_open());
+    assert!(app.selected_diff.active_search_query().is_none());
+    assert_eq!(app.selected_diff.search_match_count(), 0);
 }
 
 #[test]
