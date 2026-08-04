@@ -1,21 +1,16 @@
 //! User-configured shell command bindings and execution.
 
 use std::env;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
+#[cfg(test)]
+use std::process::Output;
+use std::sync::mpsc::Receiver;
 
 use color_eyre::eyre::{Result, eyre};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::process::{ProcessOutcome, ProcessOutputCollector};
-
-const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const TERMINATION_GRACE: Duration = Duration::from_millis(100);
-const OUTPUT_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+use crate::process::{CancellableProcess, ProcessOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CustomCommandBinding {
@@ -110,6 +105,7 @@ impl CustomCommandResult {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_output(
         binding: &CustomCommandBinding,
         cwd: PathBuf,
@@ -124,14 +120,6 @@ impl CustomCommandResult {
         error: impl Into<String>,
     ) -> Self {
         Self::new(binding, cwd, ProcessOutcome::not_started(error))
-    }
-
-    pub(crate) fn cancelled(
-        binding: &CustomCommandBinding,
-        cwd: PathBuf,
-        output: Option<Output>,
-    ) -> Self {
-        Self::new(binding, Some(cwd), ProcessOutcome::cancelled(output))
     }
 
     pub(crate) fn label(&self) -> &str {
@@ -169,100 +157,9 @@ pub(crate) fn run(
     cancel: Receiver<()>,
 ) -> std::io::Result<CustomCommandResult> {
     let mut process = shell_command(binding.command());
-    process
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    prepare_process(&mut process);
-
-    let mut child = process.spawn()?;
-    let mut output = ProcessOutputCollector::start(&mut child);
-
-    loop {
-        output.drain();
-
-        if cancellation_requested(&cancel) {
-            let status = terminate_child(&mut child)?;
-            let process_output = status.map(|status| output.collect(status));
-            return Ok(CustomCommandResult::cancelled(binding, cwd, process_output));
-        }
-
-        if let Some(status) = child.try_wait()? {
-            let process_output = output.collect(status);
-            return Ok(CustomCommandResult::from_output(
-                binding,
-                cwd,
-                process_output,
-            ));
-        }
-
-        thread::sleep(COMMAND_POLL_INTERVAL);
-    }
-}
-
-#[cfg(unix)]
-fn prepare_process(process: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    process.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn prepare_process(_process: &mut Command) {}
-
-fn cancellation_requested(cancel: &Receiver<()>) -> bool {
-    match cancel.try_recv() {
-        Ok(()) | Err(TryRecvError::Disconnected) => true,
-        Err(TryRecvError::Empty) => false,
-    }
-}
-
-fn terminate_child(child: &mut Child) -> io::Result<Option<ExitStatus>> {
-    terminate_process_group_gracefully(child);
-    if let Some(status) = wait_for_child_exit(child, TERMINATION_GRACE)? {
-        return Ok(Some(status));
-    }
-
-    terminate_process_group_forcefully(child);
-    wait_for_child_exit(child, TERMINATION_GRACE)
-}
-
-fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        thread::sleep(OUTPUT_DRAIN_POLL_INTERVAL);
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process_group_gracefully(child: &mut Child) {
-    let group = format!("-{}", child.id());
-    let _ = Command::new("kill").args(["-TERM", &group]).status();
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group_gracefully(child: &mut Child) {
-    let _ = child.kill();
-}
-
-#[cfg(unix)]
-fn terminate_process_group_forcefully(child: &mut Child) {
-    let group = format!("-{}", child.id());
-    let _ = Command::new("kill").args(["-KILL", &group]).status();
-    let _ = child.kill();
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group_forcefully(child: &mut Child) {
-    let _ = child.kill();
+    process.current_dir(&cwd);
+    let outcome = CancellableProcess::in_process_group(process).run(&cancel)?;
+    Ok(CustomCommandResult::new(binding, Some(cwd), outcome))
 }
 
 #[cfg(not(windows))]
@@ -286,10 +183,6 @@ fn shell_command(command: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{MAX_CAPTURED_OUTPUT_BYTES, TRUNCATED_OUTPUT_NOTICE_MAX_BYTES};
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn parses_single_character_keys() {
@@ -371,65 +264,6 @@ mod tests {
         assert_eq!(result.stdout(), "");
         assert_eq!(result.stderr(), "missing shell");
         assert_eq!(result.status_text(), "failed to start: missing shell");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn running_command_can_be_cancelled() {
-        let binding = CustomCommandBinding::new(
-            CommandKey::parse("C").unwrap(),
-            "sleep".to_string(),
-            "printf start; sleep 5; printf done".to_string(),
-        );
-        let (cancel_sender, cancel) = mpsc::channel();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            cancel_sender.send(()).unwrap();
-        });
-
-        let started_at = Instant::now();
-        let result = run(&binding, PathBuf::from("."), cancel).unwrap();
-
-        assert_eq!(result.status_text(), "cancelled");
-        assert!(started_at.elapsed() < Duration::from_secs(2));
-        assert!(result.stdout().contains("start"));
-        assert!(!result.stdout().contains("done"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_output_is_bounded() {
-        let binding = CustomCommandBinding::new(
-            CommandKey::parse("C").unwrap(),
-            "large output".to_string(),
-            format!("yes chunk | head -c {}", MAX_CAPTURED_OUTPUT_BYTES + 1024),
-        );
-        let (_cancel_sender, cancel) = mpsc::channel();
-
-        let result = run(&binding, PathBuf::from("."), cancel).unwrap();
-
-        assert!(result.stdout().contains("output truncated"));
-        assert!(
-            result.stdout().len() <= MAX_CAPTURED_OUTPUT_BYTES + TRUNCATED_OUTPUT_NOTICE_MAX_BYTES
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_returns_when_background_child_keeps_stdout_open() {
-        let binding = CustomCommandBinding::new(
-            CommandKey::parse("C").unwrap(),
-            "background child".to_string(),
-            "printf done; sleep 5 &".to_string(),
-        );
-        let (_cancel_sender, cancel) = mpsc::channel();
-
-        let started_at = Instant::now();
-        let result = run(&binding, PathBuf::from("."), cancel).unwrap();
-
-        assert_eq!(result.status_text(), "exit 0");
-        assert!(started_at.elapsed() < Duration::from_secs(2));
-        assert!(result.stdout().contains("done"));
     }
 
     fn binding() -> CustomCommandBinding {

@@ -6,20 +6,20 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Output, Stdio};
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::process::Output;
+use std::process::{self, Command};
+use std::sync::mpsc::Receiver;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::{DiffFile, DiffHunk, DiffLine, DiffLineKind};
-use crate::process::{ProcessOutcome, ProcessOutputCollector};
+use crate::process::{CancellableProcess, ProcessOutcome};
 
 const OPENCODE_PROGRAM: &str = "opencode";
 const CLAUDE_PROGRAM: &str = "claude";
 const CODEX_PROGRAM: &str = "codex";
 const CLAUDE_READ_ONLY_TOOLS: &str = "Read,Glob,Grep,LS,WebFetch,WebSearch";
 const CLAUDE_DISALLOWED_TOOLS: &str = "Bash,Edit,MultiEdit,Write,NotebookEdit,Task";
-const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_DIFF_CONTEXT_CHARS: usize = 12_000;
 const READ_ONLY_CONFIG_CONTENT: &str = r#"{"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled","permission":{"*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"glob":"allow","grep":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","skill":"deny","webfetch":"allow","websearch":"allow","external_directory":"deny"}}"#;
 const EXPLAIN_CODE_PROMPT: &str = "Explain the selected or focused code for a code review. Describe what the code does, why the changed code matters in this review context, and any assumptions or risks that affect review. Inspect surrounding repository context read-only if needed.";
@@ -396,6 +396,7 @@ impl AskAiResult {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_output(request: AskAiRequest, repo_root: PathBuf, output: Output) -> Self {
         Self::from_request(
             request,
@@ -404,6 +405,7 @@ impl AskAiResult {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn cancelled(
         request: AskAiRequest,
         repo_root: PathBuf,
@@ -418,17 +420,6 @@ impl AskAiResult {
         error: impl Into<String>,
     ) -> Self {
         Self::from_request(request, repo_root, ProcessOutcome::not_started(error))
-    }
-
-    pub(crate) fn unpublished_summary_from_output(repo_root: PathBuf, output: Output) -> Self {
-        Self::from_unpublished_summary(Some(repo_root), ProcessOutcome::from_output(output))
-    }
-
-    pub(crate) fn unpublished_summary_cancelled(
-        repo_root: PathBuf,
-        output: Option<Output>,
-    ) -> Self {
-        Self::from_unpublished_summary(Some(repo_root), ProcessOutcome::cancelled(output))
     }
 
     pub(crate) fn unpublished_summary_not_started(
@@ -620,21 +611,20 @@ impl AskAiInvocation {
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
-        let stdin = if self.stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        };
-        command
-            .args(&self.args)
-            .current_dir(&self.current_dir)
-            .stdin(stdin)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(&self.args).current_dir(&self.current_dir);
         for (key, value) in &self.env {
             command.env(key, value);
         }
         command
+    }
+
+    fn into_process(mut self) -> CancellableProcess {
+        let stdin = self.stdin.take();
+        let process = CancellableProcess::child(self.command());
+        match stdin {
+            Some(stdin) => process.stdin(stdin),
+            None => process,
+        }
     }
 }
 
@@ -680,14 +670,11 @@ pub(crate) fn run_unpublished_summary(
         None => AskAiInvocation::unpublished_summary_inline(&settings, diff_text, &repo_root),
     };
 
-    match run_invocation(invocation, &cancel)? {
-        InvocationOutcome::Completed(output) => Ok(AskAiResult::unpublished_summary_from_output(
-            repo_root, output,
-        )),
-        InvocationOutcome::Cancelled(output) => Ok(AskAiResult::unpublished_summary_cancelled(
-            repo_root, output,
-        )),
-    }
+    let outcome = invocation.into_process().run(&cancel)?;
+    Ok(AskAiResult::from_unpublished_summary(
+        Some(repo_root),
+        outcome,
+    ))
 }
 
 pub(crate) fn run(
@@ -697,57 +684,8 @@ pub(crate) fn run(
     cancel: Receiver<()>,
 ) -> io::Result<AskAiResult> {
     let invocation = AskAiInvocation::new(&settings, &request, &repo_root);
-    match run_invocation(invocation, &cancel)? {
-        InvocationOutcome::Completed(output) => {
-            Ok(AskAiResult::from_output(request, repo_root, output))
-        }
-        InvocationOutcome::Cancelled(output) => {
-            Ok(AskAiResult::cancelled(request, repo_root, output))
-        }
-    }
-}
-
-enum InvocationOutcome {
-    Completed(Output),
-    Cancelled(Option<Output>),
-}
-
-fn run_invocation(
-    mut invocation: AskAiInvocation,
-    cancel: &Receiver<()>,
-) -> io::Result<InvocationOutcome> {
-    let mut child = invocation.command().spawn()?;
-    let mut output = ProcessOutputCollector::start(&mut child);
-    if let Some(stdin) = invocation.stdin.take() {
-        let Some(mut child_stdin) = child.stdin.take() else {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "AI harness stdin was unavailable",
-            ));
-        };
-        if let Err(error) = child_stdin.write_all(stdin.as_bytes())
-            && error.kind() != io::ErrorKind::BrokenPipe
-        {
-            return Err(error);
-        }
-    }
-
-    loop {
-        output.drain();
-
-        if cancellation_requested(cancel) {
-            let _ = child.kill();
-            let process_output = child.wait().ok().map(|status| output.collect(status));
-            return Ok(InvocationOutcome::Cancelled(process_output));
-        }
-
-        if let Some(status) = child.try_wait()? {
-            let process_output = output.collect(status);
-            return Ok(InvocationOutcome::Completed(process_output));
-        }
-
-        thread::sleep(REQUEST_POLL_INTERVAL);
-    }
+    let outcome = invocation.into_process().run(&cancel)?;
+    Ok(AskAiResult::from_request(request, Some(repo_root), outcome))
 }
 
 fn build_prompt(request: &AskAiRequest, repo_root: &Path) -> String {
@@ -1027,13 +965,6 @@ fn set_temp_diff_permissions(options: &mut fs::OpenOptions) {
 
 #[cfg(not(unix))]
 fn set_temp_diff_permissions(_options: &mut fs::OpenOptions) {}
-
-fn cancellation_requested(cancel: &Receiver<()>) -> bool {
-    match cancel.try_recv() {
-        Ok(()) | Err(TryRecvError::Disconnected) => true,
-        Err(TryRecvError::Empty) => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1334,57 +1265,6 @@ mod tests {
             "failed to start: missing opencode"
         );
         assert_eq!(not_started.stderr(), "missing opencode");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn invocation_drains_large_stdout_while_process_runs() {
-        use crate::process::{MAX_CAPTURED_OUTPUT_BYTES, TRUNCATED_OUTPUT_NOTICE_MAX_BYTES};
-        use std::sync::mpsc;
-
-        let invocation = AskAiInvocation {
-            program: "head".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "2097152".to_string(),
-                "/dev/zero".to_string(),
-            ],
-            current_dir: PathBuf::from("."),
-            env: Vec::new(),
-            stdin: None,
-        };
-        let (cancel_sender, cancel) = mpsc::channel();
-        let (done_sender, done) = mpsc::channel();
-
-        thread::spawn(move || {
-            let _ = done_sender.send(run_invocation(invocation, &cancel));
-        });
-
-        match done.recv_timeout(Duration::from_secs(2)) {
-            Ok(Ok(InvocationOutcome::Completed(output))) => {
-                assert!(output.status.success());
-                assert!(
-                    output.stdout.len()
-                        <= MAX_CAPTURED_OUTPUT_BYTES + TRUNCATED_OUTPUT_NOTICE_MAX_BYTES
-                );
-                assert!(
-                    String::from_utf8_lossy(&output.stdout).contains("output truncated"),
-                    "large output should include truncation notice"
-                );
-            }
-            Ok(Ok(InvocationOutcome::Cancelled(_))) => {
-                panic!("large-output invocation was cancelled unexpectedly")
-            }
-            Ok(Err(error)) => panic!("large-output invocation failed: {error}"),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = cancel_sender.send(());
-                let _ = done.recv_timeout(Duration::from_secs(2));
-                panic!("large-output invocation blocked without draining stdout");
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("large-output invocation worker disconnected")
-            }
-        }
     }
 
     #[test]
