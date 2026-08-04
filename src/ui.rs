@@ -14,9 +14,9 @@ use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::theme::Theme;
 use crate::viewport::DiffScrollbar;
 
-const SIDEBAR_WIDTH: u16 = 34;
+const SIDEBAR_WIDTH: u16 = 44;
 const MIN_SPLIT_WIDTH: u16 = 100;
-const NARROW_SIDEBAR_HEIGHT: u16 = 12;
+const NARROW_SIDEBAR_HEIGHT: u16 = 16;
 const PANE_BORDER_WIDTH: u16 = 2;
 const HELP_OVERLAY_WIDTH: u16 = 78;
 const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
