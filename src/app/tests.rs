@@ -36,7 +36,8 @@ fn diff_scroll_bounds_use_rendered_rows_when_available() {
 #[test]
 fn reload_preserves_selected_file_and_scroll_by_path() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
-    app.selected_file_index = 1;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
     app.selected_diff.begin_test_frame(Rect::default(), 3);
     app.selected_diff.set_scroll(4);
 
@@ -46,7 +47,7 @@ fn reload_preserves_selected_file_and_scroll_by_path() {
         app.selected_file().map(DiffFile::display_path),
         Some("b.txt")
     );
-    assert_eq!(app.selected_file_index, 0);
+    assert_eq!(app.selected_file_index(), 0);
     assert_eq!(app.selected_diff.scroll(), 4);
 }
 
@@ -78,7 +79,8 @@ fn reload_clamps_scroll_when_selected_file_shrinks() {
 #[test]
 fn reload_resets_selection_and_scroll_when_selected_file_disappears() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
-    app.selected_file_index = 1;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
     app.selected_diff.set_scroll(4);
 
     app.apply_reloaded_changeset(changeset_with_paths(["a.txt"]), true);
@@ -93,8 +95,9 @@ fn reload_resets_selection_and_scroll_when_selected_file_disappears() {
 #[test]
 fn hiding_files_panel_moves_focus_to_diff() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
-    app.selected_file_index = 1;
-    app.sidebar_scroll = 1;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
+    app.files_panel.set_scroll(1);
     app.selected_diff.set_scroll(3);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -102,8 +105,8 @@ fn hiding_files_panel_moves_focus_to_diff() {
 
     assert!(!app.files_panel_visible);
     assert_eq!(app.focus, FocusPane::Diff);
-    assert_eq!(app.selected_file_index, 1);
-    assert_eq!(app.sidebar_scroll, 1);
+    assert_eq!(app.selected_file_index(), 1);
+    assert_eq!(app.files_panel.scroll(), 1);
     assert_eq!(app.selected_diff.scroll(), 3);
 }
 
@@ -322,10 +325,7 @@ fn initial_files_panel_focuses_root_folder() {
     let app = app_with(changeset_with_paths(["src/app.rs", "README.md"]));
 
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(
-        app.sidebar_cursor_target,
-        Some(SidebarRowTarget::Folder(String::new()))
-    );
+    assert_eq!(app.files_panel.current_folder_path(), Some(""));
 }
 
 #[test]
@@ -333,10 +333,7 @@ fn initial_files_panel_focuses_first_folder_when_root_is_hidden() {
     let app = app_with(changeset_with_paths(["src/app.rs", "src/main.rs"]));
 
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(
-        app.sidebar_cursor_target,
-        Some(SidebarRowTarget::Folder("src".to_string()))
-    );
+    assert_eq!(app.files_panel.current_folder_path(), Some("src"));
 }
 
 #[test]
@@ -347,9 +344,10 @@ fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
         "src/config.rs",
         "README.md",
     ]));
-    app.collapsed_tree_dirs.insert("src/bin".to_string());
-    app.selected_file_index = 0;
-    app.sidebar_cursor_target = Some(SidebarRowTarget::File(0));
+    app.files_panel.collapse("src/bin");
+    app.files_panel
+        .set_selected_file(0, app.changeset.files.len());
+    app.files_panel.set_cursor_file(0);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
@@ -358,8 +356,9 @@ fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
         Some("src/config.rs")
     );
 
-    app.selected_file_index = 1;
-    app.sidebar_cursor_target = None;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
+    app.files_panel.clear_cursor();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
     assert_eq!(
@@ -376,7 +375,8 @@ fn clicking_tree_file_selects_corresponding_diff() {
         "src/config.rs",
         "README.md",
     ]));
-    app.selected_file_index = 1;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
     render_sidebar(&mut app);
 
     app.handle_left_down(1, 6);
@@ -397,13 +397,14 @@ fn clicking_tree_folder_collapses_without_losing_selected_file() {
         "src/config.rs",
         "README.md",
     ]));
-    app.selected_file_index = 1;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
     render_sidebar(&mut app);
 
     app.handle_left_down(1, 4);
     app.handle_left_up(1, 4);
 
-    assert!(app.collapsed_tree_dirs.contains("src/bin"));
+    assert!(app.files_panel.is_collapsed("src/bin"));
     assert_eq!(
         app.selected_file().map(DiffFile::display_path),
         Some("src/bin/chunk.rs")
@@ -641,7 +642,8 @@ fn text_drag_requests_clipboard_copy() {
 #[test]
 fn sidebar_y_copies_selected_file_path() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
-    app.selected_file_index = 1;
+    app.files_panel
+        .set_selected_file(1, app.changeset.files.len());
     app.focus = FocusPane::Sidebar;
 
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
@@ -761,7 +763,7 @@ fn diff_space_without_hunks_sets_live_error_without_exiting() {
 fn discard_key_requires_confirmation() {
     let mut app = app_with(changeset_with_one_file());
     app.focus = FocusPane::Sidebar;
-    app.select_file(0);
+    app.files_panel.set_cursor_file(0);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
@@ -787,13 +789,14 @@ fn files_panel_hover_changes_pane_focus_without_changing_tree_focus() {
         "README.md",
     ]));
     app.focus = FocusPane::Diff;
-    app.selected_file_index = 3;
-    app.sidebar_cursor_target = Some(SidebarRowTarget::File(3));
+    app.files_panel
+        .set_selected_file(3, app.changeset.files.len());
+    app.files_panel.set_cursor_file(3);
     render_sidebar(&mut app);
 
     app.handle_hover(1, 1);
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(app.sidebar_cursor_target, Some(SidebarRowTarget::File(3)));
+    assert_eq!(app.files_panel.current_file_target(), Some(3));
     assert_eq!(
         app.selected_file().map(DiffFile::display_path),
         Some("README.md")
@@ -817,10 +820,7 @@ fn files_panel_hover_changes_focus_on_empty_panel_space() {
     app.handle_hover(1, 6);
 
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(
-        app.sidebar_cursor_target,
-        Some(SidebarRowTarget::Folder(String::new()))
-    );
+    assert_eq!(app.files_panel.current_folder_path(), Some(""));
 }
 
 #[test]
@@ -1227,17 +1227,14 @@ fn focused_folder_survives_reload_when_folder_still_exists() {
         "src/config.rs",
         "README.md",
     ]));
-    app.sidebar_cursor_target = Some(SidebarRowTarget::Folder("src/bin".to_string()));
+    app.files_panel.set_cursor_folder("src/bin");
 
     app.apply_reloaded_changeset(
         changeset_with_paths(["README.md", "src/bin/chunk.rs", "src/app.rs"]),
         false,
     );
 
-    assert_eq!(
-        app.sidebar_cursor_target,
-        Some(SidebarRowTarget::Folder("src/bin".to_string()))
-    );
+    assert_eq!(app.files_panel.current_folder_path(), Some("src/bin"));
 }
 
 #[test]

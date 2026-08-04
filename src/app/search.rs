@@ -24,10 +24,11 @@ impl App {
     }
 
     pub(super) fn jump_by(&mut self, direction: VerticalDirection) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.jump_by(
             direction,
-            self.selected_file_index,
-            self.changeset.files.get(self.selected_file_index),
+            selected_file_index,
+            self.changeset.files.get(selected_file_index),
         );
     }
 }

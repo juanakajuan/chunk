@@ -5,7 +5,7 @@
 //! terminal/watch orchestration lives in `runtime`, while `ui` draws Ratatui
 //! widgets.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
@@ -21,7 +21,7 @@ use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::{Changeset, DiffFile, FileStage, RepositoryOverview};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource, WorktreeMutation};
-use crate::rows::{self, SidebarRowCountsInput, SidebarRowTarget, SidebarRowsInput};
+use crate::rows;
 use crate::scroll_text::VerticalDirection;
 use crate::selection::TextSelection;
 use crate::theme::{Theme, ThemeName};
@@ -29,20 +29,20 @@ use crate::viewport::{DiffScrollbar, RenderedViewport};
 
 mod diff_frame;
 mod diff_pane;
+mod files_panel;
 mod focused_review_target;
 mod keys;
 mod overlay;
-mod review_session;
 mod search;
 mod selected_diff;
 
 pub(crate) use keys::accepts_text_input;
 pub(crate) use overlay::AiPickerField;
 
+use files_panel::{FilesPanel, FilesPanelRender, FilesPanelTarget};
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
-use review_session::{ReviewSessionReplacement, ReviewSessionSnapshot};
 use selected_diff::SelectedDiffPane;
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -58,7 +58,7 @@ pub(crate) enum FocusPane {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingLeftClick {
-    Sidebar { target: SidebarRowTarget },
+    Sidebar { target: FilesPanelTarget },
     Branch { index: usize },
     Commit { index: usize },
     Diff { hunk_index: Option<usize> },
@@ -215,8 +215,8 @@ pub(crate) struct App {
     live_error: Option<String>,
     /// Last successful background/status event, rendered above the diff.
     live_notice: Option<String>,
-    /// Index into `changeset.files`.
-    selected_file_index: usize,
+    /// Changed-files tree, including selected file, cursor, and panel geometry.
+    files_panel: FilesPanel,
     /// Selected review diff, including navigation, search, rendering, and geometry.
     selected_diff: SelectedDiffPane,
     /// Pane receiving keyboard and mouse wheel actions.
@@ -236,12 +236,6 @@ pub(crate) struct App {
     ai_settings: AiSettings,
     /// Deferred runtime effects requested by application behavior.
     effects: VecDeque<AppEffect>,
-    /// First file index considered for sidebar rendering.
-    sidebar_scroll: usize,
-    /// Collapsed tree directory paths in the current session.
-    collapsed_tree_dirs: HashSet<String>,
-    /// Active Files-panel tree row, if it differs from the selected file fallback.
-    sidebar_cursor_target: Option<SidebarRowTarget>,
     /// Active local branch and scroll offset in the Branches panel.
     selected_branch_index: usize,
     branch_scroll: usize,
@@ -254,9 +248,6 @@ pub(crate) struct App {
     text_selection: TextSelection,
     /// Deferred plain click target, cancelled if the press becomes a drag.
     pending_left_click: Option<PendingLeftClick>,
-    /// Display paths marked reviewed in this session. Keyed by `display_path`
-    /// so review state survives reloads as long as file identity stays stable.
-    reviewed_files: HashSet<String>,
 }
 
 pub(crate) struct DiffPaneRows {
@@ -278,18 +269,14 @@ impl App {
             repository_overview,
         } = review;
         let selected_diff = SelectedDiffPane::new(&changeset);
-        let collapsed_tree_dirs = HashSet::new();
-        let sidebar_cursor_target =
-            rows::visible_sidebar_targets(&changeset.files, &collapsed_tree_dirs)
-                .into_iter()
-                .next();
+        let files_panel = FilesPanel::new(&changeset.files);
         Self {
             source,
             changeset,
             repository_overview,
             live_error: None,
             live_notice: None,
-            selected_file_index: 0,
+            files_panel,
             selected_diff,
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
@@ -299,9 +286,6 @@ impl App {
             theme: config.theme,
             ai_settings: config.ai,
             effects: VecDeque::new(),
-            sidebar_scroll: 0,
-            collapsed_tree_dirs,
-            sidebar_cursor_target,
             selected_branch_index: 0,
             branch_scroll: 0,
             selected_commit_index: 0,
@@ -309,12 +293,12 @@ impl App {
             viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
             pending_left_click: None,
-            reviewed_files: HashSet::new(),
         }
     }
 
     pub(crate) fn begin_render_frame(&mut self) {
         self.viewport.begin_frame();
+        self.files_panel.invalidate_frame();
         self.selected_diff.invalidate_frame();
         self.text_selection.begin_frame();
     }
@@ -342,41 +326,19 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        self.viewport.begin_sidebar(area, visible_height);
         self.ensure_scroll_bounds();
-
-        let row_counts_input = SidebarRowCountsInput {
-            files: &self.changeset.files,
-            collapsed_dirs: &self.collapsed_tree_dirs,
-            content_width,
-            theme,
-        };
-        let row_counts = rows::sidebar_row_counts(row_counts_input);
-
-        let rendered_rows = rows::sidebar_rows(SidebarRowsInput {
+        let lines = self.files_panel.render(FilesPanelRender {
+            area,
             files: &self.changeset.files,
             empty_message: self.empty_sidebar_message(),
-            collapsed_dirs: &self.collapsed_tree_dirs,
-            selected_file_index: self.selected_file_index,
-            sidebar_scroll: self.sidebar_scroll,
-            row_counts: &row_counts,
             content_width,
             visible_height,
             theme,
-            reviewed_files: &self.reviewed_files,
-            active_target: self.sidebar_cursor_target.as_ref(),
             focused: self.focus == FocusPane::Sidebar,
         });
-        self.sidebar_scroll = rendered_rows.sidebar_scroll;
-        self.viewport.begin_sidebar_rows();
-        for record in rendered_rows.row_records {
-            self.viewport
-                .record_sidebar_rows(record.target, record.row_count);
-        }
-
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
-            rendered_rows.lines,
+            lines,
             0,
             visible_height,
             theme,
@@ -575,13 +537,17 @@ impl App {
     }
 
     fn selected_file(&self) -> Option<&DiffFile> {
-        self.changeset.files.get(self.selected_file_index)
+        self.changeset.files.get(self.selected_file_index())
+    }
+
+    fn selected_file_index(&self) -> usize {
+        self.files_panel.selected_file_index()
     }
 
     fn focused_review_target(&self) -> FocusedReviewTarget<'_> {
         FocusedReviewTarget::new(
             &self.changeset.files,
-            self.selected_file_index,
+            self.selected_file_index(),
             self.selected_diff.selected_hunk_index(),
             self.focus,
             self.files_panel_visible,
@@ -589,12 +555,10 @@ impl App {
     }
 
     fn ensure_scroll_bounds(&mut self) {
-        let selected_file = self.changeset.files.get(self.selected_file_index);
+        let selected_file_index = self.selected_file_index();
+        let selected_file = self.changeset.files.get(selected_file_index);
         self.selected_diff
-            .ensure_bounds(self.selected_file_index, selected_file);
-        if self.changeset.files.is_empty() {
-            self.sidebar_scroll = 0;
-        }
+            .ensure_bounds(selected_file_index, selected_file);
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
@@ -785,32 +749,19 @@ impl App {
         let diff_position = self
             .selected_diff
             .capture_reload_position(self.selected_file());
-        let snapshot = ReviewSessionSnapshot::capture(
-            self.selected_file(),
-            self.selected_file_index,
-            self.sidebar_cursor_target.clone(),
-        );
-        let replacement = ReviewSessionReplacement::plan(snapshot, changeset);
-        self.apply_review_session_replacement(replacement, diff_position, preserve_scroll);
-    }
-
-    fn apply_review_session_replacement(
-        &mut self,
-        replacement: ReviewSessionReplacement,
-        diff_position: selected_diff::DiffReloadPosition,
-        preserve_scroll: bool,
-    ) {
-        self.changeset = replacement.changeset;
+        let reload = self
+            .files_panel
+            .review_reloaded(&self.changeset.files, &changeset.files);
+        self.changeset = changeset;
         self.live_error = None;
         if matches!(self.overlay, Some(Overlay::Discard(_))) {
             self.overlay = None;
         }
         self.text_selection.clear();
-        self.selected_file_index = replacement.selected_file_index;
-        self.sidebar_cursor_target = replacement.sidebar_target;
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.review_reloaded(
-            self.changeset.files.get(self.selected_file_index),
-            replacement.kept_file_selection,
+            self.changeset.files.get(selected_file_index),
+            reload.kept_file_selection,
             preserve_scroll,
             diff_position,
         );
@@ -1015,9 +966,11 @@ impl App {
         match target {
             PendingLeftClick::Sidebar { target } => {
                 self.focus = FocusPane::Sidebar;
-                match target {
-                    SidebarRowTarget::File(index) => self.select_file(index),
-                    SidebarRowTarget::Folder(path) => self.toggle_tree_folder(&path),
+                if self
+                    .files_panel
+                    .activate(target, self.changeset.files.len())
+                {
+                    self.sync_selected_file();
                 }
             }
             PendingLeftClick::Branch { index } => {
@@ -1031,10 +984,11 @@ impl App {
             PendingLeftClick::Diff { hunk_index } => {
                 self.focus = FocusPane::Diff;
                 if let Some(index) = hunk_index {
+                    let selected_file_index = self.selected_file_index();
                     self.selected_diff.select_hunk(
                         index,
-                        self.selected_file_index,
-                        self.changeset.files.get(self.selected_file_index),
+                        selected_file_index,
+                        self.changeset.files.get(selected_file_index),
                     );
                 }
             }
@@ -1116,12 +1070,12 @@ impl App {
         self.is_diff_at(column, row).then_some(FocusPane::Diff)
     }
 
-    fn sidebar_target_at(&self, column: u16, row: u16) -> Option<SidebarRowTarget> {
-        self.viewport.sidebar_target_at(column, row)
+    fn sidebar_target_at(&self, column: u16, row: u16) -> Option<FilesPanelTarget> {
+        self.files_panel.target_at(column, row)
     }
 
     fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
-        self.viewport.is_sidebar_at(column, row)
+        self.files_panel.contains(column, row)
     }
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
@@ -1129,11 +1083,12 @@ impl App {
     }
 
     fn diff_hunk_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.hunk_index_at(
             column,
             row,
-            self.selected_file_index,
-            self.changeset.files.get(self.selected_file_index),
+            selected_file_index,
+            self.changeset.files.get(selected_file_index),
         )
     }
 
@@ -1158,19 +1113,13 @@ impl App {
     fn toggle_files_panel(&mut self) {
         self.files_panel_visible = !self.files_panel_visible;
         if !self.files_panel_visible {
-            self.sidebar_cursor_target = None;
+            self.files_panel.clear_cursor();
         }
         self.focus = if self.files_panel_visible {
             FocusPane::Sidebar
         } else {
             FocusPane::Diff
         };
-    }
-
-    fn toggle_tree_folder(&mut self, path: &str) {
-        if !self.collapsed_tree_dirs.insert(path.to_string()) {
-            self.collapsed_tree_dirs.remove(path);
-        }
     }
 
     fn handle_global_ai_key(&mut self, key: KeyEvent) -> bool {
@@ -1448,91 +1397,60 @@ impl App {
     }
 
     fn move_sidebar_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let visible_targets =
-            rows::visible_sidebar_targets(&self.changeset.files, &self.collapsed_tree_dirs);
-        if visible_targets.is_empty() {
-            return;
-        }
-
-        let current_target = self.current_sidebar_target();
-        let target_position = match current_target.as_ref().and_then(|target| {
-            visible_targets
-                .iter()
-                .position(|candidate| candidate == target)
-        }) {
-            Some(current_position) => {
-                direction.shift_clamped(current_position, amount, visible_targets.len() - 1)
-            }
-            None => fallback_sidebar_target_position(
-                &visible_targets,
-                self.selected_file_index,
-                direction,
-            ),
-        };
-        let target = visible_targets[target_position].clone();
-        self.apply_sidebar_cursor_target(target);
-    }
-
-    fn current_sidebar_target(&self) -> Option<SidebarRowTarget> {
-        self.sidebar_cursor_target.clone().or_else(|| {
-            (!self.changeset.files.is_empty())
-                .then_some(SidebarRowTarget::File(self.selected_file_index))
-        })
-    }
-
-    fn apply_sidebar_cursor_target(&mut self, target: SidebarRowTarget) {
-        self.sidebar_cursor_target = Some(target.clone());
-        if let SidebarRowTarget::File(index) = target {
-            self.select_file(index);
+        if self
+            .files_panel
+            .move_cursor(direction, amount, self.changeset.files.len())
+        {
+            self.sync_selected_file();
         }
     }
 
-    fn select_file(&mut self, index: usize) {
-        if self.changeset.files.is_empty() {
-            return;
-        }
-
-        self.selected_file_index = index.min(self.changeset.files.len() - 1);
-        self.sidebar_cursor_target = Some(SidebarRowTarget::File(self.selected_file_index));
+    fn sync_selected_file(&mut self) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff
-            .select_file(self.changeset.files.get(self.selected_file_index));
+            .select_file(self.changeset.files.get(selected_file_index));
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_page(
             direction,
-            self.selected_file_index,
-            self.changeset.files.get(self.selected_file_index),
+            selected_file_index,
+            self.changeset.files.get(selected_file_index),
         );
     }
 
     fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_by(
             direction,
             amount,
-            self.selected_file_index,
-            self.changeset.files.get(self.selected_file_index),
+            selected_file_index,
+            self.changeset.files.get(selected_file_index),
         );
     }
 
     fn scroll_diff_to(&mut self, scroll: usize) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_to(
             scroll,
-            self.selected_file_index,
-            self.changeset.files.get(self.selected_file_index),
+            selected_file_index,
+            self.changeset.files.get(selected_file_index),
         );
     }
 
     fn scroll_diff_to_top(&mut self) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_to_top(
-            self.selected_file_index,
-            self.changeset.files.get(self.selected_file_index),
+            selected_file_index,
+            self.changeset.files.get(selected_file_index),
         );
     }
 
     fn scroll_diff_to_bottom(&mut self) {
+        let selected_file_index = self.selected_file_index();
         self.selected_diff
-            .scroll_to_bottom(self.changeset.files.get(self.selected_file_index));
+            .scroll_to_bottom(self.changeset.files.get(selected_file_index));
     }
 
     fn toggle_selected_staging(&mut self) {
@@ -1563,21 +1481,14 @@ impl App {
     }
 
     fn toggle_selected_file_reviewed(&mut self) {
-        let Some(file) = self.selected_file() else {
-            return;
-        };
-
-        let path = file.display_path().to_string();
-        if !self.reviewed_files.insert(path.clone()) {
-            self.reviewed_files.remove(&path);
-        }
+        self.files_panel
+            .toggle_selected_reviewed(&self.changeset.files);
     }
 
     #[cfg(test)]
     pub(super) fn is_selected_file_reviewed(&self) -> bool {
-        self.selected_file()
-            .map(|file| self.reviewed_files.contains(file.display_path()))
-            .unwrap_or(false)
+        self.files_panel
+            .is_selected_file_reviewed(&self.changeset.files)
     }
 
     fn request_selected_discard(&mut self) {
@@ -1603,31 +1514,33 @@ impl App {
             return None;
         }
 
-        let Some(SidebarRowTarget::Folder(path)) = self.sidebar_cursor_target.as_ref() else {
-            return None;
-        };
-        let file_paths = self.current_folder_paths(path);
+        let folder = self.files_panel.focused_folder()?;
+        let file_paths = folder
+            .file_indices
+            .iter()
+            .filter_map(|index| self.changeset.files.get(*index))
+            .map(|file| file.display_path().to_string())
+            .collect::<Vec<_>>();
         if file_paths.is_empty() {
-            self.live_error = Some(format!("no changed files in folder {path}"));
+            self.live_error = Some(format!("no changed files in folder {}", folder.path));
             return None;
         }
+
+        let all_staged = folder
+            .file_indices
+            .iter()
+            .filter_map(|index| self.changeset.files.get(*index))
+            .all(|file| file.stage == FileStage::Staged);
 
         Some(StagingRequest::Folder {
-            path: path.clone(),
+            path: folder.path,
             file_paths,
-            action: self.folder_staging_action(path),
+            action: if all_staged {
+                FolderStagingAction::Unstage
+            } else {
+                FolderStagingAction::Stage
+            },
         })
-    }
-
-    fn folder_staging_action(&self, folder_path: &str) -> FolderStagingAction {
-        if self
-            .folder_files(folder_path)
-            .all(|file| file.stage == FileStage::Staged)
-        {
-            FolderStagingAction::Unstage
-        } else {
-            FolderStagingAction::Stage
-        }
     }
 
     fn active_folder_discard_target(&mut self) -> Option<DiscardTarget> {
@@ -1635,39 +1548,36 @@ impl App {
             return None;
         }
 
-        let Some(SidebarRowTarget::Folder(path)) = self.sidebar_cursor_target.as_ref() else {
-            return None;
-        };
-        let file_paths = self.folder_discard_paths(path);
+        let folder = self.files_panel.focused_folder()?;
+        let file_paths = folder
+            .file_indices
+            .iter()
+            .filter_map(|index| self.changeset.files.get(*index))
+            .filter(|file| matches!(file.stage, FileStage::Unstaged | FileStage::Mixed))
+            .map(|file| file.display_path().to_string())
+            .collect::<Vec<_>>();
         if file_paths.is_empty() {
-            self.live_error = Some(format!("no unstaged worktree changes in folder {path}"));
+            self.live_error = Some(format!(
+                "no unstaged worktree changes in folder {}",
+                folder.path
+            ));
             return None;
         }
 
         Some(DiscardTarget::Folder {
-            path: path.clone(),
+            path: folder.path,
             file_paths,
         })
     }
 
-    fn folder_discard_paths(&self, folder_path: &str) -> Vec<String> {
-        self.folder_files(folder_path)
-            .filter(|file| matches!(file.stage, FileStage::Unstaged | FileStage::Mixed))
-            .map(|file| file.display_path().to_string())
-            .collect()
-    }
-
     fn current_folder_paths(&self, folder_path: &str) -> Vec<String> {
-        self.folder_files(folder_path)
+        self.files_panel
+            .folder_file_indices(folder_path)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|index| self.changeset.files.get(*index))
             .map(|file| file.display_path().to_string())
             .collect()
-    }
-
-    fn folder_files<'a>(&'a self, folder_path: &'a str) -> impl Iterator<Item = &'a DiffFile> + 'a {
-        self.changeset
-            .files
-            .iter()
-            .filter(move |file| folder_contains_path(folder_path, file.display_path()))
     }
 
     fn confirmed_folder_paths(
@@ -1798,9 +1708,10 @@ impl App {
 
     fn editor_line(&self, file: &DiffFile) -> Option<u32> {
         if self.focus == FocusPane::Diff {
+            let selected_file_index = self.selected_file_index();
             return self
                 .selected_diff
-                .editor_line(self.selected_file_index, file)
+                .editor_line(selected_file_index, file)
                 .or_else(|| file.first_changed_line());
         }
 
@@ -1882,48 +1793,6 @@ fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Re
         width: saturating_u16(content_width),
         height: saturating_u16(visible_height),
     }
-}
-
-fn fallback_sidebar_target_position(
-    visible_targets: &[SidebarRowTarget],
-    selected_file_index: usize,
-    direction: VerticalDirection,
-) -> usize {
-    match direction {
-        VerticalDirection::Down => visible_targets
-            .iter()
-            .enumerate()
-            .filter_map(|(position, target)| match target {
-                SidebarRowTarget::File(index) if *index > selected_file_index => {
-                    Some((position, *index))
-                }
-                _ => None,
-            })
-            .min_by_key(|(_, index)| *index)
-            .map(|(position, _)| position)
-            .unwrap_or(visible_targets.len() - 1),
-        VerticalDirection::Up => visible_targets
-            .iter()
-            .enumerate()
-            .filter_map(|(position, target)| match target {
-                SidebarRowTarget::File(index) if *index < selected_file_index => {
-                    Some((position, *index))
-                }
-                _ => None,
-            })
-            .max_by_key(|(_, index)| *index)
-            .map(|(position, _)| position)
-            .unwrap_or(0),
-    }
-}
-
-fn folder_contains_path(folder_path: &str, path: &str) -> bool {
-    if folder_path.is_empty() {
-        return true;
-    }
-
-    path.strip_prefix(folder_path)
-        .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(test)]

@@ -71,13 +71,14 @@ impl<'a> DiffFrameRenderer<'a> {
         let leading_rows = self.review_status_lines();
         let no_diff_message = self.app.no_diff_message();
         let can_stage = self.app.can_stage();
+        let selected_file_index = self.app.selected_file_index();
         let rendered = self.app.selected_diff.render(SelectedReviewFrame {
             area: self.request.area,
             content_width: self.request.content_width,
             visible_height: self.request.visible_height,
             theme: self.request.theme,
             can_stage,
-            file_index: self.app.selected_file_index,
+            file_index: selected_file_index,
             changeset: &mut self.app.changeset,
             source: &self.app.source,
             no_diff_message,

@@ -6,22 +6,14 @@
 
 use ratatui::layout::Rect;
 
-use crate::rows::SidebarRowTarget;
-
 #[derive(Debug)]
 pub struct RenderedViewport {
-    /// Current sidebar viewport height, updated by the renderer.
-    sidebar_view_height: usize,
-    /// Last sidebar rectangle, used to map mouse events.
-    sidebar_area: Option<Rect>,
     /// Last branches rectangle and its visible item range.
     branches_area: Option<Rect>,
     branches_row_indices: Vec<usize>,
     /// Last commits rectangle and its visible item range.
     commits_area: Option<Rect>,
     commits_row_indices: Vec<usize>,
-    /// Rendered sidebar row to file or folder target mapping for click handling.
-    sidebar_row_targets: Vec<SidebarRowTarget>,
 }
 
 #[derive(Debug)]
@@ -57,29 +49,18 @@ pub struct DiffScrollbarDrag {
 impl RenderedViewport {
     pub fn new() -> Self {
         Self {
-            sidebar_view_height: 1,
-            sidebar_area: None,
             branches_area: None,
             branches_row_indices: Vec::new(),
             commits_area: None,
             commits_row_indices: Vec::new(),
-            sidebar_row_targets: Vec::new(),
         }
     }
 
     pub fn begin_frame(&mut self) {
-        self.sidebar_area = None;
         self.branches_area = None;
         self.branches_row_indices.clear();
         self.commits_area = None;
         self.commits_row_indices.clear();
-        self.sidebar_row_targets.clear();
-    }
-
-    pub fn begin_sidebar(&mut self, area: Rect, height: usize) {
-        self.sidebar_area = Some(area);
-        self.sidebar_view_height = height.max(1);
-        self.sidebar_row_targets.clear();
     }
 
     pub fn begin_branches(&mut self, area: Rect, first_index: usize, row_count: usize) {
@@ -90,30 +71,6 @@ impl RenderedViewport {
     pub fn begin_commits(&mut self, area: Rect, first_index: usize, row_count: usize) {
         self.commits_area = Some(area);
         self.commits_row_indices = (first_index..first_index.saturating_add(row_count)).collect();
-    }
-
-    pub fn begin_sidebar_rows(&mut self) {
-        self.sidebar_row_targets.clear();
-    }
-
-    pub fn record_sidebar_rows(&mut self, target: SidebarRowTarget, row_count: usize) {
-        self.sidebar_row_targets
-            .extend(std::iter::repeat_n(target, row_count));
-    }
-
-    pub fn sidebar_target_at(&self, column: u16, row: u16) -> Option<SidebarRowTarget> {
-        let area = self.sidebar_area?;
-        if !rect_inner_contains(area, column, row) {
-            return None;
-        }
-
-        let row_offset = row.saturating_sub(area.y + 1) as usize;
-        self.sidebar_row_targets.get(row_offset).cloned()
-    }
-
-    pub fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
-        self.sidebar_area
-            .is_some_and(|area| rect_contains(area, column, row))
     }
 
     pub fn branch_index_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -350,24 +307,6 @@ fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rows::SidebarRowTarget;
-
-    #[test]
-    fn sidebar_row_mapping_records_visible_rows() {
-        let mut viewport = RenderedViewport::new();
-        viewport.begin_sidebar(Rect::new(0, 0, 12, 5), 3);
-        viewport.record_sidebar_rows(SidebarRowTarget::File(2), 3);
-
-        assert_eq!(
-            viewport.sidebar_target_at(1, 1),
-            Some(SidebarRowTarget::File(2))
-        );
-        assert_eq!(
-            viewport.sidebar_target_at(1, 3),
-            Some(SidebarRowTarget::File(2))
-        );
-        assert_eq!(viewport.sidebar_target_at(1, 4), None);
-    }
 
     #[test]
     fn repository_panel_mapping_includes_scroll_offset() {
