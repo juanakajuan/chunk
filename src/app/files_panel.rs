@@ -142,16 +142,7 @@ impl FilesPanel {
         let rendered = self
             .entries
             .iter()
-            .map(|entry| {
-                self.render_entry(
-                    entry,
-                    request.files,
-                    active_target.as_ref(),
-                    request.content_width,
-                    request.theme,
-                    request.focused,
-                )
-            })
+            .map(|entry| self.render_entry(entry, &request, active_target.as_ref()))
             .collect::<Vec<_>>();
         let row_counts = rendered
             .iter()
@@ -191,11 +182,7 @@ impl FilesPanel {
         let current_target = self.active_target(file_count);
         let target_position = current_target
             .as_ref()
-            .and_then(|target| {
-                self.entries
-                    .iter()
-                    .position(|entry| entry.matches_target(target))
-            })
+            .and_then(|target| target_position(&self.entries, target))
             .map(|position| direction.shift_clamped(position, amount, self.entries.len() - 1))
             .unwrap_or_else(|| {
                 fallback_target_position(&self.entries, self.selected_file_index, direction)
@@ -218,9 +205,7 @@ impl FilesPanel {
             TreeTarget::File(index) => self.apply_target(TreeTarget::File(index), file_count),
             TreeTarget::Folder(path) => {
                 self.cursor = Some(TreeTarget::Folder(path.clone()));
-                if !self.collapsed_folders.insert(path.clone()) {
-                    self.collapsed_folders.remove(&path);
-                }
+                toggle_string_membership(&mut self.collapsed_folders, path);
                 self.rebuild_entries();
             }
         }
@@ -250,10 +235,7 @@ impl FilesPanel {
         let Some(file) = files.get(self.selected_file_index) else {
             return;
         };
-        let path = file.display_path().to_string();
-        if !self.reviewed_files.insert(path.clone()) {
-            self.reviewed_files.remove(&path);
-        }
+        toggle_string_membership(&mut self.reviewed_files, file.display_path().to_string());
     }
 
     pub(super) fn review_reloaded(
@@ -285,7 +267,7 @@ impl FilesPanel {
         if files.is_empty() {
             self.scroll = 0;
         }
-        self.viewport.clear();
+        self.viewport.invalidate_frame();
 
         FilesReload {
             kept_file_selection,
@@ -318,25 +300,25 @@ impl FilesPanel {
     fn render_entry(
         &self,
         entry: &TreeEntry,
-        files: &[DiffFile],
+        request: &FilesPanelRender<'_>,
         active_target: Option<&TreeTarget>,
-        content_width: usize,
-        theme: Theme,
-        focused: bool,
     ) -> RenderedTreeEntry {
         let target = FilesPanelTarget(entry.target());
-        let selected = focused && active_target.is_some_and(|active| entry.matches_target(active));
+        let is_active = active_target.is_some_and(|active| entry.matches_target(active));
+        let selected = request.focused && is_active;
         let lines = match entry {
-            TreeEntry::File { index, depth } => files.get(*index).map_or_else(Vec::new, |file| {
-                rows::render_sidebar_file(
-                    file,
-                    selected,
-                    content_width,
-                    self.reviewed_files.contains(file.display_path()),
-                    *depth,
-                    theme,
-                )
-            }),
+            TreeEntry::File { index, depth } => {
+                request.files.get(*index).map_or_else(Vec::new, |file| {
+                    rows::render_sidebar_file(
+                        file,
+                        selected,
+                        request.content_width,
+                        self.reviewed_files.contains(file.display_path()),
+                        *depth,
+                        request.theme,
+                    )
+                })
+            }
             TreeEntry::Folder {
                 name,
                 depth,
@@ -352,10 +334,10 @@ impl FilesPanel {
                     name,
                     *depth,
                     *expanded,
-                    focused && (selected || hidden_selected_file),
-                    folder_stage(files, file_indices),
-                    content_width,
-                    theme,
+                    request.focused && (is_active || hidden_selected_file),
+                    folder_stage(request.files, file_indices),
+                    request.content_width,
+                    request.theme,
                 )
             }
         };
@@ -431,11 +413,11 @@ impl FileTree {
         let mut has_root_file = false;
         for (index, file) in files.iter().enumerate() {
             let path = file.display_path();
-            root.insert_file(path, index);
             let parts = path
                 .split('/')
                 .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>();
+            root.insert_file(path, &parts, index);
             if parts.len() <= 1 {
                 has_root_file = true;
             }
@@ -487,11 +469,7 @@ impl FileTree {
 }
 
 impl TreeNode {
-    fn insert_file(&mut self, path: &str, index: usize) {
-        let parts = path
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
+    fn insert_file(&mut self, path: &str, parts: &[&str], index: usize) {
         let Some((file_name, dirs)) = parts.split_last() else {
             self.files.push(TreeFile {
                 name: path.to_string(),
@@ -594,10 +572,6 @@ impl FilesPanelViewport {
         self.row_targets.clear();
     }
 
-    fn clear(&mut self) {
-        self.invalidate_frame();
-    }
-
     fn record_rows(&mut self, target: FilesPanelTarget, row_count: usize) {
         self.row_targets
             .extend(std::iter::repeat_n(target, row_count));
@@ -608,7 +582,7 @@ impl FilesPanelViewport {
         if !rect_inner_contains(area, column, row) {
             return None;
         }
-        let row_offset = row.saturating_sub(area.y + 1) as usize;
+        let row_offset = usize::from(row.saturating_sub(area.y.saturating_add(1)));
         self.row_targets.get(row_offset).cloned()
     }
 
@@ -644,11 +618,8 @@ fn visible_scroll(
         return 0;
     }
     let clamped = scroll.min(entries.len() - 1);
-    let Some(active_index) = active_target.and_then(|target| {
-        entries
-            .iter()
-            .position(|entry| entry.matches_target(target))
-    }) else {
+    let Some(active_index) = active_target.and_then(|target| target_position(entries, target))
+    else {
         return clamped;
     };
     if active_index < clamped {
@@ -670,6 +641,12 @@ fn visible_scroll(
         used_rows += previous_rows;
     }
     new_scroll
+}
+
+fn target_position(entries: &[TreeEntry], target: &TreeTarget) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| entry.matches_target(target))
 }
 
 fn fallback_target_position(
@@ -710,6 +687,12 @@ fn child_path(prefix: &str, name: &str) -> String {
         name.to_string()
     } else {
         format!("{prefix}/{name}")
+    }
+}
+
+fn toggle_string_membership(set: &mut HashSet<String>, value: String) {
+    if !set.remove(&value) {
+        set.insert(value);
     }
 }
 

@@ -14,6 +14,45 @@ pub(super) struct DiffPaneState {
     search: Search,
 }
 
+#[derive(Clone, Copy)]
+struct DiffRenderContext<'a> {
+    render: &'a DiffRenderState,
+    file_index: usize,
+    file: Option<&'a DiffFile>,
+}
+
+impl<'a> DiffRenderContext<'a> {
+    fn new(render: &'a DiffRenderState, file_index: usize, file: Option<&'a DiffFile>) -> Self {
+        Self {
+            render,
+            file_index,
+            file,
+        }
+    }
+
+    fn hunk_index_at(self, rendered_row: usize) -> Option<usize> {
+        let file = self.file?;
+        self.render.hunk_index_at(
+            self.file_index,
+            file.id.as_str(),
+            rendered_row,
+            file.hunks.len(),
+        )
+    }
+
+    fn hunk_offset(self, hunk_index: usize) -> Option<usize> {
+        let file = self.file?;
+        self.render
+            .hunk_offset(self.file_index, file.id.as_str(), hunk_index)
+    }
+
+    fn new_line_at(self, rendered_row: usize) -> Option<u32> {
+        let file = self.file?;
+        self.render
+            .new_line_at(self.file_index, file.id.as_str(), rendered_row)
+    }
+}
+
 impl DiffPaneState {
     pub(super) fn new(changeset: &Changeset) -> Self {
         Self {
@@ -73,8 +112,11 @@ impl DiffPaneState {
         selected_file_index: usize,
         file: Option<&DiffFile>,
     ) {
-        self.scroll = direction.shift(self.scroll, amount);
-        self.select_hunk_at_scroll(render, selected_file_index, file);
+        let scroll = direction.shift(self.scroll, amount);
+        self.set_scroll_and_select_hunk(
+            scroll,
+            DiffRenderContext::new(render, selected_file_index, file),
+        );
     }
 
     pub(super) fn scroll_to(
@@ -84,8 +126,10 @@ impl DiffPaneState {
         selected_file_index: usize,
         file: Option<&DiffFile>,
     ) {
-        self.scroll = scroll;
-        self.select_hunk_at_scroll(render, selected_file_index, file);
+        self.set_scroll_and_select_hunk(
+            scroll,
+            DiffRenderContext::new(render, selected_file_index, file),
+        );
     }
 
     pub(super) fn scroll_to_top(
@@ -110,10 +154,11 @@ impl DiffPaneState {
         selected_file_index: usize,
         file: Option<&DiffFile>,
     ) {
+        let context = DiffRenderContext::new(render, selected_file_index, file);
         if self.has_active_search() {
-            self.jump_search_match(direction, view_height, render, selected_file_index, file);
+            self.jump_search_match(direction, view_height, context);
         } else {
-            self.jump_hunk(direction, view_height, render, selected_file_index, file);
+            self.jump_hunk(direction, view_height, context);
         }
     }
 
@@ -124,29 +169,31 @@ impl DiffPaneState {
         selected_file_index: usize,
         file: Option<&DiffFile>,
     ) {
+        self.center_current_hunk(
+            diff_view_height,
+            DiffRenderContext::new(render, selected_file_index, file),
+        );
+    }
+
+    fn center_current_hunk(&mut self, diff_view_height: usize, context: DiffRenderContext<'_>) {
         let Some(index) = self.selected_hunk_index else {
             return;
         };
-        let Some(file) = file else {
+        let Some(file) = context.file else {
             return;
         };
         if index >= file.hunks.len() {
             return;
         }
 
-        if let Some(offset) = render.hunk_offset(selected_file_index, file.id.as_str(), index) {
+        if let Some(offset) = context.hunk_offset(index) {
             self.scroll = offset.saturating_sub(diff_view_height / 2);
         }
     }
 
-    pub(super) fn select_hunk_at_scroll(
-        &mut self,
-        render: &DiffRenderState,
-        selected_file_index: usize,
-        file: Option<&DiffFile>,
-    ) {
-        self.selected_hunk_index =
-            self.hunk_index_at_rendered_row(render, selected_file_index, file, self.scroll);
+    fn set_scroll_and_select_hunk(&mut self, scroll: usize, context: DiffRenderContext<'_>) {
+        self.scroll = scroll;
+        self.selected_hunk_index = context.hunk_index_at(scroll);
     }
 
     pub(super) fn hunk_index_at_rendered_row(
@@ -156,13 +203,7 @@ impl DiffPaneState {
         file: Option<&DiffFile>,
         rendered_row: usize,
     ) -> Option<usize> {
-        let file = file?;
-        render.hunk_index_at(
-            selected_file_index,
-            file.id.as_str(),
-            rendered_row,
-            file.hunks.len(),
-        )
+        DiffRenderContext::new(render, selected_file_index, file).hunk_index_at(rendered_row)
     }
 
     pub(super) fn editor_line(
@@ -172,13 +213,12 @@ impl DiffPaneState {
         selected_file_index: usize,
         file: &DiffFile,
     ) -> Option<u32> {
-        let rendered_row = self.editor_target_row(view_height, render, selected_file_index, file);
-        render
-            .new_line_at(selected_file_index, file.id.as_str(), rendered_row)
-            .or_else(|| {
-                self.selected_hunk(Some(file))
-                    .and_then(DiffHunk::first_changed_line)
-            })
+        let context = DiffRenderContext::new(render, selected_file_index, Some(file));
+        let rendered_row = self.editor_target_row(view_height, context);
+        context.new_line_at(rendered_row).or_else(|| {
+            self.selected_hunk(Some(file))
+                .and_then(DiffHunk::first_changed_line)
+        })
     }
 
     pub(super) fn search_prompt_open(&self) -> bool {
@@ -247,12 +287,10 @@ impl DiffPaneState {
         selected_file_index: usize,
         file: Option<&DiffFile>,
     ) {
-        let Some(active_row) = self.search.active_match_row() else {
-            return;
-        };
-
-        self.scroll = active_row.saturating_sub(diff_view_height / 2);
-        self.select_hunk_at_scroll(render, selected_file_index, file);
+        self.center_active_search_match(
+            diff_view_height,
+            DiffRenderContext::new(render, selected_file_index, file),
+        );
     }
 
     #[cfg(test)]
@@ -288,11 +326,9 @@ impl DiffPaneState {
         &mut self,
         direction: VerticalDirection,
         view_height: usize,
-        render: &DiffRenderState,
-        selected_file_index: usize,
-        file: Option<&DiffFile>,
+        context: DiffRenderContext<'_>,
     ) {
-        let Some(file) = file else {
+        let Some(file) = context.file else {
             return;
         };
         if file.hunks.is_empty() {
@@ -302,53 +338,48 @@ impl DiffPaneState {
 
         let current = self
             .selected_hunk_index
-            .or_else(|| {
-                self.hunk_index_at_rendered_row(
-                    render,
-                    selected_file_index,
-                    Some(file),
-                    self.scroll,
-                )
-            })
+            .or_else(|| context.hunk_index_at(self.scroll))
             .unwrap_or(0)
             .min(file.hunks.len() - 1);
         let target = direction.shift_clamped(current, 1, file.hunks.len() - 1);
 
         self.selected_hunk_index = Some(target);
-        self.center_selected_hunk(render, view_height, selected_file_index, Some(file));
+        self.center_current_hunk(view_height, context);
     }
 
     fn jump_search_match(
         &mut self,
         direction: VerticalDirection,
         view_height: usize,
-        render: &DiffRenderState,
-        selected_file_index: usize,
-        file: Option<&DiffFile>,
+        context: DiffRenderContext<'_>,
     ) {
         if self
             .search
             .advance_match(matches!(direction, VerticalDirection::Down))
         {
-            self.scroll_active_search_match(render, view_height, selected_file_index, file);
+            self.center_active_search_match(view_height, context);
         }
     }
 
-    fn editor_target_row(
-        &self,
-        view_height: usize,
-        render: &DiffRenderState,
-        selected_file_index: usize,
-        file: &DiffFile,
-    ) -> usize {
+    fn center_active_search_match(
+        &mut self,
+        diff_view_height: usize,
+        context: DiffRenderContext<'_>,
+    ) {
+        let Some(active_row) = self.search.active_match_row() else {
+            return;
+        };
+
+        self.set_scroll_and_select_hunk(active_row.saturating_sub(diff_view_height / 2), context);
+    }
+
+    fn editor_target_row(&self, view_height: usize, context: DiffRenderContext<'_>) -> usize {
         if let Some(active_row) = self.search.active_match_row() {
             return active_row;
         }
 
         self.selected_hunk_index
-            .and_then(|hunk_index| {
-                render.hunk_offset(selected_file_index, file.id.as_str(), hunk_index)
-            })
+            .and_then(|hunk_index| context.hunk_offset(hunk_index))
             .filter(|hunk_offset| {
                 *hunk_offset > self.scroll && *hunk_offset < self.scroll.saturating_add(view_height)
             })

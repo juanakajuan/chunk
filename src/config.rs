@@ -109,21 +109,21 @@ fn config_path_from_env(config_home: Option<OsString>, home: Option<OsString>) -
 fn parse(source: &str) -> Result<AppConfig> {
     let raw: RawConfig = toml::from_str(source)?;
     let theme = parse_theme(raw.theme.as_deref())?;
-    let harness = parse_harness(raw.harness.as_deref())?;
-    let ai = AiSettings {
-        harness,
-        opencode: parse_harness_settings(
+    let mut ai = AiSettings {
+        harness: parse_harness(raw.harness.as_deref())?,
+        ..AiSettings::default()
+    };
+    for (harness, model, effort) in [
+        (
             AiHarness::OpenCode,
             raw.opencode_model,
             raw.opencode_variant,
-        )?,
-        claude_code: parse_harness_settings(
-            AiHarness::ClaudeCode,
-            raw.claude_model,
-            raw.claude_effort,
-        )?,
-        codex: parse_harness_settings(AiHarness::Codex, raw.codex_model, raw.codex_effort)?,
-    };
+        ),
+        (AiHarness::ClaudeCode, raw.claude_model, raw.claude_effort),
+        (AiHarness::Codex, raw.codex_model, raw.codex_effort),
+    ] {
+        *ai.for_harness_mut(harness) = parse_harness_settings(harness, model, effort)?;
+    }
     let keybinds = parse_keybinds(raw.keybinds)?;
     let mut keys = HashSet::new();
     let mut commands = Vec::with_capacity(raw.commands.len());
@@ -182,16 +182,14 @@ fn validate_nonempty_ai_value(harness: AiHarness, field: &str, value: String) ->
 }
 
 fn validate_effort(harness: AiHarness, effort: String) -> Result<String> {
-    if harness == AiHarness::OpenCode {
-        return validate_nonempty_ai_value(harness, "variant", effort);
-    }
-
     const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
     const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
     let expected = match harness {
+        AiHarness::OpenCode => {
+            return validate_nonempty_ai_value(harness, "variant", effort);
+        }
         AiHarness::ClaudeCode => CLAUDE_EFFORTS,
         AiHarness::Codex => CODEX_EFFORTS,
-        AiHarness::OpenCode => unreachable!(),
     };
     if expected.contains(&effort.as_str()) {
         return Ok(effort);
@@ -206,28 +204,13 @@ fn validate_effort(harness: AiHarness, effort: String) -> Result<String> {
 
 fn set_ai_settings_source(source: &str, settings: &AiSettings) -> String {
     let replacements = [
-        (
-            "harness",
-            Some(format!("\"{}\"", settings.harness.config_value())),
-        ),
-        (
-            "opencode_model",
-            quoted_config_value(settings.opencode.model()),
-        ),
-        (
-            "opencode_variant",
-            quoted_config_value(settings.opencode.effort()),
-        ),
-        (
-            "claude_model",
-            quoted_config_value(settings.claude_code.model()),
-        ),
-        (
-            "claude_effort",
-            quoted_config_value(settings.claude_code.effort()),
-        ),
-        ("codex_model", quoted_config_value(settings.codex.model())),
-        ("codex_effort", quoted_config_value(settings.codex.effort())),
+        ("harness", Some(settings.harness.config_value())),
+        ("opencode_model", settings.opencode.model()),
+        ("opencode_variant", settings.opencode.effort()),
+        ("claude_model", settings.claude_code.model()),
+        ("claude_effort", settings.claude_code.effort()),
+        ("codex_model", settings.codex.model()),
+        ("codex_effort", settings.codex.effort()),
     ];
     let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
     let trailing_newline = source.ends_with('\n');
@@ -237,7 +220,12 @@ fn set_ai_settings_source(source: &str, settings: &AiSettings) -> String {
         .unwrap_or(lines.len());
 
     for (key, value) in replacements {
-        update_top_level_config_line(&mut lines, &mut top_level_end, key, value);
+        update_top_level_config_line(
+            &mut lines,
+            &mut top_level_end,
+            key,
+            value.map(quote_config_value),
+        );
     }
 
     finish_config_lines(lines, trailing_newline || source.is_empty())
@@ -267,8 +255,8 @@ fn update_top_level_config_line(
     }
 }
 
-fn quoted_config_value(value: Option<&str>) -> Option<String> {
-    value.map(|value| format!("{value:?}"))
+fn quote_config_value(value: &str) -> String {
+    format!("{value:?}")
 }
 
 fn is_top_level_config_line(line: &str, expected_key: &str) -> bool {

@@ -79,118 +79,66 @@ impl SelectedDiffPane {
 
     pub(super) fn clear_render_cache(&mut self, file_count: usize) {
         self.render.clear(file_count);
+        self.clear_view_state();
+    }
+
+    fn clear_view_state(&mut self) {
         self.viewport.clear();
         self.scrollbar_drag = None;
     }
 
-    pub(super) fn render(&mut self, request: SelectedReviewFrame<'_>) -> RenderedSelectedDiff {
-        let SelectedReviewFrame {
-            area,
-            content_width,
-            visible_height,
-            theme,
-            can_stage,
-            file_index,
-            changeset,
-            source,
-            no_diff_message,
-            mut leading_rows,
-        } = request;
+    pub(super) fn render(&mut self, mut frame: SelectedReviewFrame<'_>) -> RenderedSelectedDiff {
+        let provisional_height = frame.visible_height.saturating_sub(
+            frame.leading_rows.len()
+                + self
+                    .search_status_lines(frame.content_width, frame.theme)
+                    .len(),
+        );
+        let mut diff_content_width = self.content_width(&frame, provisional_height);
 
-        let provisional_height = visible_height.saturating_sub(
-            leading_rows.len() + self.search_status_lines(content_width, theme).len(),
-        );
-        let mut diff_content_width = self.content_width(
-            changeset,
-            file_index,
-            content_width,
-            provisional_height,
-            theme,
-            can_stage,
-        );
+        let pending_search_scroll =
+            self.prepare_search_scroll(&mut frame, diff_content_width, provisional_height);
 
-        let pending_search_scroll = self.prepare_search_scroll(
-            changeset,
-            source,
-            file_index,
-            area,
-            diff_content_width,
-            provisional_height,
-            theme,
-            can_stage,
-        );
+        frame
+            .leading_rows
+            .extend(self.search_status_lines(frame.content_width, frame.theme));
+        let status_rows = frame.leading_rows.len();
+        self.viewport.set_status_rows(status_rows);
+        let visible_diff_height = frame.visible_height.saturating_sub(status_rows);
+        diff_content_width = self.content_width(&frame, visible_diff_height);
+        let total_rows = self.total_rows(&frame, diff_content_width);
 
-        leading_rows.extend(self.search_status_lines(content_width, theme));
-        self.viewport.set_status_rows(leading_rows.len());
-        let status_rows = self.viewport.status_rows();
-        let visible_diff_height = visible_height.saturating_sub(status_rows);
-        diff_content_width = self.content_width(
-            changeset,
-            file_index,
-            content_width,
-            visible_diff_height,
-            theme,
-            can_stage,
+        self.viewport.begin(frame.area, visible_diff_height);
+        self.update_scrollbar(&frame, visible_diff_height, total_rows, status_rows);
+        self.ensure_bounds(
+            frame.file_index,
+            frame.changeset.files.get(frame.file_index),
         );
-        let total_rows =
-            self.total_rows(changeset, file_index, diff_content_width, theme, can_stage);
-
-        self.viewport.begin(area, visible_diff_height);
-        self.update_scrollbar(
-            changeset,
-            file_index,
-            area,
-            content_width,
-            visible_diff_height,
-            total_rows,
-            status_rows,
-        );
-        self.ensure_bounds(file_index, changeset.files.get(file_index));
 
         if pending_search_scroll {
             self.state.scroll_active_search_match(
                 &self.render,
                 self.viewport.view_height(),
-                file_index,
-                changeset.files.get(file_index),
+                frame.file_index,
+                frame.changeset.files.get(frame.file_index),
             );
-            self.ensure_bounds(file_index, changeset.files.get(file_index));
+            self.ensure_bounds(
+                frame.file_index,
+                frame.changeset.files.get(frame.file_index),
+            );
         }
 
         if visible_diff_height > 0 {
-            self.ensure_cache(
-                changeset,
-                source,
-                file_index,
-                diff_content_width,
-                visible_diff_height,
-                theme,
-                can_stage,
-            );
-            leading_rows.extend(self.visible_lines(
-                changeset,
-                file_index,
-                diff_content_width,
-                visible_diff_height,
-                theme,
-                can_stage,
-                no_diff_message,
-            ));
+            self.ensure_cache(&mut frame, diff_content_width, visible_diff_height);
+            let visible_lines = self.visible_lines(&frame, diff_content_width, visible_diff_height);
+            frame.leading_rows.extend(visible_lines);
         }
 
-        leading_rows.truncate(visible_height);
-        self.update_scrollbar(
-            changeset,
-            file_index,
-            area,
-            content_width,
-            visible_diff_height,
-            total_rows,
-            status_rows,
-        );
+        frame.leading_rows.truncate(frame.visible_height);
+        self.update_scrollbar(&frame, visible_diff_height, total_rows, status_rows);
 
         RenderedSelectedDiff {
-            lines: leading_rows,
+            lines: frame.leading_rows,
             scrollbar: self.viewport.scrollbar().cloned(),
         }
     }
@@ -236,14 +184,12 @@ impl SelectedDiffPane {
         };
         self.restore_position(hunk_index, scroll);
         self.state.invalidate_search_matches();
-        self.viewport.clear();
-        self.scrollbar_drag = None;
+        self.clear_view_state();
     }
 
     pub(super) fn select_file(&mut self, file: Option<&DiffFile>) {
         self.state.select_file(file);
-        self.viewport.clear();
-        self.scrollbar_drag = None;
+        self.clear_view_state();
     }
 
     pub(super) fn ensure_bounds(&mut self, file_index: usize, file: Option<&DiffFile>) {
@@ -396,169 +342,135 @@ impl SelectedDiffPane {
         rows::search_status_lines(self.state.search_status(), content_width, theme)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn prepare_search_scroll(
         &mut self,
-        changeset: &mut Changeset,
-        source: &ReviewSource,
-        file_index: usize,
-        area: Rect,
+        frame: &mut SelectedReviewFrame<'_>,
         content_width: usize,
         visible_height: usize,
-        theme: Theme,
-        can_stage: bool,
     ) -> bool {
         if !self.state.has_active_search() {
             return false;
         }
-        self.viewport.begin(area, visible_height);
-        self.ensure_bounds(file_index, changeset.files.get(file_index));
-        self.ensure_cache(
-            changeset,
-            source,
-            file_index,
-            content_width,
-            visible_height,
-            theme,
-            can_stage,
-        )
+        self.viewport.begin(frame.area, visible_height);
+        self.ensure_bounds(
+            frame.file_index,
+            frame.changeset.files.get(frame.file_index),
+        );
+        self.ensure_cache(frame, content_width, visible_height)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn ensure_cache(
         &mut self,
-        changeset: &mut Changeset,
-        source: &ReviewSource,
-        file_index: usize,
+        frame: &mut SelectedReviewFrame<'_>,
         content_width: usize,
         visible_height: usize,
-        theme: Theme,
-        can_stage: bool,
     ) -> bool {
-        if file_index >= changeset.files.len() {
+        if frame.file_index >= frame.changeset.files.len() {
             self.state.clear_rendered_search_matches();
             return false;
         }
 
         let requested_rows = self.state.render_target_rows(visible_height);
         self.render.ensure_selected_file(
-            changeset,
-            source,
+            &mut *frame.changeset,
+            frame.source,
             SelectedDiffRenderRequest {
-                file_index,
+                file_index: frame.file_index,
                 content_width,
-                theme,
-                can_stage,
+                theme: frame.theme,
+                can_stage: frame.can_stage,
                 requested_rows,
             },
         );
         let pending = self.state.refresh_search_matches(
             &self.render,
-            file_index,
-            changeset.files.get(file_index),
+            frame.file_index,
+            frame.changeset.files.get(frame.file_index),
         );
-        self.ensure_bounds(file_index, changeset.files.get(file_index));
+        self.ensure_bounds(
+            frame.file_index,
+            frame.changeset.files.get(frame.file_index),
+        );
         pending
     }
 
-    fn total_rows(
-        &mut self,
-        changeset: &Changeset,
-        file_index: usize,
-        content_width: usize,
-        theme: Theme,
-        can_stage: bool,
-    ) -> usize {
+    fn total_rows(&mut self, frame: &SelectedReviewFrame<'_>, content_width: usize) -> usize {
         self.render.total_rows(
-            file_index,
-            changeset.files.get(file_index),
+            frame.file_index,
+            frame.changeset.files.get(frame.file_index),
             content_width,
-            theme,
-            can_stage,
+            frame.theme,
+            frame.can_stage,
         )
     }
 
-    fn content_width(
-        &mut self,
-        changeset: &Changeset,
-        file_index: usize,
-        content_width: usize,
-        visible_height: usize,
-        theme: Theme,
-        can_stage: bool,
-    ) -> usize {
-        if content_width > 1
+    fn content_width(&mut self, frame: &SelectedReviewFrame<'_>, visible_height: usize) -> usize {
+        if frame.content_width > 1
             && visible_height > 0
-            && self.total_rows(changeset, file_index, content_width, theme, can_stage)
-                > visible_height
+            && self.total_rows(frame, frame.content_width) > visible_height
         {
-            content_width - 1
+            frame.content_width - 1
         } else {
-            content_width
+            frame.content_width
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn visible_lines(
         &self,
-        changeset: &Changeset,
-        file_index: usize,
+        frame: &SelectedReviewFrame<'_>,
         content_width: usize,
         visible_height: usize,
-        theme: Theme,
-        can_stage: bool,
-        no_diff_message: &'static str,
     ) -> Vec<Line<'static>> {
-        let Some(file) = changeset.files.get(file_index) else {
-            return rows::no_diff_lines(no_diff_message, content_width, theme);
+        let Some(file) = frame.changeset.files.get(frame.file_index) else {
+            return rows::no_diff_lines(frame.no_diff_message, content_width, frame.theme);
         };
         let lines = self.render.visible_selected_lines(
-            file_index,
+            frame.file_index,
             file,
             self.state.scroll(),
             visible_height,
             content_width,
-            theme,
-            can_stage,
+            frame.theme,
+            frame.can_stage,
             self.state.selected_hunk_index(),
         );
-        self.state.highlight_search_matches(lines, theme)
+        self.state.highlight_search_matches(lines, frame.theme)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn update_scrollbar(
         &mut self,
-        changeset: &Changeset,
-        file_index: usize,
-        area: Rect,
-        content_width: usize,
+        frame: &SelectedReviewFrame<'_>,
         visible_height: usize,
         total_rows: usize,
         status_rows: usize,
     ) {
-        let scrollbar = if content_width <= 1 || visible_height == 0 || total_rows <= visible_height
-        {
-            None
-        } else {
-            changeset.files.get(file_index).map(|file| {
-                DiffScrollbar::new(
-                    Rect {
-                        x: area.x.saturating_add(area.width.saturating_sub(2)),
-                        y: area
-                            .y
-                            .saturating_add(1)
-                            .saturating_add(saturating_u16(status_rows)),
-                        width: 1,
-                        height: saturating_u16(visible_height),
-                    },
-                    file_index,
-                    file.id.clone(),
-                    total_rows,
-                    visible_height,
-                    self.state.scroll(),
-                )
-            })
-        };
+        let scrollbar =
+            if frame.content_width <= 1 || visible_height == 0 || total_rows <= visible_height {
+                None
+            } else {
+                frame.changeset.files.get(frame.file_index).map(|file| {
+                    DiffScrollbar::new(
+                        Rect {
+                            x: frame
+                                .area
+                                .x
+                                .saturating_add(frame.area.width.saturating_sub(2)),
+                            y: frame
+                                .area
+                                .y
+                                .saturating_add(1)
+                                .saturating_add(saturating_u16(status_rows)),
+                            width: 1,
+                            height: saturating_u16(visible_height),
+                        },
+                        frame.file_index,
+                        file.id.clone(),
+                        total_rows,
+                        visible_height,
+                        self.state.scroll(),
+                    )
+                })
+            };
         self.viewport.set_scrollbar(scrollbar);
     }
 
@@ -652,10 +564,11 @@ fn reloaded_hunk_index(
     }) {
         return Some(index);
     }
-    previous
-        .hunk_index
-        .map(|index| index.min(file.hunks.len() - 1))
-        .or(Some(0))
+    Some(
+        previous
+            .hunk_index
+            .map_or(0, |index| index.min(file.hunks.len() - 1)),
+    )
 }
 
 #[cfg(test)]

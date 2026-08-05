@@ -57,12 +57,18 @@ struct DiffSyntaxHighlighter<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct HunkRenderOptions {
+struct DiffRenderOptions {
     content_width: usize,
     theme: Theme,
     can_stage: bool,
-    is_selected: bool,
     target_rows: usize,
+}
+
+struct DiffRenderer<'a> {
+    lines: Vec<Line<'static>>,
+    old_highlighter: DiffSyntaxHighlighter<'a>,
+    new_highlighter: DiffSyntaxHighlighter<'a>,
+    options: DiffRenderOptions,
 }
 
 pub(crate) fn diff_lines_until(
@@ -80,31 +86,25 @@ pub(crate) fn diff_lines_until(
         return RenderedRows::complete(lines);
     }
 
-    let mut old_highlighter =
-        DiffSyntaxHighlighter::new(diff_old_path(file), &file.old_source, theme);
-    let mut new_highlighter =
-        DiffSyntaxHighlighter::new(diff_new_path(file), &file.new_source, theme);
-
-    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-        let options = HunkRenderOptions {
+    let mut renderer = DiffRenderer {
+        lines,
+        old_highlighter: DiffSyntaxHighlighter::new(diff_old_path(file), &file.old_source, theme),
+        new_highlighter: DiffSyntaxHighlighter::new(diff_new_path(file), &file.new_source, theme),
+        options: DiffRenderOptions {
             content_width,
             theme,
             can_stage,
-            is_selected: selected_hunk_index == Some(hunk_index),
             target_rows,
-        };
-        if !push_hunk_lines_until(
-            &mut lines,
-            hunk,
-            &mut old_highlighter,
-            &mut new_highlighter,
-            options,
-        ) {
-            return RenderedRows::partial(lines);
+        },
+    };
+
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+        if !renderer.push_hunk(hunk, selected_hunk_index == Some(hunk_index)) {
+            return RenderedRows::partial(renderer.lines);
         }
     }
 
-    RenderedRows::complete(lines)
+    RenderedRows::complete(renderer.lines)
 }
 
 pub(crate) fn diff_layout_counts(
@@ -150,76 +150,58 @@ pub(crate) fn selected_hunk_header_rows(
     render_hunk_header_rows(hunk, content_width, theme, can_stage, true)
 }
 
-fn push_hunk_lines_until(
-    lines: &mut Vec<Line<'static>>,
-    hunk: &DiffHunk,
-    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
-    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
-    options: HunkRenderOptions,
-) -> bool {
-    old_highlighter.advance_to(hunk.old_start);
-    new_highlighter.advance_to(hunk.new_start);
+impl DiffRenderer<'_> {
+    fn push_hunk(&mut self, hunk: &DiffHunk, is_selected: bool) -> bool {
+        self.old_highlighter.advance_to(hunk.old_start);
+        self.new_highlighter.advance_to(hunk.new_start);
 
-    lines.extend(render_hunk_header_rows(
-        hunk,
-        options.content_width,
-        options.theme,
-        options.can_stage,
-        options.is_selected,
-    ));
-    if lines.len() >= options.target_rows {
-        return false;
-    }
-
-    let mut line_index = 0;
-    while line_index < hunk.lines.len() {
-        let line = &hunk.lines[line_index];
-        if !is_intraline_candidate(line.kind) {
-            if !push_diff_line_until(lines, line, &[], old_highlighter, new_highlighter, options) {
-                return false;
-            }
-            line_index += 1;
-            continue;
+        self.lines.extend(render_hunk_header_rows(
+            hunk,
+            self.options.content_width,
+            self.options.theme,
+            self.options.can_stage,
+            is_selected,
+        ));
+        if self.lines.len() >= self.options.target_rows {
+            return false;
         }
 
-        let block_end = intraline_block_end(&hunk.lines, line_index);
-        let block = &hunk.lines[line_index..block_end];
-        let intraline_ranges = intraline_ranges_for_block(block);
-        for (line, ranges) in block.iter().zip(&intraline_ranges) {
-            if !push_diff_line_until(
-                lines,
-                line,
-                ranges,
-                old_highlighter,
-                new_highlighter,
-                options,
-            ) {
-                return false;
+        let mut line_index = 0;
+        while line_index < hunk.lines.len() {
+            let line = &hunk.lines[line_index];
+            if !is_intraline_candidate(line.kind) {
+                if !self.push_line(line, &[]) {
+                    return false;
+                }
+                line_index += 1;
+                continue;
             }
+
+            let block_end = intraline_block_end(&hunk.lines, line_index);
+            let block = &hunk.lines[line_index..block_end];
+            let intraline_ranges = intraline_ranges_for_block(block);
+            for (line, ranges) in block.iter().zip(&intraline_ranges) {
+                if !self.push_line(line, ranges) {
+                    return false;
+                }
+            }
+            line_index = block_end;
         }
-        line_index = block_end;
+
+        true
     }
 
-    true
-}
-
-fn push_diff_line_until(
-    lines: &mut Vec<Line<'static>>,
-    line: &DiffLine,
-    intraline_ranges: &[Range<usize>],
-    old_highlighter: &mut DiffSyntaxHighlighter<'_>,
-    new_highlighter: &mut DiffSyntaxHighlighter<'_>,
-    options: HunkRenderOptions,
-) -> bool {
-    lines.extend(diff_line(
-        line,
-        intraline_ranges,
-        old_highlighter,
-        new_highlighter,
-        options.content_width,
-        options.theme,
-    ));
-    lines.len() < options.target_rows
+    fn push_line(&mut self, line: &DiffLine, intraline_ranges: &[Range<usize>]) -> bool {
+        self.lines.extend(diff_line(
+            line,
+            intraline_ranges,
+            &mut self.old_highlighter,
+            &mut self.new_highlighter,
+            self.options.content_width,
+            self.options.theme,
+        ));
+        self.lines.len() < self.options.target_rows
+    }
 }
 
 fn diff_old_path(file: &DiffFile) -> &str {
@@ -355,11 +337,13 @@ fn wrap_diff_line(
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut gutter_spans = if index == 0 {
-                diff_gutter_spans(old_line, new_line, style, number_style)
+            let (old_line, new_line, marker) = if index == 0 {
+                (old_line, new_line, style.marker)
             } else {
-                continuation_gutter_spans(style, number_style)
+                (None, None, " ")
             };
+            let mut gutter_spans =
+                diff_gutter_spans(old_line, new_line, marker, style, number_style);
             gutter_spans.extend(row);
             Line::from(gutter_spans)
         })
@@ -376,6 +360,7 @@ fn wrap_diff_content(
 fn diff_gutter_spans(
     old_line: Option<u32>,
     new_line: Option<u32>,
+    marker: &'static str,
     style: DiffLineStyle,
     number_style: Style,
 ) -> Vec<Span<'static>> {
@@ -385,19 +370,7 @@ fn diff_gutter_spans(
         Span::styled(" ", number_style),
         Span::styled(format_line_number(new_line), number_style),
         Span::styled(" ", number_style),
-        Span::styled(style.marker, style.content),
-        Span::styled(" ", style.content),
-    ]
-}
-
-fn continuation_gutter_spans(style: DiffLineStyle, number_style: Style) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(RAIL_MARKER, style.rail),
-        Span::styled("   ", number_style),
-        Span::styled(" ", number_style),
-        Span::styled("   ", number_style),
-        Span::styled(" ", number_style),
-        Span::styled(" ", style.content),
+        Span::styled(marker, style.content),
         Span::styled(" ", style.content),
     ]
 }
@@ -988,14 +961,20 @@ mod tests {
             .iter()
             .filter(|line| line.kind == DiffLineKind::Removed)
             .count();
-        let old_lines = lines
-            .iter()
-            .filter(|line| !matches!(line.kind, DiffLineKind::Added | DiffLineKind::Meta))
-            .count() as u32;
-        let new_lines = lines
-            .iter()
-            .filter(|line| !matches!(line.kind, DiffLineKind::Removed | DiffLineKind::Meta))
-            .count() as u32;
+        let old_lines = u32::try_from(
+            lines
+                .iter()
+                .filter(|line| !matches!(line.kind, DiffLineKind::Added | DiffLineKind::Meta))
+                .count(),
+        )
+        .expect("test hunk line count should fit in u32");
+        let new_lines = u32::try_from(
+            lines
+                .iter()
+                .filter(|line| !matches!(line.kind, DiffLineKind::Removed | DiffLineKind::Meta))
+                .count(),
+        )
+        .expect("test hunk line count should fit in u32");
 
         DiffFile {
             id: "0".to_string(),
@@ -1034,14 +1013,19 @@ mod tests {
         let hunks = hunks
             .into_iter()
             .enumerate()
-            .map(|(index, (header, lines))| DiffHunk {
-                header: header.to_string(),
-                old_start: index as u32 + 1,
-                old_lines: 1,
-                new_start: index as u32 + 1,
-                new_lines: 1,
-                stage: FileStage::Unstaged,
-                lines,
+            .map(|(index, (header, lines))| {
+                let start = u32::try_from(index)
+                    .expect("test hunk index should fit in u32")
+                    .saturating_add(1);
+                DiffHunk {
+                    header: header.to_string(),
+                    old_start: start,
+                    old_lines: 1,
+                    new_start: start,
+                    new_lines: 1,
+                    stage: FileStage::Unstaged,
+                    lines,
+                }
             })
             .collect();
 

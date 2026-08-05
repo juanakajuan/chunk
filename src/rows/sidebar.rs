@@ -12,89 +12,9 @@ use super::text::{color_style, display_width, muted_line};
 
 const TREE_INDENT: &str = "  ";
 
-struct FileEntryRenderInput<'a> {
-    file: &'a DiffFile,
-    is_selected: bool,
-    content_width: usize,
-    is_reviewed: bool,
-    depth: usize,
-    theme: Theme,
-}
-
-fn render_file_entry(input: FileEntryRenderInput<'_>) -> Vec<Line<'static>> {
-    let FileEntryRenderInput {
-        file,
-        is_selected,
-        content_width,
-        is_reviewed,
-        depth,
-        theme,
-    } = input;
-    let row_background = if is_selected {
-        theme.selected
-    } else {
-        theme.background
-    };
-    let label_style = color_style(
-        if is_reviewed { theme.muted } else { theme.text },
-        row_background,
-    );
-    let file_name_style = if is_reviewed {
-        label_style
-    } else {
-        sidebar_file_name_style(file, row_background, theme)
-    };
-    let icon = if is_reviewed {
-        reviewed_glyph()
-    } else {
-        file_icon(file.display_path())
-    };
-    let icon_style = if is_reviewed {
-        color_style(theme.added, row_background)
-    } else {
-        color_style(file_icon_color(file.display_path(), theme), row_background)
-    };
-    let tree_prefix = tree_file_prefix(depth);
-    let file_name = sidebar_file_label(file);
-    let stats = format_file_stats(file);
-    let stats_width = stats_width(&stats);
-    let reserved_stats_width = stats_width
-        .saturating_add(usize::from(stats_width > 0))
-        .min(content_width);
-    let leading_width = display_width(&tree_prefix)
-        .saturating_add(display_width(icon))
-        .saturating_add(1);
-    let file_name = truncate_to_width(
-        &file_name,
-        content_width.saturating_sub(leading_width.saturating_add(reserved_stats_width)),
-    );
-    let used_without_padding = leading_width
-        .saturating_add(display_width(&file_name))
-        .saturating_add(stats_width);
-    let padding = if stats_width == 0 {
-        String::new()
-    } else {
-        " ".repeat(content_width.saturating_sub(used_without_padding))
-    };
-
-    let mut content_spans = Vec::new();
-    if !tree_prefix.is_empty() {
-        content_spans.push(Span::styled(tree_prefix, label_style));
-    }
-    content_spans.extend([
-        Span::styled(icon, icon_style),
-        Span::styled(" ", label_style),
-        Span::styled(file_name, file_name_style),
-        Span::styled(padding, label_style),
-    ]);
-    push_stat_spans(&mut content_spans, file, row_background, theme);
-
-    vec![fill_selected_row(
-        Line::from(content_spans),
-        is_selected,
-        content_width,
-        theme,
-    )]
+struct FileLabelLayout {
+    label: String,
+    padding: String,
 }
 
 pub(crate) fn render_sidebar_empty(message: &'static str, theme: Theme) -> Line<'static> {
@@ -109,14 +29,82 @@ pub(crate) fn render_sidebar_file(
     depth: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    render_file_entry(FileEntryRenderInput {
-        file,
-        is_selected: selected,
+    let row_background = selection_background(selected, theme);
+    let label_style = color_style(
+        if reviewed { theme.muted } else { theme.text },
+        row_background,
+    );
+    let file_name_style = if reviewed {
+        label_style
+    } else {
+        sidebar_file_name_style(file, row_background, theme)
+    };
+    let icon = if reviewed {
+        reviewed_glyph()
+    } else {
+        file_icon(file.display_path())
+    };
+    let icon_style = if reviewed {
+        color_style(theme.added, row_background)
+    } else {
+        color_style(file_icon_color(file.display_path(), theme), row_background)
+    };
+    let tree_prefix = tree_file_prefix(depth);
+    let label = sidebar_file_label(file);
+    let stats = format_file_stats(file);
+    let layout = file_label_layout(
+        &tree_prefix,
+        icon,
+        &label,
+        stats_width(&stats),
         content_width,
-        is_reviewed: reviewed,
-        depth,
+    );
+
+    let mut content_spans = Vec::new();
+    if !tree_prefix.is_empty() {
+        content_spans.push(Span::styled(tree_prefix, label_style));
+    }
+    content_spans.extend([
+        Span::styled(icon, icon_style),
+        Span::styled(" ", label_style),
+        Span::styled(layout.label, file_name_style),
+        Span::styled(layout.padding, label_style),
+    ]);
+    push_stat_spans(&mut content_spans, file, row_background, theme);
+
+    vec![fill_selected_row(
+        Line::from(content_spans),
+        selected,
+        content_width,
         theme,
-    })
+    )]
+}
+
+fn file_label_layout(
+    tree_prefix: &str,
+    icon: &str,
+    label: &str,
+    stats_width: usize,
+    content_width: usize,
+) -> FileLabelLayout {
+    let reserved_stats_width = stats_width
+        .saturating_add(usize::from(stats_width > 0))
+        .min(content_width);
+    let leading_width = combined_width(&[tree_prefix, icon, " "]);
+    let label_width = content_width
+        .saturating_sub(leading_width)
+        .saturating_sub(reserved_stats_width);
+    let label = truncate_to_width(label, label_width);
+    let used_width = leading_width
+        .saturating_add(display_width(&label))
+        .saturating_add(stats_width);
+    let padding = if stats_width == 0 {
+        String::new()
+    } else {
+        " ".repeat(content_width.saturating_sub(used_width))
+    };
+
+    FileLabelLayout { label, padding }
 }
 
 fn sidebar_file_name_style(file: &DiffFile, row_background: Color, theme: Theme) -> Style {
@@ -139,20 +127,17 @@ fn sidebar_file_name_style(file: &DiffFile, row_background: Color, theme: Theme)
     }
 }
 
-fn render_folder_entry(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_sidebar_folder(
     name: &str,
     depth: usize,
     expanded: bool,
-    contains_hidden_selection: bool,
+    selected: bool,
     stage: FileStage,
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let row_background = if contains_hidden_selection {
-        theme.selected
-    } else {
-        theme.background
-    };
+    let row_background = selection_background(selected, theme);
     let label_style = color_style(theme.text, row_background);
     let folder_name_style = match stage {
         FileStage::Staged => color_style(theme.added, row_background).add_modifier(Modifier::BOLD),
@@ -163,11 +148,7 @@ fn render_folder_entry(
     let folder_icon = if expanded { "\u{e5fe}" } else { "\u{e5ff}" };
     let chevron = if expanded { "▾" } else { "▸" };
     let tree_prefix = tree_folder_prefix(depth);
-    let fixed_content_width = display_width(&tree_prefix)
-        .saturating_add(display_width(chevron))
-        .saturating_add(1)
-        .saturating_add(display_width(folder_icon))
-        .saturating_add(1);
+    let decoration_width = combined_width(&[&tree_prefix, chevron, " ", folder_icon, " "]);
     let folder_label = if name == "/" {
         name.to_string()
     } else {
@@ -175,7 +156,7 @@ fn render_folder_entry(
     };
     let label = truncate_to_width(
         &folder_label,
-        content_width.saturating_sub(fixed_content_width),
+        content_width.saturating_sub(decoration_width),
     );
     let content_spans = vec![
         Span::styled(tree_prefix, muted_style),
@@ -188,23 +169,24 @@ fn render_folder_entry(
 
     vec![fill_selected_row(
         Line::from(content_spans),
-        contains_hidden_selection,
+        selected,
         content_width,
         theme,
     )]
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_sidebar_folder(
-    name: &str,
-    depth: usize,
-    expanded: bool,
-    selected: bool,
-    stage: FileStage,
-    content_width: usize,
-    theme: Theme,
-) -> Vec<Line<'static>> {
-    render_folder_entry(name, depth, expanded, selected, stage, content_width, theme)
+fn selection_background(selected: bool, theme: Theme) -> Color {
+    if selected {
+        theme.selected
+    } else {
+        theme.background
+    }
+}
+
+fn combined_width(parts: &[&str]) -> usize {
+    parts
+        .iter()
+        .fold(0, |width, part| width.saturating_add(display_width(part)))
 }
 
 fn fill_selected_row(

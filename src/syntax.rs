@@ -47,10 +47,11 @@ impl SyntaxHighlighter {
     }
 
     pub fn highlight_line(&mut self, content: &str, base_style: Style) -> Vec<Span<'static>> {
-        let Some(engine) = self.engine.as_mut() else {
-            return plain_line(content, base_style);
-        };
-        let Some(ranges) = engine.highlight_line(content) else {
+        let Some(ranges) = self
+            .engine
+            .as_mut()
+            .and_then(|engine| engine.highlight_line(content))
+        else {
             return plain_line(content, base_style);
         };
 
@@ -83,20 +84,23 @@ impl SyntaxEngine {
     }
 
     fn highlight_line<'a>(&mut self, content: &'a str) -> Option<Vec<(SyntectStyle, &'a str)>> {
-        let ops = self.parse_state.parse_line(content, &SYNTAX_SET).ok()?;
-        let highlighter = Highlighter::new(&self.theme);
-        Some(
-            HighlightIterator::new(&mut self.highlight_state, &ops, content, &highlighter)
-                .collect(),
-        )
+        self.with_highlights(content, |highlights| highlights.collect())
     }
 
     fn advance_line(&mut self, content: &str) {
-        let Some(ops) = self.parse_state.parse_line(content, &SYNTAX_SET).ok() else {
-            return;
-        };
+        let _ = self.with_highlights(content, |highlights| highlights.count());
+    }
+
+    fn with_highlights<'content, Output>(
+        &mut self,
+        content: &'content str,
+        consume: impl for<'state> FnOnce(HighlightIterator<'state, 'content>) -> Output,
+    ) -> Option<Output> {
+        let ops = self.parse_state.parse_line(content, &SYNTAX_SET).ok()?;
         let highlighter = Highlighter::new(&self.theme);
-        for _ in HighlightIterator::new(&mut self.highlight_state, &ops, content, &highlighter) {}
+        let highlights =
+            HighlightIterator::new(&mut self.highlight_state, &ops, content, &highlighter);
+        Some(consume(highlights))
     }
 }
 
@@ -114,36 +118,30 @@ fn syntax_name_for_path(path: &str) -> Option<&'static str> {
 }
 
 fn syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
-    let path = path.trim();
-    if path.is_empty() {
+    let path_text = path.trim();
+    if path_text.is_empty() {
         return None;
     }
 
-    syntax_for_path_parts(path).or_else(|| syntax_for_known_path(path))
-}
-
-fn syntax_for_path_parts(path: &str) -> Option<&'static SyntaxReference> {
-    let path = Path::new(path);
-    let file_name = path.file_name().and_then(|component| component.to_str())?;
-    if let Some(syntax) = SYNTAX_SET.find_syntax_by_extension(file_name) {
-        return Some(syntax);
-    }
-
-    let extension = path.extension().and_then(|component| component.to_str())?;
-    SYNTAX_SET.find_syntax_by_extension(extension)
-}
-
-fn syntax_for_known_path(path_text: &str) -> Option<&'static SyntaxReference> {
     let path = Path::new(path_text);
-    let file_name_lowercase = path
+    let file_name = path
         .file_name()
         .and_then(|component| component.to_str())
-        .unwrap_or(path_text)
-        .to_ascii_lowercase();
-    let extension = path
-        .extension()
-        .and_then(|component| component.to_str())
-        .map(str::to_ascii_lowercase);
+        .unwrap_or(path_text);
+    let extension = path.extension().and_then(|component| component.to_str());
+
+    SYNTAX_SET
+        .find_syntax_by_extension(file_name)
+        .or_else(|| extension.and_then(|value| SYNTAX_SET.find_syntax_by_extension(value)))
+        .or_else(|| syntax_for_known_path(file_name, extension))
+}
+
+fn syntax_for_known_path(
+    file_name: &str,
+    extension: Option<&str>,
+) -> Option<&'static SyntaxReference> {
+    let file_name_lowercase = file_name.to_ascii_lowercase();
+    let extension = extension.map(str::to_ascii_lowercase);
 
     let file_name = file_name_lowercase.as_str();
 
@@ -382,22 +380,22 @@ fn syntect_color(color: Color) -> SyntectColor {
 fn rgb(color: Color) -> (u8, u8, u8) {
     match color {
         Color::Reset => (0xeb, 0xdb, 0xb2),
-        Color::Black => (0x00, 0x00, 0x00),
-        Color::Red => (0x80, 0x00, 0x00),
-        Color::Green => (0x00, 0x80, 0x00),
-        Color::Yellow => (0x80, 0x80, 0x00),
-        Color::Blue => (0x00, 0x00, 0x80),
-        Color::Magenta => (0x80, 0x00, 0x80),
-        Color::Cyan => (0x00, 0x80, 0x80),
-        Color::Gray => (0xc0, 0xc0, 0xc0),
-        Color::DarkGray => (0x80, 0x80, 0x80),
-        Color::LightRed => (0xff, 0x00, 0x00),
-        Color::LightGreen => (0x00, 0xff, 0x00),
-        Color::LightYellow => (0xff, 0xff, 0x00),
-        Color::LightBlue => (0x00, 0x00, 0xff),
-        Color::LightMagenta => (0xff, 0x00, 0xff),
-        Color::LightCyan => (0x00, 0xff, 0xff),
-        Color::White => (0xff, 0xff, 0xff),
+        Color::Black => indexed_rgb(0),
+        Color::Red => indexed_rgb(1),
+        Color::Green => indexed_rgb(2),
+        Color::Yellow => indexed_rgb(3),
+        Color::Blue => indexed_rgb(4),
+        Color::Magenta => indexed_rgb(5),
+        Color::Cyan => indexed_rgb(6),
+        Color::Gray => indexed_rgb(7),
+        Color::DarkGray => indexed_rgb(8),
+        Color::LightRed => indexed_rgb(9),
+        Color::LightGreen => indexed_rgb(10),
+        Color::LightYellow => indexed_rgb(11),
+        Color::LightBlue => indexed_rgb(12),
+        Color::LightMagenta => indexed_rgb(13),
+        Color::LightCyan => indexed_rgb(14),
+        Color::White => indexed_rgb(15),
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Indexed(index) => indexed_rgb(index),
     }

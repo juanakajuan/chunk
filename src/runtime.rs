@@ -82,6 +82,12 @@ struct BackgroundTask<T> {
     on_disconnect: Box<dyn FnOnce() -> T>,
 }
 
+#[derive(Default)]
+struct BackgroundTasks {
+    custom_command: Option<BackgroundTask<CustomCommandResult>>,
+    ask_ai: Option<BackgroundTask<AskAiResult>>,
+}
+
 impl<T: Send + 'static> BackgroundTask<T> {
     /// Spawn `run` on a worker thread, handing it a cancel receiver. If the
     /// worker disappears without sending, `on_disconnect` supplies the result.
@@ -105,6 +111,33 @@ impl<T: Send + 'static> BackgroundTask<T> {
 
     fn request_cancel(&self) {
         let _ = self.cancel.send(());
+    }
+}
+
+impl BackgroundTasks {
+    fn finish_ready(&mut self, app: &mut App) {
+        if let Some(result) = finish_task(&mut self.custom_command) {
+            app.handle_runtime_event(RuntimeEvent::CustomCommandFinished(result));
+        }
+        if let Some(result) = finish_task(&mut self.ask_ai) {
+            app.handle_runtime_event(RuntimeEvent::AskAiFinished(result));
+        }
+    }
+
+    fn request_custom_command_cancel(&self) {
+        if let Some(task) = self.custom_command.as_ref() {
+            task.request_cancel();
+        }
+    }
+
+    fn request_ask_ai_cancel(&self) {
+        if let Some(task) = self.ask_ai.as_ref() {
+            task.request_cancel();
+        }
+    }
+
+    fn cancel_ask_ai_and_join(&mut self) {
+        cancel_and_join(&mut self.ask_ai);
     }
 }
 
@@ -300,16 +333,10 @@ pub(crate) fn run(mut app: App) -> Result<()> {
 fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
     let watcher = start_live_worktree_watcher(app);
     let mut pending_reload_at: Option<Instant> = None;
-    let mut custom_command_task: Option<BackgroundTask<CustomCommandResult>> = None;
-    let mut ask_ai_task: Option<BackgroundTask<AskAiResult>> = None;
+    let mut background_tasks = BackgroundTasks::default();
 
     loop {
-        if let Some(result) = finish_task(&mut custom_command_task) {
-            app.handle_runtime_event(RuntimeEvent::CustomCommandFinished(result));
-        }
-        if let Some(result) = finish_task(&mut ask_ai_task) {
-            app.handle_runtime_event(RuntimeEvent::AskAiFinished(result));
-        }
+        background_tasks.finish_ready(app);
         app.advance_custom_command_spinner();
         app.advance_ask_ai_spinner();
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -327,22 +354,14 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
         }
 
         match event::read()? {
-            Event::Key(key)
-                if !handle_key_event(
-                    terminal,
-                    app,
-                    key,
-                    &mut custom_command_task,
-                    &mut ask_ai_task,
-                )? =>
-            {
-                cancel_and_join(&mut ask_ai_task);
+            Event::Key(key) if !handle_key_event(terminal, app, key, &mut background_tasks)? => {
+                background_tasks.cancel_ask_ai_and_join();
                 break;
             }
             Event::Key(_) => {}
             Event::Mouse(mouse) => {
                 app.handle_mouse(mouse);
-                handle_app_effects(terminal, app, &mut custom_command_task, &mut ask_ai_task)?;
+                handle_app_effects(terminal, app, &mut background_tasks)?;
             }
             _ => {}
         }
@@ -355,14 +374,13 @@ fn handle_key_event(
     terminal: &mut TuiTerminal,
     app: &mut App,
     key: KeyEvent,
-    custom_command_task: &mut Option<BackgroundTask<CustomCommandResult>>,
-    ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
+    background_tasks: &mut BackgroundTasks,
 ) -> Result<bool> {
     if !app.handle_key(key)? {
         return Ok(false);
     }
 
-    handle_app_effects(terminal, app, custom_command_task, ask_ai_task)?;
+    handle_app_effects(terminal, app, background_tasks)?;
 
     Ok(true)
 }
@@ -370,34 +388,25 @@ fn handle_key_event(
 fn handle_app_effects(
     terminal: &mut TuiTerminal,
     app: &mut App,
-    custom_command_task: &mut Option<BackgroundTask<CustomCommandResult>>,
-    ask_ai_task: &mut Option<BackgroundTask<AskAiResult>>,
+    background_tasks: &mut BackgroundTasks,
 ) -> Result<()> {
     for effect in app.take_effects() {
         match effect {
             AppEffect::OpenEditor(request) => {
-                let event = open_requested_editor(terminal, &request)?;
-                app.handle_runtime_event(event);
+                let outcome = open_editor(terminal, &request)?;
+                app.handle_runtime_event(RuntimeEvent::EditorFinished(outcome));
             }
             AppEffect::RunCustomCommand(command) => {
-                start_requested_custom_command(command, custom_command_task);
+                start_requested_custom_command(command, &mut background_tasks.custom_command);
             }
-            AppEffect::CancelCustomCommand => {
-                if let Some(task) = custom_command_task.as_ref() {
-                    task.request_cancel();
-                }
-            }
+            AppEffect::CancelCustomCommand => background_tasks.request_custom_command_cancel(),
             AppEffect::RunAskAi { settings, request } => {
-                start_requested_ask_ai(*settings, request, ask_ai_task);
+                start_requested_ask_ai(*settings, request, &mut background_tasks.ask_ai);
             }
             AppEffect::RunUnpublishedSummary { settings } => {
-                start_requested_unpublished_summary(*settings, ask_ai_task);
+                start_requested_unpublished_summary(*settings, &mut background_tasks.ask_ai);
             }
-            AppEffect::CancelAskAi => {
-                if let Some(task) = ask_ai_task.as_ref() {
-                    task.request_cancel();
-                }
-            }
+            AppEffect::CancelAskAi => background_tasks.request_ask_ai_cancel(),
             AppEffect::SaveAiSettings(settings) => {
                 app.handle_runtime_event(save_ai_settings(*settings));
             }
@@ -425,15 +434,6 @@ fn save_ai_settings(settings: AiSettings) -> RuntimeEvent {
             .map(|error| error.to_string()),
         settings,
     }
-}
-
-fn open_requested_editor(
-    terminal: &mut TuiTerminal,
-    request: &EditorRequest,
-) -> Result<RuntimeEvent> {
-    Ok(RuntimeEvent::EditorFinished(open_editor(
-        terminal, request,
-    )?))
 }
 
 fn open_editor(terminal: &mut TuiTerminal, request: &EditorRequest) -> Result<EditorOutcome> {
@@ -682,8 +682,12 @@ fn is_relevant_worktree_path(path: &Path, root: &Path) -> bool {
     };
 
     let mut components = relative_path.components();
-    !matches!(components.next(), Some(Component::Normal(name)) if name == ".git")
-        || is_relevant_git_metadata_path(components.as_path())
+    match components.next() {
+        Some(Component::Normal(name)) if name == ".git" => {
+            is_relevant_git_metadata_path(components.as_path())
+        }
+        _ => true,
+    }
 }
 
 fn is_relevant_git_metadata_path(path: &Path) -> bool {

@@ -270,10 +270,6 @@ impl AskAiRequest {
     pub(crate) fn context(&self) -> &AskAiContext {
         &self.context
     }
-
-    pub(crate) fn context_summary(&self) -> String {
-        self.context.summary()
-    }
 }
 
 impl AskAiContext {
@@ -285,17 +281,14 @@ impl AskAiContext {
         hunk_index: Option<usize>,
         selected_text: Option<String>,
     ) -> Self {
-        let (focused_hunk, diff_text) = hunk_index
-            .and_then(|index| file.hunks.get(index).map(|hunk| (index, hunk)))
-            .map_or_else(
-                || (None, file_diff_text(file)),
-                |(index, hunk)| {
-                    (
-                        Some(AskAiHunkContext::new(index, hunk)),
-                        hunk_diff_text(file, hunk),
-                    )
-                },
-            );
+        let (focused_hunk, diff_text) =
+            match hunk_index.and_then(|index| file.hunks.get(index).map(|hunk| (index, hunk))) {
+                Some((index, hunk)) => (
+                    Some(AskAiHunkContext::new(index, hunk)),
+                    hunk_diff_text(file, hunk),
+                ),
+                None => (None, file_diff_text(file)),
+            };
 
         Self {
             review_mode,
@@ -383,7 +376,7 @@ impl AskAiResult {
         repo_root: Option<PathBuf>,
         outcome: ProcessOutcome,
     ) -> Self {
-        let context_summary = request.context_summary();
+        let context_summary = request.context.summary();
         Self::new(request.question, context_summary, repo_root, outcome)
     }
 
@@ -618,10 +611,9 @@ impl AskAiInvocation {
         command
     }
 
-    fn into_process(mut self) -> CancellableProcess {
-        let stdin = self.stdin.take();
+    fn into_process(self) -> CancellableProcess {
         let process = CancellableProcess::child(self.command());
-        match stdin {
+        match self.stdin {
             Some(stdin) => process.stdin(stdin),
             None => process,
         }
@@ -640,10 +632,6 @@ impl DiffAttachment {
         write_temp_diff(&path, contents)?;
         Ok(Self { path })
     }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for DiffAttachment {
@@ -658,15 +646,15 @@ pub(crate) fn run_unpublished_summary(
     repo_root: PathBuf,
     cancel: Receiver<()>,
 ) -> io::Result<AskAiResult> {
-    let attachment = (settings.harness == AiHarness::OpenCode)
-        .then(|| DiffAttachment::write(diff_text))
-        .transpose()?;
-    let invocation = match attachment.as_ref() {
-        Some(attachment) => AskAiInvocation::unpublished_summary_attachment(
-            &settings,
-            attachment.path(),
-            &repo_root,
-        ),
+    let diff_attachment = if settings.harness == AiHarness::OpenCode {
+        Some(DiffAttachment::write(diff_text)?)
+    } else {
+        None
+    };
+    let invocation = match diff_attachment.as_ref() {
+        Some(attachment) => {
+            AskAiInvocation::unpublished_summary_attachment(&settings, &attachment.path, &repo_root)
+        }
         None => AskAiInvocation::unpublished_summary_inline(&settings, diff_text, &repo_root),
     };
 

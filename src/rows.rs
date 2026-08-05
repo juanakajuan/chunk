@@ -104,16 +104,7 @@ pub(crate) fn custom_command_running_lines(
         "Running command"
     };
 
-    styled_status_lines(
-        format!(
-            "{} {status}: {}",
-            CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()],
-            command.label()
-        ),
-        theme.accent,
-        content_width,
-        theme,
-    )
+    spinner_status_lines(status, command.label(), spinner_frame, content_width, theme)
 }
 
 pub(crate) fn ask_ai_prompt_lines(
@@ -151,9 +142,19 @@ pub(crate) fn ask_ai_running_lines(
         "Asking AI"
     };
 
+    spinner_status_lines(status, question, spinner_frame, content_width, theme)
+}
+
+fn spinner_status_lines(
+    status: &str,
+    subject: &str,
+    spinner_frame: usize,
+    content_width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
     styled_status_lines(
         format!(
-            "{} {status}: {question}",
+            "{} {status}: {subject}",
             CUSTOM_COMMAND_SPINNER_FRAMES[spinner_frame % CUSTOM_COMMAND_SPINNER_FRAMES.len()]
         ),
         theme.accent,
@@ -677,34 +678,7 @@ fn push_worktree_help_section(
     content_width: usize,
     theme: Theme,
 ) {
-    if can_stage || can_discard {
-        let mut entries = Vec::new();
-        if can_stage {
-            entries.push(action_entry(
-                keybinds,
-                BuiltinAction::ToggleStaging,
-                "stage/unstage focused file or hunk",
-            ));
-        }
-        if can_discard {
-            entries.push(HelpEntry::new(
-                command_key(keybinds.display(BuiltinAction::Discard)),
-                [
-                    HelpSegment::text("discard focused file, folder, or hunk; "),
-                    HelpSegment::command("y"),
-                    HelpSegment::text(" / "),
-                    HelpSegment::command("Enter"),
-                    HelpSegment::text(" confirm"),
-                ],
-            ));
-        }
-        entries.push(action_entry(
-            keybinds,
-            BuiltinAction::Editor,
-            "open selected file in $EDITOR",
-        ));
-        push_help_entries(lines, "Worktree-only", &entries, content_width, theme);
-    } else {
+    if !can_stage && !can_discard {
         push_help_section(lines, "Worktree-only", theme);
         push_help_message(
             lines,
@@ -714,7 +688,35 @@ fn push_worktree_help_section(
             content_width,
             theme,
         );
+        return;
     }
+
+    let mut entries = Vec::new();
+    if can_stage {
+        entries.push(action_entry(
+            keybinds,
+            BuiltinAction::ToggleStaging,
+            "stage/unstage focused file or hunk",
+        ));
+    }
+    if can_discard {
+        entries.push(HelpEntry::new(
+            command_key(keybinds.display(BuiltinAction::Discard)),
+            [
+                HelpSegment::text("discard focused file, folder, or hunk; "),
+                HelpSegment::command("y"),
+                HelpSegment::text(" / "),
+                HelpSegment::command("Enter"),
+                HelpSegment::text(" confirm"),
+            ],
+        ));
+    }
+    entries.push(action_entry(
+        keybinds,
+        BuiltinAction::Editor,
+        "open selected file in $EDITOR",
+    ));
+    push_help_entries(lines, "Worktree-only", &entries, content_width, theme);
 }
 
 fn action_entry(
@@ -739,21 +741,22 @@ fn push_custom_commands_section(
             content_width,
             theme,
         );
-    } else {
-        let entries = custom_commands
-            .iter()
-            .map(|command| {
-                HelpEntry::new(
-                    command_key(command.key_display()),
-                    [
-                        HelpSegment::text(command.label()),
-                        HelpSegment::muted(format!("  {}", command.command())),
-                    ],
-                )
-            })
-            .collect::<Vec<_>>();
-        push_help_entries(lines, "Custom commands", &entries, content_width, theme);
+        return;
     }
+
+    let entries = custom_commands
+        .iter()
+        .map(|command| {
+            HelpEntry::new(
+                command_key(command.key_display()),
+                [
+                    HelpSegment::text(command.label()),
+                    HelpSegment::muted(format!("  {}", command.command())),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    push_help_entries(lines, "Custom commands", &entries, content_width, theme);
 }
 
 fn push_help_section(lines: &mut Vec<Line<'static>>, title: &'static str, theme: Theme) {
@@ -782,6 +785,12 @@ impl HelpSegment {
 
     fn muted(text: impl Into<String>) -> Self {
         Self::Muted(text.into())
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Command(text) | Self::Text(text) | Self::Muted(text) => text,
+        }
     }
 }
 
@@ -886,10 +895,13 @@ fn push_help_message(
 fn help_spans(segments: &[HelpSegment], theme: Theme) -> Vec<Span<'static>> {
     segments
         .iter()
-        .map(|segment| match segment {
-            HelpSegment::Command(text) => Span::styled(text.clone(), help_command_style(theme)),
-            HelpSegment::Text(text) => Span::styled(text.clone(), help_style(theme.text, theme)),
-            HelpSegment::Muted(text) => Span::styled(text.clone(), help_style(theme.muted, theme)),
+        .map(|segment| {
+            let style = match segment {
+                HelpSegment::Command(_) => help_command_style(theme),
+                HelpSegment::Text(_) => help_style(theme.text, theme),
+                HelpSegment::Muted(_) => help_style(theme.muted, theme),
+            };
+            Span::styled(segment.as_str().to_string(), style)
         })
         .collect()
 }
@@ -913,11 +925,7 @@ fn padded_help_key_spans(
 fn segments_width(segments: &[HelpSegment]) -> usize {
     segments
         .iter()
-        .map(|segment| match segment {
-            HelpSegment::Command(text) | HelpSegment::Text(text) | HelpSegment::Muted(text) => {
-                display_width(text)
-            }
-        })
+        .map(|segment| display_width(segment.as_str()))
         .sum()
 }
 
@@ -1091,7 +1099,7 @@ fn push_output_section(
     if output.is_empty() {
         push_output_text_line(
             lines,
-            "(empty)".to_string(),
+            "(empty)",
             color_style(theme.muted, theme.background),
             content_width,
         );
@@ -1099,7 +1107,7 @@ fn push_output_section(
     }
 
     for row in output.lines() {
-        push_output_text_line(lines, row.to_string(), output_style, content_width);
+        push_output_text_line(lines, row, output_style, content_width);
     }
 }
 
@@ -1161,7 +1169,7 @@ fn push_output_section_heading(
 ) {
     push_output_text_line(
         lines,
-        title.to_string(),
+        title,
         color_style(theme.accent, theme.background).add_modifier(Modifier::BOLD),
         content_width,
     );
@@ -1169,11 +1177,11 @@ fn push_output_section_heading(
 
 fn push_output_text_line(
     lines: &mut Vec<Line<'static>>,
-    text: String,
+    text: impl Into<String>,
     style: Style,
     content_width: usize,
 ) {
-    lines.extend(wrap_line(Line::styled(text, style), content_width));
+    lines.extend(wrap_line(Line::styled(text.into(), style), content_width));
 }
 
 pub(crate) fn changeset_title(changeset: &Changeset) -> String {

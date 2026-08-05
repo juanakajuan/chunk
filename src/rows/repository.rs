@@ -1,4 +1,4 @@
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 
 use crate::model::{CommitSummary, LocalBranch};
@@ -12,39 +12,31 @@ pub(crate) fn branch_lines(
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    if branches.is_empty() {
-        return vec![muted_line("No local branches", theme)];
-    }
-
-    branches
-        .iter()
-        .enumerate()
-        .map(|(index, branch)| {
-            let background = if selected_index == Some(index) {
-                theme.selected
-            } else {
-                theme.background
-            };
+    repository_lines(
+        branches,
+        selected_index,
+        content_width,
+        "No local branches",
+        theme,
+        |branch, background| {
             let color = if branch.current {
                 theme.accent
             } else {
                 theme.text
             };
-            let mut name_style = color_style(color, background);
-            if branch.current {
-                name_style = name_style.add_modifier(Modifier::BOLD);
-            }
+            let marker_style = color_style(color, background);
+            let name_style = if branch.current {
+                marker_style.add_modifier(Modifier::BOLD)
+            } else {
+                marker_style
+            };
 
-            let line = Line::from(vec![
-                Span::styled(
-                    if branch.current { "* " } else { "  " },
-                    color_style(color, background),
-                ),
+            Line::from(vec![
+                Span::styled(if branch.current { "* " } else { "  " }, marker_style),
                 Span::styled(branch.name.clone(), name_style),
-            ]);
-            fill_selected_row(line, selected_index == Some(index), content_width, theme)
-        })
-        .collect()
+            ])
+        },
+    )
 }
 
 pub(crate) fn commit_lines(
@@ -53,46 +45,59 @@ pub(crate) fn commit_lines(
     content_width: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    if commits.is_empty() {
-        return vec![muted_line("No commits", theme)];
-    }
-
-    commits
-        .iter()
-        .enumerate()
-        .map(|(index, commit)| {
-            let background = if selected_index == Some(index) {
-                theme.selected
-            } else {
-                theme.background
-            };
-            let line = Line::from(vec![
+    repository_lines(
+        commits,
+        selected_index,
+        content_width,
+        "No commits",
+        theme,
+        |commit, background| {
+            let text_style = color_style(theme.text, background);
+            Line::from(vec![
                 Span::styled(
                     commit.short_id.clone(),
                     color_style(theme.accent, background),
                 ),
-                Span::styled(" ", color_style(theme.text, background)),
-                Span::styled(commit.subject.clone(), color_style(theme.text, background)),
-            ]);
-            fill_selected_row(line, selected_index == Some(index), content_width, theme)
-        })
-        .collect()
+                Span::styled(" ", text_style),
+                Span::styled(commit.subject.clone(), text_style),
+            ])
+        },
+    )
 }
 
-fn fill_selected_row(
-    mut line: Line<'static>,
-    selected: bool,
+fn repository_lines<Item>(
+    items: &[Item],
+    selected_index: Option<usize>,
     content_width: usize,
+    empty_message: &'static str,
     theme: Theme,
-) -> Line<'static> {
-    if selected {
-        let padding = content_width.saturating_sub(line.width());
-        line.spans.push(Span::styled(
-            " ".repeat(padding),
-            color_style(theme.text, theme.selected),
-        ));
+    render: impl Fn(&Item, Color) -> Line<'static>,
+) -> Vec<Line<'static>> {
+    if items.is_empty() {
+        return vec![muted_line(empty_message, theme)];
     }
-    line
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let selected = selected_index == Some(index);
+            let background = if selected {
+                theme.selected
+            } else {
+                theme.background
+            };
+            let mut line = render(item, background);
+            if selected {
+                let padding = content_width.saturating_sub(line.width());
+                line.spans.push(Span::styled(
+                    " ".repeat(padding),
+                    color_style(theme.text, theme.selected),
+                ));
+            }
+            line
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -23,6 +23,14 @@ const HELP_OVERLAY_MAX_HEIGHT: u16 = 24;
 const HELP_SCROLLBAR_WIDTH: u16 = 1;
 const HARNESS_OVERLAY_WIDTH: u16 = 62;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneContentSize {
+    width: usize,
+    height: usize,
+}
+
+type SidebarRows = fn(&mut App, Rect, usize, usize, Theme) -> Vec<Line<'static>>;
+
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme();
     app.begin_render_frame();
@@ -73,39 +81,29 @@ fn render_sidebar_stack(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         ])
         .split(area);
 
-    render_files(frame, chunks[0], app, theme);
-    render_branches(frame, chunks[1], app, theme);
-    render_commits(frame, chunks[2], app, theme);
+    let panes: [(&str, FocusPane, SidebarRows); 3] = [
+        (" Files ", FocusPane::Sidebar, App::sidebar_rows),
+        (" Branches ", FocusPane::Branches, App::branch_panel_rows),
+        (" Commits ", FocusPane::Commits, App::commit_panel_rows),
+    ];
+    for (pane_area, (title, focus, rows)) in chunks.iter().copied().zip(panes) {
+        let content = pane_content_size(pane_area);
+        let lines = rows(app, pane_area, content.width, content.height, theme);
+        let block = pane_block(title, app.focus(), focus, theme);
+        frame.render_widget(Paragraph::new(lines).block(block), pane_area);
+    }
 }
 
-fn render_files(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    let inner_height = area.height.saturating_sub(2).max(1) as usize;
-    let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let lines = app.sidebar_rows(area, content_width, inner_height, theme);
-    let block = pane_block(" Files ", app.focus(), FocusPane::Sidebar, theme);
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn render_branches(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    let inner_height = area.height.saturating_sub(2).max(1) as usize;
-    let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let lines = app.branch_panel_rows(area, content_width, inner_height, theme);
-    let block = pane_block(" Branches ", app.focus(), FocusPane::Branches, theme);
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn render_commits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    let inner_height = area.height.saturating_sub(2).max(1) as usize;
-    let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let lines = app.commit_panel_rows(area, content_width, inner_height, theme);
-    let block = pane_block(" Commits ", app.focus(), FocusPane::Commits, theme);
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+fn pane_content_size(area: Rect) -> PaneContentSize {
+    PaneContentSize {
+        width: usize::from(area.width.saturating_sub(PANE_BORDER_WIDTH)),
+        height: usize::from(area.height.saturating_sub(PANE_BORDER_WIDTH).max(1)),
+    }
 }
 
 fn render_diff(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Theme) {
-    let inner_height = area.height.saturating_sub(2).max(1) as usize;
-    let content_width = area.width.saturating_sub(PANE_BORDER_WIDTH) as usize;
-    let pane = app.diff_pane_rows(area, content_width, inner_height, theme);
+    let content = pane_content_size(area);
+    let pane = app.diff_pane_rows(area, content.width, content.height, theme);
     let block = pane_block(pane.title, app.focus(), FocusPane::Diff, theme);
     frame.render_widget(Paragraph::new(pane.lines).block(block), area);
     if let Some(scrollbar) = pane.scrollbar {
@@ -132,7 +130,7 @@ fn render_keybind_bar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: T
     let mode_tag = app.keybind_mode_tag_line(theme);
     let tag_width = mode_tag
         .as_ref()
-        .map(|line| line.width().min(area.width as usize) as u16);
+        .map(|line| saturating_u16(line.width().min(usize::from(area.width))));
     let key_area = keybind_content_area(area, line.width(), tag_width);
     let lines = app.selectable_lines(key_area, vec![line], 0, 1, theme);
     frame.render_widget(
@@ -162,7 +160,7 @@ fn keybind_content_area(area: Rect, line_width: usize, tag_width: Option<u16>) -
     let Some(tag_width) = tag_width else {
         return area;
     };
-    let line_width = line_width.min(area.width as usize) as u16;
+    let line_width = saturating_u16(line_width.min(usize::from(area.width)));
     let centered_start = area.width.saturating_sub(line_width) / 2;
     if centered_start > tag_width {
         return area;
@@ -264,7 +262,7 @@ fn render_help_scrollbar(
     scroll: usize,
     theme: Theme,
 ) {
-    let thumb = scrollbar_thumb(area.height as usize, total_rows, visible_rows, scroll);
+    let thumb = scrollbar_thumb(usize::from(area.height), total_rows, visible_rows, scroll);
     render_scrollbar(frame, area, thumb, theme.background_alt, theme);
 }
 
@@ -274,9 +272,9 @@ fn render_harness_picker_overlay(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     }
 
     let width = modal_width(area, HARNESS_OVERLAY_WIDTH);
-    let content_width = width.saturating_sub(PANE_BORDER_WIDTH) as usize;
+    let content_width = usize::from(width.saturating_sub(PANE_BORDER_WIDTH));
     let lines = app.harness_picker_lines(content_width, theme);
-    let height = modal_height(area, lines.len() as u16);
+    let height = modal_height(area, saturating_u16(lines.len()));
     let area = centered_rect(area, width, height);
     let block = modal_block(harness_picker_title(theme), theme);
 
@@ -322,7 +320,7 @@ fn render_scrollbar(
 ) {
     let track_style = color_style(theme.muted, background);
     let thumb_style = color_style(theme.accent, background);
-    let lines = (0..area.height as usize)
+    let lines = (0..usize::from(area.height))
         .map(|row| {
             let in_thumb = row >= thumb.start && row < thumb.start.saturating_add(thumb.len);
             let (symbol, style) = if in_thumb {
@@ -339,8 +337,8 @@ fn render_scrollbar(
 
 fn help_scrollbar_area(area: Rect) -> Rect {
     Rect {
-        x: area.x + area.width.saturating_sub(2),
-        y: area.y + 1,
+        x: area.x.saturating_add(area.width.saturating_sub(2)),
+        y: area.y.saturating_add(1),
         width: HELP_SCROLLBAR_WIDTH,
         height: area.height.saturating_sub(PANE_BORDER_WIDTH),
     }
@@ -410,26 +408,28 @@ struct HelpOverlayLayout {
 
 impl HelpOverlayLayout {
     fn content_width(area: Rect) -> usize {
-        help_overlay_width(area).saturating_sub(PANE_BORDER_WIDTH) as usize
+        usize::from(help_overlay_width(area).saturating_sub(PANE_BORDER_WIDTH))
     }
 
     fn new(area: Rect, line_count: usize) -> Self {
         let width = help_overlay_width(area);
-        let height = help_overlay_height(area, line_count as u16);
-        let visible_content_height = height.saturating_sub(PANE_BORDER_WIDTH) as usize;
+        let height = help_overlay_height(area, saturating_u16(line_count));
+        let visible_content_height = usize::from(height.saturating_sub(PANE_BORDER_WIDTH));
 
         Self {
             width,
             height,
-            content_width: width.saturating_sub(PANE_BORDER_WIDTH) as usize,
+            content_width: usize::from(width.saturating_sub(PANE_BORDER_WIDTH)),
             visible_content_height,
             overflows: line_count > visible_content_height,
         }
     }
 
     fn scrollbar_content_width(self) -> usize {
-        self.width
-            .saturating_sub(PANE_BORDER_WIDTH + HELP_SCROLLBAR_WIDTH) as usize
+        usize::from(
+            self.width
+                .saturating_sub(PANE_BORDER_WIDTH + HELP_SCROLLBAR_WIDTH),
+        )
     }
 
     fn with_reserved_scrollbar(mut self, line_count: usize) -> Self {
@@ -440,7 +440,7 @@ impl HelpOverlayLayout {
 }
 
 fn saturating_u16(value: usize) -> u16 {
-    value.min(u16::MAX as usize) as u16
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 fn help_overlay_width(area: Rect) -> u16 {
@@ -476,8 +476,8 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     let vertical_margin = area.height.saturating_sub(height) / 2;
 
     Rect {
-        x: area.x + horizontal_margin,
-        y: area.y + vertical_margin,
+        x: area.x.saturating_add(horizontal_margin),
+        y: area.y.saturating_add(vertical_margin),
         width,
         height,
     }

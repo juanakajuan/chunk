@@ -6,7 +6,7 @@
 //! and render status, never exposing match coordinates to callers.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::app::accepts_text_input;
@@ -149,8 +149,14 @@ impl Search {
             .enumerate()
             .map(|(visible_index, line)| {
                 let row = diff_scroll.saturating_add(visible_index);
-                let matches = self.matches_on_row(row);
-                highlight_line_search_matches(line, &matches, self.active_index, theme)
+                let (first_match_index, matches) = self.matches_on_row(row);
+                highlight_line_search_matches(
+                    line,
+                    matches,
+                    first_match_index,
+                    self.active_index,
+                    theme,
+                )
             })
             .collect()
     }
@@ -171,13 +177,14 @@ impl Search {
             .and_then(|index| self.matches.get(index).copied())
     }
 
-    fn matches_on_row(&self, row: usize) -> Vec<(usize, SearchMatch)> {
-        self.matches
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, search_match)| search_match.row == row)
-            .collect()
+    fn matches_on_row(&self, row: usize) -> (usize, &[SearchMatch]) {
+        let start = self
+            .matches
+            .partition_point(|search_match| search_match.row < row);
+        let end = self
+            .matches
+            .partition_point(|search_match| search_match.row <= row);
+        (start, &self.matches[start..end])
     }
 }
 
@@ -193,49 +200,47 @@ impl Search {
 }
 
 fn diff_search_matches(lines: &[Line<'static>], query: &str) -> Vec<SearchMatch> {
-    lines
-        .iter()
-        .enumerate()
-        .flat_map(|(row, line)| {
-            search_matches_in_text(&line_text(line), query)
-                .into_iter()
-                .map(move |(start, end)| SearchMatch { row, start, end })
-        })
-        .collect()
-}
-
-fn search_matches_in_text(text: &str, query: &str) -> Vec<(usize, usize)> {
-    let haystack: Vec<char> = text.chars().collect();
     let needle: Vec<char> = query.chars().collect();
     let needle_len = needle.len();
-    if needle_len == 0 || haystack.len() < needle_len {
+    if needle_len == 0 {
         return Vec::new();
     }
 
-    (0..=haystack.len() - needle_len)
-        .filter(|start| {
-            haystack[*start..*start + needle_len]
-                .iter()
-                .zip(&needle)
-                .all(|(left, right)| search_chars_match(*left, *right))
-        })
-        .map(|start| (start, start + needle_len))
-        .collect()
+    let mut matches = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        let haystack = line
+            .spans
+            .iter()
+            .flat_map(|span| span.content.chars())
+            .collect::<Vec<_>>();
+        matches.extend(
+            haystack
+                .windows(needle_len)
+                .enumerate()
+                .filter(|(_, window)| {
+                    window
+                        .iter()
+                        .zip(&needle)
+                        .all(|(left, right)| search_chars_match(*left, *right))
+                })
+                .map(|(start, _)| SearchMatch {
+                    row,
+                    start,
+                    end: start + needle_len,
+                }),
+        );
+    }
+    matches
 }
 
 fn search_chars_match(left: char, right: char) -> bool {
     left == right || (left.is_ascii() && right.is_ascii() && left.eq_ignore_ascii_case(&right))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchMatchKind {
-    Active,
-    Inactive,
-}
-
 fn highlight_line_search_matches(
     line: Line<'static>,
-    matches: &[(usize, SearchMatch)],
+    matches: &[SearchMatch],
+    first_match_index: usize,
     active_index: Option<usize>,
     theme: Theme,
 ) -> Line<'static> {
@@ -245,7 +250,7 @@ fn highlight_line_search_matches(
 
     let style = line.style;
     let alignment = line.alignment;
-    let spans = highlight_search_spans(line.spans, matches, active_index, theme);
+    let spans = highlight_search_spans(line.spans, matches, first_match_index, active_index, theme);
 
     Line {
         spans,
@@ -254,64 +259,49 @@ fn highlight_line_search_matches(
     }
 }
 
-fn search_style_for_char(
-    index: usize,
-    base_style: Style,
-    matches: &[(usize, SearchMatch)],
-    active_index: Option<usize>,
-    theme: Theme,
-) -> Style {
-    match search_match_kind_at(index, matches, active_index) {
-        Some(SearchMatchKind::Active) => base_style
-            .fg(theme.on_accent)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-        Some(SearchMatchKind::Inactive) => {
-            base_style.bg(theme.selected).add_modifier(Modifier::BOLD)
-        }
-        None => base_style,
-    }
-}
-
-fn search_match_kind_at(
-    index: usize,
-    matches: &[(usize, SearchMatch)],
-    active_index: Option<usize>,
-) -> Option<SearchMatchKind> {
-    let mut found_inactive_match = false;
-
-    for (match_index, search_match) in matches {
-        if !search_match_contains(*search_match, index) {
-            continue;
-        }
-
-        if Some(*match_index) == active_index {
-            return Some(SearchMatchKind::Active);
-        }
-
-        found_inactive_match = true;
-    }
-
-    found_inactive_match.then_some(SearchMatchKind::Inactive)
-}
-
-fn search_match_contains(search_match: SearchMatch, index: usize) -> bool {
-    index >= search_match.start && index < search_match.end
-}
-
 fn highlight_search_spans(
     input_spans: Vec<Span<'static>>,
-    matches: &[(usize, SearchMatch)],
+    matches: &[SearchMatch],
+    first_match_index: usize,
     active_index: Option<usize>,
     theme: Theme,
 ) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut index = 0;
+    let mut next_match_index = 0;
+    let mut matched_through = 0;
+    let active_match = active_index
+        .and_then(|index| index.checked_sub(first_match_index))
+        .and_then(|index| matches.get(index))
+        .copied();
 
     for input_span in input_spans {
+        let active_style = input_span
+            .style
+            .fg(theme.on_accent)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let inactive_style = input_span
+            .style
+            .bg(theme.selected)
+            .add_modifier(Modifier::BOLD);
         for value in input_span.content.chars() {
-            let style =
-                search_style_for_char(index, input_span.style, matches, active_index, theme);
+            while matches
+                .get(next_match_index)
+                .is_some_and(|search_match| search_match.start <= index)
+            {
+                matched_through = matched_through.max(matches[next_match_index].end);
+                next_match_index += 1;
+            }
+            let style = if active_match
+                .is_some_and(|search_match| index >= search_match.start && index < search_match.end)
+            {
+                active_style
+            } else if index < matched_through {
+                inactive_style
+            } else {
+                input_span.style
+            };
             match spans.last_mut() {
                 Some(span) if span.style == style => span.content.to_mut().push(value),
                 _ => spans.push(Span::styled(value.to_string(), style)),
@@ -321,11 +311,4 @@ fn highlight_search_spans(
     }
 
     spans
-}
-
-fn line_text(line: &Line<'_>) -> String {
-    line.spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect()
 }

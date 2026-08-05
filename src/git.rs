@@ -139,7 +139,8 @@ pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
 }
 
 pub(crate) fn load_ref_diff(old_ref: &str, new_ref: &str) -> Result<Changeset> {
-    load_git_diff(&[], &[old_ref, new_ref], "git diff failed")
+    let patch = git_diff_patch(&[], &[old_ref, new_ref], "git diff failed")?;
+    Ok(parse_unified_diff(&patch))
 }
 
 pub(crate) fn load_worktree_source_snapshots(file: &mut DiffFile) {
@@ -278,11 +279,6 @@ pub(crate) fn worktree_root() -> Result<PathBuf> {
         .ok_or_else(|| eyre!("could not determine Git worktree root"))
 }
 
-fn load_git_diff(pre_args: &[&str], post_args: &[&str], context: &str) -> Result<Changeset> {
-    let patch = git_diff_patch(pre_args, post_args, context)?;
-    Ok(parse_unified_diff(&patch))
-}
-
 fn git_diff_patch(pre_args: &[&str], post_args: &[&str], context: &str) -> Result<String> {
     git_diff_patch_with_dir(None, pre_args, post_args, context)
 }
@@ -392,9 +388,9 @@ fn annotate_stage_states(
 ) -> Result<()> {
     for file in &mut changeset.files {
         let path = file.display_path();
-        let staged = has_file_diff_in(root, path, true)?;
-        let unstaged =
-            has_file_diff_in(root, path, false)? || is_untracked_path(untracked_paths, path);
+        let staged = has_file_diff_in(root, path, DiffScope::Staged)?;
+        let unstaged = has_file_diff_in(root, path, DiffScope::Unstaged)?
+            || is_untracked_path(untracked_paths, path);
 
         file.stage = FileStage::from_staged_unstaged(staged, unstaged);
     }
@@ -484,7 +480,7 @@ fn apply_matching_hunks_to_index(
             file.display_path()
         )
     })?;
-    apply_patch_to_index(&root, &patch, source.reverse())
+    apply_patch(&root, &patch, GitApplyTarget::Index, source.reverse())
 }
 
 fn discard_matching_hunks_from_worktree(
@@ -502,7 +498,7 @@ fn discard_matching_hunks_from_worktree(
             file.display_path()
         )
     })?;
-    apply_patch_to_worktree(root, &patch, true)
+    apply_patch(root, &patch, GitApplyTarget::Worktree, true)
 }
 
 fn matching_file<'a>(files: &'a [DiffFile], target: &DiffFile) -> Option<&'a DiffFile> {
@@ -517,14 +513,6 @@ fn same_file_identity(left: &DiffFile, right: &DiffFile) -> bool {
 
 fn non_empty_eq(left: &str, right: &str) -> bool {
     !left.is_empty() && left == right
-}
-
-fn apply_patch_to_index(root: &Path, patch: &str, reverse: bool) -> Result<()> {
-    apply_patch(root, patch, GitApplyTarget::Index, reverse)
-}
-
-fn apply_patch_to_worktree(root: &Path, patch: &str, reverse: bool) -> Result<()> {
-    apply_patch(root, patch, GitApplyTarget::Worktree, reverse)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,15 +764,7 @@ fn load_worktree_source_prefix(
         return SourceSnapshot::Unavailable;
     };
     let mut reader = BufReader::new(file);
-
-    load_source_prefix_from_reader(&mut reader, max_context_line)
-}
-
-fn load_source_prefix_from_reader(
-    reader: &mut impl BufRead,
-    max_context_line: u32,
-) -> SourceSnapshot {
-    match read_source_prefix(reader, max_context_line) {
+    match read_source_prefix(&mut reader, max_context_line) {
         Ok(prefix) => SourceSnapshot::loaded(prefix.content),
         Err(_) => SourceSnapshot::Unavailable,
     }
@@ -808,8 +788,9 @@ fn read_source_prefix(
     max_context_line: u32,
 ) -> io::Result<SourcePrefix> {
     let mut content = String::new();
+    let mut line = String::new();
     for _ in 0..max_context_line {
-        let mut line = String::new();
+        line.clear();
         let byte_count = reader.read_line(&mut line)?;
         if byte_count == 0 {
             return Ok(SourcePrefix {
@@ -973,31 +954,36 @@ fn remove_untracked_file(root: &Path, path: &str) -> Result<()> {
 }
 
 fn is_file_staged(path: &str) -> Result<bool> {
-    has_file_diff(path, true)
+    has_file_diff(path, DiffScope::Staged)
 }
 
 fn is_file_unstaged(path: &str) -> Result<bool> {
-    has_file_diff(path, false)
+    has_file_diff(path, DiffScope::Unstaged)
 }
 
-fn has_file_diff(path: &str, cached: bool) -> Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffScope {
+    Staged,
+    Unstaged,
+}
+
+fn has_file_diff(path: &str, scope: DiffScope) -> Result<bool> {
     let root = worktree_root()?;
-    has_file_diff_in(&root, path, cached)
+    has_file_diff_in(&root, path, scope)
 }
 
-fn has_file_diff_in(root: &Path, path: &str, cached: bool) -> Result<bool> {
+fn has_file_diff_in(root: &Path, path: &str, scope: DiffScope) -> Result<bool> {
     let mut command = git_command(root);
     command.arg("diff");
-    if cached {
-        command.arg("--cached");
-    }
+    let failure_context = match scope {
+        DiffScope::Staged => {
+            command.arg("--cached");
+            "git diff --cached failed"
+        }
+        DiffScope::Unstaged => "git diff failed",
+    };
 
     let status = command.args(["--quiet", "--"]).arg(path).status()?;
-    let failure_context = if cached {
-        "git diff --cached failed"
-    } else {
-        "git diff failed"
-    };
 
     match status.code() {
         Some(0) => Ok(false),

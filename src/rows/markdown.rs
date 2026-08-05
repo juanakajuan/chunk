@@ -31,10 +31,7 @@ pub(super) fn markdown_lines(
     theme: Theme,
 ) -> Vec<Line<'static>> {
     if markdown.is_empty() {
-        return wrap_line(
-            Line::styled("(empty)", color_style(theme.muted, theme.background)),
-            content_width,
-        );
+        return wrap_line(empty_markdown_line(theme), content_width);
     }
 
     let mut options = Options::empty();
@@ -177,10 +174,8 @@ impl MarkdownRenderer {
     }
 
     fn start_heading(&mut self, level: HeadingLevel) {
-        self.ensure_line_prefix();
         let marker = format!("{} ", "#".repeat(heading_depth(level)));
-        self.current
-            .push(Span::styled(marker, self.heading_marker_style()));
+        self.append_styled_text(marker, self.heading_marker_style());
         self.push_style(self.heading_text_style());
     }
 
@@ -197,18 +192,17 @@ impl MarkdownRenderer {
     fn start_list_item(&mut self) {
         let marker = self.next_list_marker();
         let prefix_len = marker.chars().count();
-        self.ensure_line_prefix();
-        self.current
-            .push(Span::styled(marker, self.list_marker_style()));
+        self.append_styled_text(marker, self.list_marker_style());
         self.continuation_prefix = Some(" ".repeat(prefix_len));
     }
 
     fn start_table_cell(&mut self) {
         if self.first_table_cell {
             self.first_table_cell = false;
-        } else {
-            self.append_styled_text(" | ", self.muted_style());
+            return;
         }
+
+        self.append_styled_text(" | ", self.muted_style());
     }
 
     fn append_text(&mut self, text: &str) {
@@ -217,15 +211,11 @@ impl MarkdownRenderer {
             return;
         }
 
-        self.ensure_line_prefix();
-        self.current
-            .push(Span::styled(text.to_string(), self.current_style()));
+        self.append_styled_text(text, self.current_style());
     }
 
     fn append_inline_code(&mut self, text: &str) {
-        self.ensure_line_prefix();
-        self.current
-            .push(Span::styled(text.to_string(), self.code_style()));
+        self.append_styled_text(text, self.code_style());
     }
 
     fn append_code_text(&mut self, text: &str) {
@@ -238,9 +228,9 @@ impl MarkdownRenderer {
         }
     }
 
-    fn append_styled_text(&mut self, text: &str, style: Style) {
+    fn append_styled_text(&mut self, text: impl Into<String>, style: Style) {
         self.ensure_line_prefix();
-        self.current.push(Span::styled(text.to_string(), style));
+        self.current.push(Span::styled(text.into(), style));
     }
 
     fn ensure_line_prefix(&mut self) {
@@ -291,10 +281,7 @@ impl MarkdownRenderer {
             self.lines.pop();
         }
         if self.lines.is_empty() {
-            self.lines.push(Line::styled(
-                "(empty)",
-                color_style(self.theme.muted, self.theme.background),
-            ));
+            self.lines.push(empty_markdown_line(self.theme));
         }
         self.lines
     }
@@ -357,6 +344,10 @@ impl MarkdownRenderer {
     fn code_style(&self) -> Style {
         color_style(self.theme.syntax.string, self.theme.background_alt)
     }
+}
+
+fn empty_markdown_line(theme: Theme) -> Line<'static> {
+    Line::styled("(empty)", color_style(theme.muted, theme.background))
 }
 
 fn heading_depth(level: HeadingLevel) -> usize {

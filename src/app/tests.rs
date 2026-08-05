@@ -43,10 +43,7 @@ fn reload_preserves_selected_file_and_scroll_by_path() {
 
     app.apply_reloaded_changeset(changeset_with_paths(["b.txt", "a.txt"]), true);
 
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("b.txt")
-    );
+    assert_selected_file_path(&app, "b.txt");
     assert_eq!(app.selected_file_index(), 0);
     assert_eq!(app.selected_diff.scroll(), 4);
 }
@@ -69,10 +66,7 @@ fn reload_clamps_scroll_when_selected_file_shrinks() {
 
     app.apply_reloaded_changeset(changeset_with_short_file("sample.txt"), true);
 
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("sample.txt")
-    );
+    assert_selected_file_path(&app, "sample.txt");
     assert_eq!(app.selected_diff.scroll(), 0);
 }
 
@@ -85,10 +79,7 @@ fn reload_resets_selection_and_scroll_when_selected_file_disappears() {
 
     app.apply_reloaded_changeset(changeset_with_paths(["a.txt"]), true);
 
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("a.txt")
-    );
+    assert_selected_file_path(&app, "a.txt");
     assert_eq!(app.selected_diff.scroll(), 0);
 }
 
@@ -100,8 +91,7 @@ fn hiding_files_panel_moves_focus_to_diff() {
     app.files_panel.set_scroll(1);
     app.selected_diff.set_scroll(3);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('f'));
 
     assert!(!app.files_panel_visible);
     assert_eq!(app.focus, FocusPane::Diff);
@@ -113,26 +103,21 @@ fn hiding_files_panel_moves_focus_to_diff() {
 #[test]
 fn hidden_files_panel_cannot_receive_keyboard_focus() {
     let mut app = app_with(changeset_with_one_file());
-    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('f'));
 
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Tab);
     assert_eq!(app.focus, FocusPane::Diff);
 
-    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Left);
     assert_eq!(app.focus, FocusPane::Diff);
 }
 
 #[test]
 fn showing_files_panel_moves_focus_to_sidebar() {
     let mut app = app_with(changeset_with_one_file());
-    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('f'));
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('f'));
 
     assert!(app.files_panel_visible);
     assert_eq!(app.focus, FocusPane::Sidebar);
@@ -148,13 +133,11 @@ fn tab_and_backtab_cycle_through_every_pane() {
         FocusPane::Diff,
         FocusPane::Sidebar,
     ] {
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
+        press_key(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, expected);
     }
 
-    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
-        .unwrap();
+    press_key_with_modifiers(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
     assert_eq!(app.focus, FocusPane::Diff);
 }
 
@@ -163,21 +146,17 @@ fn repository_panes_have_independent_keyboard_selection_and_copy() {
     let mut app = app_with_repository_overview();
     app.focus = FocusPane::Branches;
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('j'));
     assert_eq!(app.selected_branch_index, 1);
-    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('y'));
     let branch_copy = take_clipboard_request(&mut app).unwrap();
     assert_eq!(branch_copy.text(), "topic");
     assert_eq!(branch_copy.success_message(), "copied selected branch name");
 
     app.focus = FocusPane::Commits;
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('j'));
     assert_eq!(app.selected_commit_index, 1);
-    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('y'));
     let commit_copy = take_clipboard_request(&mut app).unwrap();
     assert_eq!(commit_copy.text(), "def5678");
     assert_eq!(commit_copy.success_message(), "copied selected commit id");
@@ -351,20 +330,14 @@ fn tree_navigation_skips_files_hidden_by_collapsed_folders() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("src/config.rs")
-    );
+    assert_selected_file_path(&app, "src/config.rs");
 
     app.files_panel
         .set_selected_file(1, app.changeset.files.len());
     app.files_panel.clear_cursor();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("src/config.rs")
-    );
+    assert_selected_file_path(&app, "src/config.rs");
 }
 
 #[test]
@@ -383,10 +356,7 @@ fn clicking_tree_file_selects_corresponding_diff() {
     app.handle_left_up(1, 6);
 
     assert_eq!(app.focus, FocusPane::Sidebar);
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("src/app.rs")
-    );
+    assert_selected_file_path(&app, "src/app.rs");
 }
 
 #[test]
@@ -405,10 +375,7 @@ fn clicking_tree_folder_collapses_without_losing_selected_file() {
     app.handle_left_up(1, 4);
 
     assert!(app.files_panel.is_collapsed("src/bin"));
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("src/bin/chunk.rs")
-    );
+    assert_selected_file_path(&app, "src/bin/chunk.rs");
 
     let lines = render_sidebar(&mut app);
     let sidebar = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
@@ -420,12 +387,10 @@ fn clicking_tree_folder_collapses_without_losing_selected_file() {
 fn question_mark_toggles_help_overlay() {
     let mut app = app_with(changeset_with_one_file());
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('?'));
     assert!(app.help_overlay_visible());
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('?'));
     assert!(!app.help_overlay_visible());
 }
 
@@ -433,19 +398,13 @@ fn question_mark_toggles_help_overlay() {
 fn help_overlay_dismisses_without_exiting() {
     let mut app = app_with(changeset_with_one_file());
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-        .unwrap();
-    let keep_running = app
-        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('?'));
+    let keep_running = press_key(&mut app, KeyCode::Esc);
     assert!(keep_running);
     assert!(!app.help_overlay_visible());
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-        .unwrap();
-    let keep_running = app
-        .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('?'));
+    let keep_running = press_key(&mut app, KeyCode::Char('q'));
     assert!(keep_running);
     assert!(!app.help_overlay_visible());
 }
@@ -454,9 +413,8 @@ fn help_overlay_dismisses_without_exiting() {
 fn ctrl_c_exits_tui() {
     let mut app = app_with(changeset_with_one_file());
 
-    let keep_running = app
-        .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .unwrap();
+    let keep_running =
+        press_key_with_modifiers(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
 
     assert!(!keep_running);
 }
@@ -479,13 +437,11 @@ fn hunk_jump_uses_cached_wrapped_offsets() {
         .with_hunk_offsets(vec![1, 80]),
     );
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('n'));
     assert_eq!(app.selected_diff.scroll(), 79);
     assert_eq!(app.selected_diff.selected_hunk_index(), Some(1));
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('N'));
     assert_eq!(app.selected_diff.scroll(), 0);
     assert_eq!(app.selected_diff.selected_hunk_index(), Some(0));
 }
@@ -509,8 +465,7 @@ fn hunk_jump_handles_missing_and_single_offsets() {
     );
     app.selected_diff.set_scroll(4);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('n'));
     assert_eq!(app.selected_diff.scroll(), 4);
 
     app.selected_diff.cache_test_diff_lines(
@@ -527,12 +482,10 @@ fn hunk_jump_handles_missing_and_single_offsets() {
     );
     app.selected_diff.set_scroll(0);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('n'));
     assert_eq!(app.selected_diff.scroll(), 4);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('n'));
     assert_eq!(app.selected_diff.scroll(), 4);
 }
 
@@ -797,10 +750,7 @@ fn files_panel_hover_changes_pane_focus_without_changing_tree_focus() {
     app.handle_hover(1, 1);
     assert_eq!(app.focus, FocusPane::Sidebar);
     assert_eq!(app.files_panel.current_file_target(), Some(3));
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("README.md")
-    );
+    assert_selected_file_path(&app, "README.md");
 
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
@@ -833,14 +783,7 @@ fn keyboard_tree_navigation_can_discard_focused_folder() {
     ]));
     render_sidebar(&mut app);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
-        .unwrap();
+    press_chars(&mut app, "jjjd");
 
     let target = app
         .discard_target()
@@ -862,12 +805,7 @@ fn keyboard_tree_navigation_stages_focused_folder_paths() {
     ]));
     render_sidebar(&mut app);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
+    press_chars(&mut app, "jjj");
 
     let request = app
         .active_folder_staging_request()
@@ -897,12 +835,7 @@ fn keyboard_tree_navigation_unstages_focused_staged_folder_paths() {
     let mut app = app_with(changeset);
     render_sidebar(&mut app);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        .unwrap();
+    press_chars(&mut app, "jjj");
 
     let request = app
         .active_folder_staging_request()
@@ -956,12 +889,10 @@ fn search_next_and_previous_cycle_matches() {
     enter_search_query(&mut app, "target");
     render_diff_pane(&mut app, theme);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('n'));
     assert_eq!(app.selected_diff.active_search_index(), Some(1));
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('N'));
     assert_eq!(app.selected_diff.active_search_index(), Some(0));
 }
 
@@ -976,11 +907,8 @@ fn esc_clears_active_search_without_exiting() {
     enter_search_query(&mut app, "target");
     render_diff_pane(&mut app, theme);
 
-    let keep_running = app
-        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-        .unwrap();
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-        .unwrap();
+    let keep_running = press_key(&mut app, KeyCode::Esc);
+    press_key(&mut app, KeyCode::Char('n'));
 
     assert!(keep_running);
     assert!(app.selected_diff.active_search_query().is_none());
@@ -995,11 +923,8 @@ fn esc_in_search_prompt_clears_previous_search() {
     enter_search_query(&mut app, "target");
     render_diff_pane(&mut app, theme);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
-        .unwrap();
-    let keep_running = app
-        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('/'));
+    let keep_running = press_key(&mut app, KeyCode::Esc);
 
     assert!(keep_running);
     assert!(!app.selected_diff.search_prompt_open());
@@ -1010,12 +935,10 @@ fn esc_in_search_prompt_clears_previous_search() {
 #[test]
 fn ctrl_c_exits_from_search_prompt() {
     let mut app = app_with(changeset_with_one_file());
-    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('/'));
 
-    let keep_running = app
-        .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .unwrap();
+    let keep_running =
+        press_key_with_modifiers(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
 
     assert!(!keep_running);
 }
@@ -1192,10 +1115,7 @@ fn r_key_reviews_newly_selected_file_independently() {
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("b.txt")
-    );
+    assert_selected_file_path(&app, "b.txt");
     assert!(!app.is_selected_file_reviewed());
 
     app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
@@ -1212,10 +1132,7 @@ fn review_state_survives_reload_by_path_identity() {
 
     app.apply_reloaded_changeset(changeset_with_paths(["b.txt", "a.txt"]), true);
 
-    assert_eq!(
-        app.selected_file().map(DiffFile::display_path),
-        Some("a.txt")
-    );
+    assert_selected_file_path(&app, "a.txt");
     assert!(app.is_selected_file_reviewed());
 }
 
@@ -1377,13 +1294,9 @@ fn command_output_pane_scrolls_and_closes() {
 
 #[test]
 fn ask_ai_key_from_files_panel_queues_file_context() {
-    let mut changeset = changeset_with_one_file();
-    changeset.title = "Tracked changes".to_string();
-    changeset.source_label = "git diff HEAD + untracked".to_string();
-    let mut app = app_with(changeset);
+    let mut app = app_with_ask_ai_review();
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('a'));
     let prompt_pane = render_diff_pane(&mut app, Theme::github_dark());
 
     assert!(pane_text(&prompt_pane).contains("Ask AI: type a question"));
@@ -1394,10 +1307,7 @@ fn ask_ai_key_from_files_panel_queues_file_context() {
     let request = take_ask_ai_request(&mut app).expect("Ask AI request should be queued");
     assert_eq!(request.question(), "Why changed?");
     assert_eq!(request.context().summary(), "sample.txt");
-    assert!(
-        app.ask_ai_running()
-            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
-    );
+    assert_ask_ai_running(&app, request.question());
 }
 
 #[test]
@@ -1418,14 +1328,10 @@ fn ask_ai_request_uses_configured_harness() {
 
 #[test]
 fn ask_ai_key_from_diff_pane_queues_hunk_context() {
-    let mut changeset = changeset_with_one_file();
-    changeset.title = "Tracked changes".to_string();
-    changeset.source_label = "git diff HEAD + untracked".to_string();
-    let mut app = app_with(changeset);
+    let mut app = app_with_ask_ai_review();
     app.focus = FocusPane::Diff;
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('a'));
     let prompt_pane = render_diff_pane(&mut app, Theme::github_dark());
 
     assert!(pane_text(&prompt_pane).contains("Ask AI: type a question"));
@@ -1436,49 +1342,32 @@ fn ask_ai_key_from_diff_pane_queues_hunk_context() {
     let request = take_ask_ai_request(&mut app).expect("Ask AI request should be queued");
     assert_eq!(request.question(), "Why changed?");
     assert_eq!(request.context().summary(), "sample.txt hunk 1");
-    assert!(
-        app.ask_ai_running()
-            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
-    );
+    assert_ask_ai_running(&app, request.question());
 }
 
 #[test]
 fn explain_code_key_from_files_panel_queues_file_context() {
-    let mut changeset = changeset_with_one_file();
-    changeset.title = "Tracked changes".to_string();
-    changeset.source_label = "git diff HEAD + untracked".to_string();
-    let mut app = app_with(changeset);
+    let mut app = app_with_ask_ai_review();
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('x'));
 
     let request = take_ask_ai_request(&mut app).expect("Explain Code request should be queued");
     assert_explain_code_question(request.question());
     assert_eq!(request.context().summary(), "sample.txt");
-    assert!(
-        app.ask_ai_running()
-            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
-    );
+    assert_ask_ai_running(&app, request.question());
 }
 
 #[test]
 fn explain_code_key_from_diff_pane_queues_hunk_context() {
-    let mut changeset = changeset_with_one_file();
-    changeset.title = "Tracked changes".to_string();
-    changeset.source_label = "git diff HEAD + untracked".to_string();
-    let mut app = app_with(changeset);
+    let mut app = app_with_ask_ai_review();
     app.focus = FocusPane::Diff;
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
-        .unwrap();
+    press_key(&mut app, KeyCode::Char('x'));
 
     let request = take_ask_ai_request(&mut app).expect("Explain Code request should be queued");
     assert_explain_code_question(request.question());
     assert_eq!(request.context().summary(), "sample.txt hunk 1");
-    assert!(
-        app.ask_ai_running()
-            .is_some_and(|(question, _, cancelling)| question == request.question() && !cancelling)
-    );
+    assert_ask_ai_running(&app, request.question());
 }
 
 #[test]
@@ -1662,6 +1551,13 @@ fn app_with(changeset: Changeset) -> App {
     App::new(LoadedReview::worktree(changeset))
 }
 
+fn app_with_ask_ai_review() -> App {
+    let mut changeset = changeset_with_one_file();
+    changeset.title = "Tracked changes".to_string();
+    changeset.source_label = "git diff HEAD + untracked".to_string();
+    app_with(changeset)
+}
+
 fn app_with_repository_overview() -> App {
     App::new(LoadedReview::worktree_with_repository_overview(
         changeset_with_one_file(),
@@ -1691,13 +1587,25 @@ fn app_with_repository_overview() -> App {
 }
 
 fn drive_harness_picker(app: &mut App, keys: &[KeyCode]) {
-    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
-        .unwrap();
+    press_key(app, KeyCode::F(2));
     assert!(app.harness_picker_visible());
 
     for &key in keys {
-        app.handle_key(KeyEvent::new(key, KeyModifiers::NONE))
-            .unwrap();
+        press_key(app, key);
+    }
+}
+
+fn press_key(app: &mut App, code: KeyCode) -> bool {
+    press_key_with_modifiers(app, code, KeyModifiers::NONE)
+}
+
+fn press_key_with_modifiers(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    app.handle_key(KeyEvent::new(code, modifiers)).unwrap()
+}
+
+fn press_chars(app: &mut App, characters: &str) {
+    for character in characters.chars() {
+        press_key(app, KeyCode::Char(character));
     }
 }
 
@@ -1796,23 +1704,14 @@ fn keybinds_with(overrides: &[(BuiltinAction, &str)]) -> KeybindMap {
 }
 
 fn enter_search_query(app: &mut App, query: &str) {
-    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
-        .unwrap();
-    for character in query.chars() {
-        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-            .unwrap();
-    }
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        .unwrap();
+    press_key(app, KeyCode::Char('/'));
+    press_chars(app, query);
+    press_key(app, KeyCode::Enter);
 }
 
 fn enter_ask_ai_question(app: &mut App, question: &str) {
-    for character in question.chars() {
-        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-            .unwrap();
-    }
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        .unwrap();
+    press_chars(app, question);
+    press_key(app, KeyCode::Enter);
 }
 
 fn ask_ai_request(question: &str) -> AskAiRequest {
@@ -1845,6 +1744,22 @@ fn assert_explain_code_question(question: &str) {
     assert!(question.contains("why the changed code matters"));
     assert!(question.contains("assumptions or risks"));
     assert!(question.contains("read-only"));
+}
+
+fn assert_ask_ai_running(app: &App, question: &str) {
+    assert!(
+        app.ask_ai_running()
+            .is_some_and(|(running_question, _, cancelling)| {
+                running_question == question && !cancelling
+            })
+    );
+}
+
+fn assert_selected_file_path(app: &App, expected_path: &str) {
+    assert_eq!(
+        app.selected_file().map(DiffFile::display_path),
+        Some(expected_path)
+    );
 }
 
 fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {

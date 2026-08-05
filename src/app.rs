@@ -65,12 +65,6 @@ enum PendingLeftClick {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CopyAction {
-    FocusedTarget,
-    SelectedFileDiff,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlobalAiAction {
     OpenHarnessPicker,
     OpenPrompt,
@@ -488,14 +482,9 @@ impl App {
         content_width: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let selected = match &self.overlay {
-            Some(Overlay::HarnessPicker(picker)) => &picker.settings,
-            _ => &self.ai_settings,
-        };
-
-        let field = match &self.overlay {
-            Some(Overlay::HarnessPicker(picker)) => picker.field,
-            _ => AiPickerField::Harness,
+        let (selected, field) = match &self.overlay {
+            Some(Overlay::HarnessPicker(picker)) => (&picker.settings, picker.field),
+            _ => (&self.ai_settings, AiPickerField::Harness),
         };
         rows::harness_picker_lines(&self.ai_settings, selected, field, content_width, theme)
     }
@@ -1005,7 +994,7 @@ impl App {
     }
 
     fn pending_left_click_at(&self, column: u16, row: u16) -> Option<PendingLeftClick> {
-        if let Some(target) = self.sidebar_target_at(column, row) {
+        if let Some(target) = self.files_panel.target_at(column, row) {
             return Some(PendingLeftClick::Sidebar { target });
         }
 
@@ -1055,7 +1044,7 @@ impl App {
     }
 
     fn pane_at(&self, column: u16, row: u16) -> Option<FocusPane> {
-        if self.is_sidebar_at(column, row) {
+        if self.files_panel.contains(column, row) {
             return Some(FocusPane::Sidebar);
         }
 
@@ -1068,14 +1057,6 @@ impl App {
         }
 
         self.is_diff_at(column, row).then_some(FocusPane::Diff)
-    }
-
-    fn sidebar_target_at(&self, column: u16, row: u16) -> Option<FilesPanelTarget> {
-        self.files_panel.target_at(column, row)
-    }
-
-    fn is_sidebar_at(&self, column: u16, row: u16) -> bool {
-        self.files_panel.contains(column, row)
     }
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
@@ -1229,21 +1210,12 @@ impl App {
 
     fn queue_copy_for_key(&mut self, key: KeyEvent) -> bool {
         match self.keybinds.action_for(key) {
-            Some(BuiltinAction::CopyFocused) => self.queue_copy_action(CopyAction::FocusedTarget),
-            Some(BuiltinAction::CopyFileDiff) => {
-                self.queue_copy_action(CopyAction::SelectedFileDiff)
-            }
+            Some(BuiltinAction::CopyFocused) => self.queue_focused_target_copy(),
+            Some(BuiltinAction::CopyFileDiff) => self.queue_selected_file_diff_copy(),
             _ => return false,
         }
 
         true
-    }
-
-    fn queue_copy_action(&mut self, action: CopyAction) {
-        match action {
-            CopyAction::FocusedTarget => self.queue_focused_target_copy(),
-            CopyAction::SelectedFileDiff => self.queue_selected_file_diff_copy(),
-        }
     }
 
     fn queue_focused_target_copy(&mut self) {
@@ -1271,10 +1243,7 @@ impl App {
             Err(error) => Err(error.message()),
         };
 
-        match copy {
-            Ok((text, success_message)) => self.queue_clipboard_text(text, success_message),
-            Err(message) => self.set_copy_error(message),
-        }
+        self.apply_copy_result(copy);
     }
 
     fn focused_repository_copy(&self) -> Option<(String, &'static str)> {
@@ -1301,7 +1270,11 @@ impl App {
             Err(error) => Err(error.message()),
         };
 
-        match copy {
+        self.apply_copy_result(copy);
+    }
+
+    fn apply_copy_result(&mut self, result: Result<(String, &'static str), &'static str>) {
+        match result {
             Ok((text, success_message)) => self.queue_clipboard_text(text, success_message),
             Err(message) => self.set_copy_error(message),
         }
@@ -1496,13 +1469,11 @@ impl App {
             return;
         }
 
-        let target = if let Some(target) = self.active_folder_discard_target() {
-            target
-        } else {
-            let Some(target) = self.focused_discard_target() else {
-                return;
-            };
-            target
+        let Some(target) = self
+            .active_folder_discard_target()
+            .or_else(|| self.focused_discard_target())
+        else {
+            return;
         };
 
         self.live_error = None;
@@ -1686,7 +1657,6 @@ impl App {
     }
 
     fn queue_selected_file_editor_request(&mut self) {
-        self.clear_effects(|effect| matches!(effect, AppEffect::OpenEditor(_)));
         let request = match self.focused_review_target().editor() {
             Ok(target) => self
                 .source

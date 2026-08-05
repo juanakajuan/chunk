@@ -9,30 +9,65 @@ use super::text::{chars_to_spans, expand_tabs, styled_chars};
 
 const INTRALINE_MAX_BLOCK_LINES: usize = 32;
 const INTRALINE_MAX_TOKENS: usize = 512;
-const INTRALINE_MIN_WORD_SIMILARITY_PERCENT: usize = 35;
-const INTRALINE_MIN_FALLBACK_SIMILARITY_PERCENT: usize = 50;
+
+#[derive(Clone, Copy)]
+struct IntralineSides<T> {
+    removed: T,
+    added: T,
+}
+
+impl<T> IntralineSides<T> {
+    fn map<U>(self, mut transform: impl FnMut(T) -> U) -> IntralineSides<U> {
+        IntralineSides {
+            removed: transform(self.removed),
+            added: transform(self.added),
+        }
+    }
+
+    fn zip_map<U, V>(
+        self,
+        other: IntralineSides<U>,
+        mut transform: impl FnMut(T, U) -> V,
+    ) -> IntralineSides<V> {
+        IntralineSides {
+            removed: transform(self.removed, other.removed),
+            added: transform(self.added, other.added),
+        }
+    }
+
+    fn both(&self, mut predicate: impl FnMut(&T) -> bool) -> bool {
+        predicate(&self.removed) && predicate(&self.added)
+    }
+}
+
+impl<T> IntralineSides<Vec<T>> {
+    fn as_slices(&self) -> IntralineSides<&[T]> {
+        IntralineSides {
+            removed: &self.removed,
+            added: &self.added,
+        }
+    }
+}
 
 pub(super) fn intraline_ranges_for_block(block: &[DiffLine]) -> Vec<Vec<Range<usize>>> {
     let mut ranges = vec![Vec::new(); block.len()];
-    let mut removed = Vec::new();
-    let mut added = Vec::new();
+    let mut changed_lines = IntralineSides {
+        removed: Vec::new(),
+        added: Vec::new(),
+    };
     for (index, line) in block.iter().enumerate() {
         match line.kind {
-            DiffLineKind::Removed => removed.push((index, line)),
-            DiffLineKind::Added => added.push((index, line)),
+            DiffLineKind::Removed => changed_lines.removed.push((index, line)),
+            DiffLineKind::Added => changed_lines.added.push((index, line)),
             DiffLineKind::Context | DiffLineKind::Meta => {}
         }
     }
 
-    if removed.is_empty()
-        || added.is_empty()
-        || removed.len() > INTRALINE_MAX_BLOCK_LINES
-        || added.len() > INTRALINE_MAX_BLOCK_LINES
-    {
+    if !changed_lines.both(|lines| !lines.is_empty() && lines.len() <= INTRALINE_MAX_BLOCK_LINES) {
         return ranges;
     }
 
-    let pairs = removed.into_iter().zip(added);
+    let pairs = changed_lines.removed.into_iter().zip(changed_lines.added);
     for ((removed_index, removed_line), (added_index, added_line)) in pairs {
         let Some(pair_ranges) = intraline_pair_ranges(&removed_line.content, &added_line.content)
         else {
@@ -57,48 +92,37 @@ pub(super) fn intraline_block_end(lines: &[DiffLine], start: usize) -> usize {
         .map_or(lines.len(), |offset| start + offset)
 }
 
-struct IntralinePairRanges {
-    removed: Vec<Range<usize>>,
-    added: Vec<Range<usize>>,
-}
+type IntralinePairRanges = IntralineSides<Vec<Range<usize>>>;
 
 fn intraline_pair_ranges(removed: &str, added: &str) -> Option<IntralinePairRanges> {
-    let removed_text = expand_tabs(removed);
-    let added_text = expand_tabs(added);
-    if removed_text == added_text {
+    let text = IntralineSides {
+        removed: expand_tabs(removed),
+        added: expand_tabs(added),
+    };
+    if text.removed == text.added {
         return None;
     }
 
-    let removed_tokens = intraline_tokens(&removed_text);
-    let added_tokens = intraline_tokens(&added_text);
-    if removed_tokens.is_empty()
-        || added_tokens.is_empty()
-        || removed_tokens.len() > INTRALINE_MAX_TOKENS
-        || added_tokens.len() > INTRALINE_MAX_TOKENS
-    {
+    let tokens = IntralineSides {
+        removed: intraline_tokens(&text.removed),
+        added: intraline_tokens(&text.added),
+    };
+    if !tokens.both(|tokens| !tokens.is_empty() && tokens.len() <= INTRALINE_MAX_TOKENS) {
         return None;
     }
 
-    let common = common_intraline_tokens(&removed_tokens, &added_tokens);
-    if !intraline_lines_are_related(
-        &removed_tokens,
-        &added_tokens,
-        &common.removed,
-        &common.added,
-    ) {
+    let tokens = tokens.as_slices();
+    let common = common_intraline_tokens(tokens);
+    if !intraline_lines_are_related(tokens, common.as_slices()) {
         return None;
     }
 
-    let removed_ranges = changed_intraline_ranges(&removed_tokens, &common.removed);
-    let added_ranges = changed_intraline_ranges(&added_tokens, &common.added);
-    if removed_ranges.is_empty() && added_ranges.is_empty() {
+    let ranges = tokens.zip_map(common.as_slices(), changed_intraline_ranges);
+    if ranges.both(Vec::is_empty) {
         return None;
     }
 
-    Some(IntralinePairRanges {
-        removed: removed_ranges,
-        added: added_ranges,
-    })
+    Some(ranges)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +132,21 @@ enum IntralineTokenKind {
     Punctuation,
 }
 
+#[derive(Clone, Copy)]
+struct IntralineSimilarityPolicy {
+    include_token: fn(IntralineTokenKind) -> bool,
+    min_percent: usize,
+}
+
+const WORD_SIMILARITY_POLICY: IntralineSimilarityPolicy = IntralineSimilarityPolicy {
+    include_token: is_word_token,
+    min_percent: 35,
+};
+const FALLBACK_SIMILARITY_POLICY: IntralineSimilarityPolicy = IntralineSimilarityPolicy {
+    include_token: is_non_whitespace_token,
+    min_percent: 50,
+};
+
 #[derive(Debug, Clone, Copy)]
 struct IntralineToken<'a> {
     text: &'a str,
@@ -116,10 +155,7 @@ struct IntralineToken<'a> {
     kind: IntralineTokenKind,
 }
 
-struct CommonIntralineTokens {
-    removed: Vec<bool>,
-    added: Vec<bool>,
-}
+type CommonIntralineTokens = IntralineSides<Vec<bool>>;
 
 fn intraline_tokens(text: &str) -> Vec<IntralineToken<'_>> {
     let mut tokens = Vec::new();
@@ -164,24 +200,24 @@ fn intraline_token_kind(character: char) -> IntralineTokenKind {
     }
 }
 
-fn common_intraline_tokens(
-    removed: &[IntralineToken<'_>],
-    added: &[IntralineToken<'_>],
-) -> CommonIntralineTokens {
+fn common_intraline_tokens(tokens: IntralineSides<&[IntralineToken<'_>]>) -> CommonIntralineTokens {
+    let removed = tokens.removed;
+    let added = tokens.added;
     let width = added.len() + 1;
-    let mut lengths = vec![0; (removed.len() + 1) * width];
+    let mut common_suffix_lengths = vec![0; (removed.len() + 1) * width];
 
     for removed_index in (0..removed.len()).rev() {
         for added_index in (0..added.len()).rev() {
-            let current = removed_index * width + added_index;
+            let current_index = removed_index * width + added_index;
             let skip_removed_index = (removed_index + 1) * width + added_index;
-            let skip_added_index = current + 1;
+            let skip_added_index = current_index + 1;
             let skip_both_index = skip_removed_index + 1;
             let tokens_match = intraline_tokens_equal(removed[removed_index], added[added_index]);
-            lengths[current] = if tokens_match {
-                lengths[skip_both_index] + 1
+            common_suffix_lengths[current_index] = if tokens_match {
+                common_suffix_lengths[skip_both_index] + 1
             } else {
-                lengths[skip_removed_index].max(lengths[skip_added_index])
+                common_suffix_lengths[skip_removed_index]
+                    .max(common_suffix_lengths[skip_added_index])
             };
         }
     }
@@ -199,8 +235,8 @@ fn common_intraline_tokens(
             continue;
         }
 
-        let skip_removed_len = lengths[(removed_index + 1) * width + added_index];
-        let skip_added_len = lengths[removed_index * width + added_index + 1];
+        let skip_removed_len = common_suffix_lengths[(removed_index + 1) * width + added_index];
+        let skip_added_len = common_suffix_lengths[removed_index * width + added_index + 1];
         if skip_removed_len >= skip_added_len {
             removed_index += 1;
         } else {
@@ -208,7 +244,7 @@ fn common_intraline_tokens(
         }
     }
 
-    CommonIntralineTokens {
+    IntralineSides {
         removed: removed_common,
         added: added_common,
     }
@@ -219,54 +255,35 @@ fn intraline_tokens_equal(left: IntralineToken<'_>, right: IntralineToken<'_>) -
 }
 
 fn intraline_lines_are_related(
-    removed: &[IntralineToken<'_>],
-    added: &[IntralineToken<'_>],
-    removed_common: &[bool],
-    added_common: &[bool],
+    tokens: IntralineSides<&[IntralineToken<'_>]>,
+    common: IntralineSides<&[bool]>,
 ) -> bool {
-    if let Some(related) = intraline_similarity_meets_threshold(
-        removed,
-        added,
-        removed_common,
-        added_common,
-        is_word_token,
-        INTRALINE_MIN_WORD_SIMILARITY_PERCENT,
-    ) {
+    if let Some(related) =
+        intraline_similarity_meets_threshold(tokens, common, WORD_SIMILARITY_POLICY)
+    {
         return related;
     }
 
-    intraline_similarity_meets_threshold(
-        removed,
-        added,
-        removed_common,
-        added_common,
-        is_non_whitespace_token,
-        INTRALINE_MIN_FALLBACK_SIMILARITY_PERCENT,
-    )
-    .unwrap_or(false)
+    intraline_similarity_meets_threshold(tokens, common, FALLBACK_SIMILARITY_POLICY)
+        .unwrap_or(false)
 }
 
 fn intraline_similarity_meets_threshold(
-    removed: &[IntralineToken<'_>],
-    added: &[IntralineToken<'_>],
-    removed_common: &[bool],
-    added_common: &[bool],
-    include_token: fn(IntralineTokenKind) -> bool,
-    min_similarity_percent: usize,
+    tokens: IntralineSides<&[IntralineToken<'_>]>,
+    common: IntralineSides<&[bool]>,
+    policy: IntralineSimilarityPolicy,
 ) -> Option<bool> {
-    let denominator = intraline_char_count(removed, None, include_token).max(intraline_char_count(
-        added,
-        None,
-        include_token,
-    ));
+    let total_chars = tokens.map(|tokens| intraline_char_count(tokens, None, policy.include_token));
+    let denominator = total_chars.removed.max(total_chars.added);
     if denominator == 0 {
         return None;
     }
 
-    let common = intraline_char_count(removed, Some(removed_common), include_token).min(
-        intraline_char_count(added, Some(added_common), include_token),
-    );
-    Some(common * 100 >= denominator * min_similarity_percent)
+    let common_chars = tokens.zip_map(common, |tokens, common| {
+        intraline_char_count(tokens, Some(common), policy.include_token)
+    });
+    let common = common_chars.removed.min(common_chars.added);
+    Some(common * 100 >= denominator * policy.min_percent)
 }
 
 fn intraline_char_count(

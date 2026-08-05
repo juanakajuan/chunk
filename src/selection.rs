@@ -26,6 +26,13 @@ struct SelectableLine {
     text: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SelectedLine<'a> {
+    render_index: usize,
+    line: &'a SelectableLine,
+    columns: SelectedColumns,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectionPoint {
     column: u16,
@@ -97,7 +104,7 @@ impl TextSelection {
             return lines;
         }
 
-        let visible_height = visible_height.min(area.height as usize);
+        let visible_height = visible_height.min(usize::from(area.height));
         self.record_visible_lines(area, &lines, line_scroll, visible_height);
         self.highlight_visible_lines(area, lines, line_scroll, visible_height, theme)
     }
@@ -202,7 +209,7 @@ impl TextSelection {
                 continue;
             };
 
-            *line = highlight_line_selection(line.clone(), columns, theme);
+            highlight_line_selection(line, columns, theme);
         }
 
         lines
@@ -247,10 +254,11 @@ impl TextSelection {
         let mut text = String::new();
         let mut last_end_col = None;
 
-        for line in self.visible_lines_for_row(row, range) {
-            let columns = range.columns_for_line(row, line)?;
+        for selected_line in self.selected_lines_for_row(row, range) {
+            let line = selected_line.line;
+            let columns = selected_line.columns;
             if let Some(previous_end) = last_end_col {
-                let gap = line.start_col.saturating_sub(previous_end) as usize;
+                let gap = usize::from(line.start_col.saturating_sub(previous_end));
                 text.extend(std::iter::repeat_n(' ', gap));
             }
 
@@ -261,51 +269,44 @@ impl TextSelection {
         last_end_col.is_some().then_some(text)
     }
 
-    fn visible_lines_for_row(&self, row: u16, range: SelectionRange) -> Vec<&SelectableLine> {
-        let mut lines = self
+    fn selected_lines_for_row(&self, row: u16, range: SelectionRange) -> Vec<SelectedLine<'_>> {
+        let candidates = self
             .lines
             .iter()
             .enumerate()
-            .filter_map(|(index, line)| {
+            .filter_map(|(render_index, line)| {
                 if line.surface != range.surface || line.row != row {
                     return None;
                 }
 
                 range
                     .columns_for_line(row, line)
-                    .map(|columns| (index, line, columns))
+                    .map(|columns| SelectedLine {
+                        render_index,
+                        line,
+                        columns,
+                    })
             })
-            .filter(|(index, line, columns)| !self.has_later_overlap(*index, line, range, *columns))
-            .map(|(_, line, _)| line)
             .collect::<Vec<_>>();
-        lines.sort_by_key(|line| line.start_col);
-        lines
-    }
 
-    fn has_later_overlap(
-        &self,
-        index: usize,
-        line: &SelectableLine,
-        range: SelectionRange,
-        columns: SelectedColumns,
-    ) -> bool {
-        self.lines
+        let mut visible_lines = candidates
             .iter()
-            .skip(index + 1)
-            .filter(|later| later.surface == line.surface && later.row == line.row)
-            .any(|later| {
-                range
-                    .columns_for_line(later.row, later)
-                    .is_some_and(|later_columns| columns.overlaps(later_columns))
+            .copied()
+            .filter(|candidate| {
+                !candidates.iter().any(|later| {
+                    later.render_index > candidate.render_index
+                        && candidate.columns.overlaps(later.columns)
+                })
             })
+            .collect::<Vec<_>>();
+        visible_lines.sort_by_key(|selected| selected.line.start_col);
+        visible_lines
     }
 }
 
 impl SelectableLine {
     fn contains(&self, column: u16, row: u16) -> bool {
-        row == self.row
-            && column >= self.start_col
-            && column < self.start_col.saturating_add(self.width)
+        row == self.row && column >= self.start_col && column < self.end_col()
     }
 
     fn end_col(&self) -> u16 {
@@ -348,8 +349,9 @@ impl SelectedColumns {
         self.start_col < other.end_col && other.start_col < self.end_col
     }
 
-    fn overlaps_display_range(self, start_col: usize, end_col: usize) -> bool {
-        start_col < usize::from(self.end_col) && end_col > usize::from(self.start_col)
+    fn overlaps_display_char(self, character: DisplayChar) -> bool {
+        character.start_col < usize::from(self.end_col)
+            && character.end_col > usize::from(self.start_col)
     }
 }
 
@@ -393,18 +395,12 @@ impl SelectionRange {
     }
 }
 
-fn highlight_line_selection(
-    line: Line<'static>,
-    columns: SelectedColumns,
-    theme: Theme,
-) -> Line<'static> {
-    let style = line.style;
-    let alignment = line.alignment;
+fn highlight_line_selection(line: &mut Line<'static>, columns: SelectedColumns, theme: Theme) {
     let mut spans = Vec::new();
 
-    for span in line.spans {
-        for (value, char_start, char_end) in display_columns(span.content.as_ref()) {
-            let style = if columns.overlaps_display_range(char_start, char_end) {
+    for span in std::mem::take(&mut line.spans) {
+        for character in display_chars(span.content.as_ref()) {
+            let style = if columns.overlaps_display_char(character) {
                 span.style
                     .bg(theme.accent)
                     .fg(theme.on_accent)
@@ -412,41 +408,48 @@ fn highlight_line_selection(
             } else {
                 span.style
             };
-            push_styled_char(&mut spans, value, style);
+            push_styled_char(&mut spans, character.value, style);
         }
     }
 
-    Line {
-        spans,
-        style,
-        alignment,
-    }
+    line.spans = spans;
 }
 
 fn text_by_display_columns(text: &str, columns: SelectedColumns) -> String {
     let mut output = String::new();
 
-    for (character, char_start, char_end) in display_columns(text) {
-        if char_start >= usize::from(columns.end_col) {
+    for character in display_chars(text) {
+        if character.start_col >= usize::from(columns.end_col) {
             break;
         }
 
-        if columns.overlaps_display_range(char_start, char_end) {
-            output.push(character);
+        if columns.overlaps_display_char(character) {
+            output.push(character.value);
         }
     }
 
     output
 }
 
-fn display_columns(text: &str) -> impl Iterator<Item = (char, usize, usize)> + '_ {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisplayChar {
+    value: char,
+    start_col: usize,
+    end_col: usize,
+}
+
+fn display_chars(text: &str) -> impl Iterator<Item = DisplayChar> + '_ {
     let mut display_col = 0;
 
-    text.chars().map(move |character| {
+    text.chars().map(move |value| {
         let char_start = display_col;
-        let char_end = char_start + char_display_width(character).max(1);
+        let char_end = char_start + char_display_width(value).max(1);
         display_col = char_end;
-        (character, char_start, char_end)
+        DisplayChar {
+            value,
+            start_col: char_start,
+            end_col: char_end,
+        }
     })
 }
 
@@ -473,7 +476,7 @@ fn char_display_width(value: char) -> usize {
 }
 
 fn saturating_u16(value: usize) -> u16 {
-    value.min(u16::MAX as usize) as u16
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

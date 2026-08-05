@@ -15,10 +15,21 @@ use super::keys::{
 use super::{App, FocusPane, HELP_OVERLAY_SCROLL_PAGE, MOUSE_WHEEL_STEP, accepts_text_input};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CommandOutputState {
-    pub(super) result: CustomCommandResult,
+pub(super) struct ScrollableOutput<Result> {
+    pub(super) result: Result,
     pub(super) scroll: ScrollText,
 }
+
+impl<Result> ScrollableOutput<Result> {
+    fn new(result: Result) -> Self {
+        Self {
+            result,
+            scroll: ScrollText::default(),
+        }
+    }
+}
+
+pub(super) type CommandOutputState = ScrollableOutput<CustomCommandResult>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AskAiPromptState {
@@ -26,11 +37,7 @@ pub(super) struct AskAiPromptState {
     pub(super) input: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AskAiOutputState {
-    pub(super) result: AskAiResult,
-    pub(super) scroll: ScrollText,
-}
+pub(super) type AskAiOutputState = ScrollableOutput<AskAiResult>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HarnessPickerState {
@@ -85,6 +92,14 @@ impl HarnessPickerState {
         );
         self.settings.selected_mut().set_effort(effort);
     }
+
+    fn apply_update(&mut self, update: HarnessPickerUpdate) {
+        match update {
+            HarnessPickerUpdate::SelectHarness(harness) => self.settings.harness = harness,
+            HarnessPickerUpdate::MoveField(direction) => self.move_field(direction),
+            HarnessPickerUpdate::ChangeValue(direction) => self.change_value(direction),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +119,45 @@ impl AiPickerField {
             (Self::Model, VerticalDirection::Up) => Self::Harness,
             (Self::Effort, VerticalDirection::Up) => Self::Model,
         }
+    }
+}
+
+enum HarnessPickerUpdate {
+    SelectHarness(AiHarness),
+    MoveField(VerticalDirection),
+    ChangeValue(VerticalDirection),
+}
+
+fn harness_picker_update(key: KeyEvent, keybinds: KeybindMap) -> Option<HarnessPickerUpdate> {
+    match key.code {
+        KeyCode::Char('1') if accepts_text_input(key) => {
+            Some(HarnessPickerUpdate::SelectHarness(AiHarness::OpenCode))
+        }
+        KeyCode::Char('2') if accepts_text_input(key) => {
+            Some(HarnessPickerUpdate::SelectHarness(AiHarness::ClaudeCode))
+        }
+        KeyCode::Char('3') if accepts_text_input(key) => {
+            Some(HarnessPickerUpdate::SelectHarness(AiHarness::Codex))
+        }
+        KeyCode::Down => Some(HarnessPickerUpdate::MoveField(VerticalDirection::Down)),
+        KeyCode::Up => Some(HarnessPickerUpdate::MoveField(VerticalDirection::Up)),
+        KeyCode::Right => Some(HarnessPickerUpdate::ChangeValue(VerticalDirection::Down)),
+        KeyCode::Left => Some(HarnessPickerUpdate::ChangeValue(VerticalDirection::Up)),
+        KeyCode::Char('l') if accepts_text_input(key) => {
+            Some(HarnessPickerUpdate::ChangeValue(VerticalDirection::Down))
+        }
+        KeyCode::Char('h') if accepts_text_input(key) => {
+            Some(HarnessPickerUpdate::ChangeValue(VerticalDirection::Up))
+        }
+        _ => match keybinds.action_for(key) {
+            Some(BuiltinAction::MoveDown) => {
+                Some(HarnessPickerUpdate::MoveField(VerticalDirection::Down))
+            }
+            Some(BuiltinAction::MoveUp) => {
+                Some(HarnessPickerUpdate::MoveField(VerticalDirection::Up))
+            }
+            _ => None,
+        },
     }
 }
 
@@ -145,15 +199,6 @@ impl DiscardConfirmation {
             } => format!("Discard hunk {} in {path}?", hunk_index + 1),
         }
     }
-}
-
-fn apply_output_scroll_key(scroll: &mut ScrollText, key: KeyEvent, keybinds: KeybindMap) {
-    let page = scroll.page();
-    apply_scroll_key(scroll, key, page, keybinds);
-}
-
-fn scroll_output_by_wheel(scroll: &mut ScrollText, direction: VerticalDirection) {
-    scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
 }
 
 fn mark_cancelling(cancelling: &mut bool) -> bool {
@@ -308,10 +353,7 @@ impl App {
     }
 
     pub(crate) fn set_custom_command_result(&mut self, result: CustomCommandResult) {
-        self.set_diff_overlay(Overlay::CommandOutput(CommandOutputState {
-            result,
-            scroll: ScrollText::default(),
-        }));
+        self.set_diff_overlay(Overlay::CommandOutput(CommandOutputState::new(result)));
     }
 
     pub(crate) fn set_ask_ai_running(&mut self, request: &AskAiRequest) {
@@ -333,10 +375,7 @@ impl App {
     }
 
     pub(crate) fn set_ask_ai_result(&mut self, result: AskAiResult) {
-        self.set_diff_overlay(Overlay::AskAiOutput(AskAiOutputState {
-            result,
-            scroll: ScrollText::default(),
-        }));
+        self.set_diff_overlay(Overlay::AskAiOutput(AskAiOutputState::new(result)));
     }
 
     pub(super) fn handle_overlay_key(&mut self, key: KeyEvent) {
@@ -355,9 +394,9 @@ impl App {
 
     pub(super) fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
         match self.overlay {
-            Some(Overlay::Help { .. }) => self.handle_help_overlay_mouse(mouse),
-            Some(Overlay::CommandOutput(_)) => self.handle_command_output_mouse(mouse),
-            Some(Overlay::AskAiOutput(_)) => self.handle_ask_ai_output_mouse(mouse),
+            Some(Overlay::Help { .. } | Overlay::CommandOutput(_) | Overlay::AskAiOutput(_)) => {
+                self.handle_scrollable_overlay_mouse(mouse)
+            }
             Some(Overlay::Discard(_))
             | Some(Overlay::CommandRunning { .. })
             | Some(Overlay::AskAiPrompt(_))
@@ -391,6 +430,23 @@ impl App {
         }
     }
 
+    fn active_overlay_scroll_mut(&mut self) -> Option<&mut ScrollText> {
+        match &mut self.overlay {
+            Some(Overlay::Help { scroll }) => Some(scroll),
+            Some(Overlay::CommandOutput(output)) => Some(&mut output.scroll),
+            Some(Overlay::AskAiOutput(output)) => Some(&mut output.scroll),
+            _ => None,
+        }
+    }
+
+    fn handle_output_scroll_key(&mut self, key: KeyEvent) {
+        let keybinds = self.keybinds;
+        if let Some(scroll) = self.active_overlay_scroll_mut() {
+            let page = scroll.page();
+            apply_scroll_key(scroll, key, page, keybinds);
+        }
+    }
+
     pub(super) fn command_output_mut(&mut self) -> Option<&mut CommandOutputState> {
         match &mut self.overlay {
             Some(Overlay::CommandOutput(output)) => Some(output),
@@ -409,12 +465,6 @@ impl App {
         match &mut self.overlay {
             Some(Overlay::HarnessPicker(picker)) => Some(picker),
             _ => None,
-        }
-    }
-
-    fn with_harness_picker(&mut self, update: impl FnOnce(&mut HarnessPickerState)) {
-        if let Some(picker) = self.harness_picker_mut() {
-            update(picker);
         }
     }
 
@@ -437,9 +487,9 @@ impl App {
         }
     }
 
-    fn handle_help_overlay_mouse(&mut self, mouse: MouseEvent) {
+    fn handle_scrollable_overlay_mouse(&mut self, mouse: MouseEvent) {
         self.handle_selectable_text_mouse(mouse, |app, direction| {
-            if let Some(scroll) = app.help_scroll_mut() {
+            if let Some(scroll) = app.active_overlay_scroll_mut() {
                 scroll.scroll_by(direction, MOUSE_WHEEL_STEP);
             }
         });
@@ -461,18 +511,7 @@ impl App {
             return;
         }
 
-        let keybinds = self.keybinds;
-        if let Some(output) = self.command_output_mut() {
-            apply_output_scroll_key(&mut output.scroll, key, keybinds);
-        }
-    }
-
-    fn handle_command_output_mouse(&mut self, mouse: MouseEvent) {
-        self.handle_selectable_text_mouse(mouse, |app, direction| {
-            if let Some(output) = app.command_output_mut() {
-                scroll_output_by_wheel(&mut output.scroll, direction);
-            }
-        });
+        self.handle_output_scroll_key(key);
     }
 
     fn handle_custom_command_running_key(&mut self, key: KeyEvent) {
@@ -480,11 +519,7 @@ impl App {
             return;
         }
 
-        if let Some(Overlay::CommandRunning {
-            cancelling,
-            binding: _,
-            spinner_frame: _,
-        }) = &mut self.overlay
+        if let Some(Overlay::CommandRunning { cancelling, .. }) = &mut self.overlay
             && mark_cancelling(cancelling)
         {
             self.queue_custom_command_cancel_effect();
@@ -514,11 +549,7 @@ impl App {
             return;
         }
 
-        if let Some(Overlay::AskAiRunning {
-            cancelling,
-            question: _,
-            spinner_frame: _,
-        }) = &mut self.overlay
+        if let Some(Overlay::AskAiRunning { cancelling, .. }) = &mut self.overlay
             && mark_cancelling(cancelling)
         {
             self.queue_ask_ai_cancel_effect();
@@ -537,59 +568,24 @@ impl App {
             return;
         }
 
-        if let Some(output) = self.ask_ai_output_mut() {
-            apply_output_scroll_key(&mut output.scroll, key, keybinds);
-        }
-    }
-
-    fn handle_ask_ai_output_mouse(&mut self, mouse: MouseEvent) {
-        self.handle_selectable_text_mouse(mouse, |app, direction| {
-            if let Some(output) = app.ask_ai_output_mut() {
-                scroll_output_by_wheel(&mut output.scroll, direction);
-            }
-        });
+        self.handle_output_scroll_key(key);
     }
 
     fn handle_harness_picker_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.overlay = None,
-            KeyCode::Enter => self.apply_selected_ai_settings(),
-            KeyCode::Char(choice @ ('1' | '2' | '3')) if accepts_text_input(key) => {
-                let harness = match choice {
-                    '1' => AiHarness::OpenCode,
-                    '2' => AiHarness::ClaudeCode,
-                    '3' => AiHarness::Codex,
-                    _ => unreachable!(),
-                };
-                self.with_harness_picker(|picker| picker.settings.harness = harness);
-            }
-            KeyCode::Down => {
-                self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Down));
-            }
-            KeyCode::Up => {
-                self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Up));
-            }
-            KeyCode::Right => {
-                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Down));
-            }
-            KeyCode::Left => {
-                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Up));
-            }
-            KeyCode::Char('l') if accepts_text_input(key) => {
-                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Down));
-            }
-            KeyCode::Char('h') if accepts_text_input(key) => {
-                self.with_harness_picker(|picker| picker.change_value(VerticalDirection::Up));
-            }
-            _ => match self.keybinds.action_for(key) {
-                Some(BuiltinAction::MoveDown) => {
-                    self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Down));
-                }
-                Some(BuiltinAction::MoveUp) => {
-                    self.with_harness_picker(|picker| picker.move_field(VerticalDirection::Up));
-                }
-                _ => {}
-            },
+        if key.code == KeyCode::Esc {
+            self.overlay = None;
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            self.apply_selected_ai_settings();
+            return;
+        }
+
+        let Some(update) = harness_picker_update(key, self.keybinds) else {
+            return;
+        };
+        if let Some(picker) = self.harness_picker_mut() {
+            picker.apply_update(update);
         }
     }
 

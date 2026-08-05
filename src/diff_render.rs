@@ -32,21 +32,18 @@ pub(crate) struct SelectedDiffRenderRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiffRenderRequest<'a> {
+struct DiffCacheKey<'a> {
     file_index: usize,
     file_id: &'a str,
     content_width: usize,
-    syntax_palette: SyntaxPalette,
     can_stage: bool,
-    requested_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiffLayoutRequest<'a> {
-    file_index: usize,
-    file_id: &'a str,
-    content_width: usize,
-    can_stage: bool,
+struct DiffRenderRequest<'a> {
+    cache_key: DiffCacheKey<'a>,
+    syntax_palette: SyntaxPalette,
+    requested_rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,8 +88,7 @@ impl DiffRenderState {
     }
 
     pub(crate) fn clear(&mut self, file_count: usize) {
-        self.diff_lines_cache = vec![None; file_count];
-        self.diff_layout_cache = vec![None; file_count];
+        *self = Self::new(file_count);
     }
 
     pub(crate) fn total_rows(
@@ -107,13 +103,13 @@ impl DiffRenderState {
             return 0;
         };
 
-        let request = DiffLayoutRequest {
+        let cache_key = DiffCacheKey {
             file_index,
             file_id: file.id.as_str(),
             content_width,
             can_stage,
         };
-        self.layout_metrics(file, request, theme)
+        self.layout_metrics(file, cache_key, theme)
             .map_or(0, |metrics| metrics.total_rows)
     }
 
@@ -154,7 +150,7 @@ impl DiffRenderState {
         let hunk_offsets = self
             .layout_metrics(
                 &changeset.files[request.file_index],
-                request.layout_request(file_id.as_str()),
+                request.cache_key(file_id.as_str()),
                 request.theme,
             )
             .map(|metrics| metrics.hunk_offsets.clone())
@@ -189,7 +185,7 @@ impl DiffRenderState {
             render_target,
         );
         self.cache_diff_lines(
-            render_request,
+            request.file_index,
             RenderedDiffLines::new(
                 file_id.to_string(),
                 request.content_width,
@@ -301,78 +297,67 @@ impl DiffRenderState {
     }
 
     fn ensure_cache_len(&mut self, file_count: usize) {
-        if self.diff_lines_cache.len() != file_count {
-            self.diff_lines_cache = vec![None; file_count];
-        }
-        if self.diff_layout_cache.len() != file_count {
-            self.diff_layout_cache = vec![None; file_count];
-        }
+        reset_cache_if_len_changed(&mut self.diff_lines_cache, file_count);
+        reset_cache_if_len_changed(&mut self.diff_layout_cache, file_count);
     }
 
     fn ensure_cache_index(&mut self, file_index: usize) {
-        let cache_len = file_index.saturating_add(1);
-        if self.diff_lines_cache.len() < cache_len {
-            self.diff_lines_cache.resize(cache_len, None);
-        }
-        if self.diff_layout_cache.len() < cache_len {
-            self.diff_layout_cache.resize(cache_len, None);
-        }
+        ensure_cache_slot(&mut self.diff_lines_cache, file_index);
+        ensure_cache_slot(&mut self.diff_layout_cache, file_index);
     }
 
     fn layout_metrics(
         &mut self,
         file: &DiffFile,
-        request: DiffLayoutRequest<'_>,
+        cache_key: DiffCacheKey<'_>,
         theme: Theme,
     ) -> Option<&DiffLayoutMetrics> {
-        self.ensure_cache_index(request.file_index);
-        if self.diff_layout_metrics(request).is_none() {
+        self.ensure_cache_index(cache_key.file_index);
+        if self.diff_layout_metrics(cache_key).is_none() {
             let counts =
-                rows::diff_layout_counts(file, request.content_width, theme, request.can_stage);
+                rows::diff_layout_counts(file, cache_key.content_width, theme, cache_key.can_stage);
             self.cache_diff_layout_metrics(
-                request,
+                cache_key,
                 DiffLayoutMetrics::new(counts.hunk_offsets, counts.new_line_rows),
             );
         }
 
-        self.diff_layout_metrics(request)
+        self.diff_layout_metrics(cache_key)
     }
 
-    fn diff_layout_metrics(&self, request: DiffLayoutRequest<'_>) -> Option<&DiffLayoutMetrics> {
-        self.diff_layout_cache(request.file_index)
-            .filter(|cache| cache.matches(request))
+    fn diff_layout_metrics(&self, cache_key: DiffCacheKey<'_>) -> Option<&DiffLayoutMetrics> {
+        self.diff_layout_cache(cache_key.file_index)
+            .filter(|cache| cache.matches(cache_key))
             .map(|cache| &cache.metrics)
     }
 
     fn cache_diff_layout_metrics(
         &mut self,
-        request: DiffLayoutRequest<'_>,
+        cache_key: DiffCacheKey<'_>,
         metrics: DiffLayoutMetrics,
     ) {
-        if let Some(cache_slot) = self.diff_layout_cache.get_mut(request.file_index) {
-            *cache_slot = Some(CachedDiffLayoutMetrics::new(request, metrics));
+        if let Some(cache_slot) = self.diff_layout_cache.get_mut(cache_key.file_index) {
+            *cache_slot = Some(CachedDiffLayoutMetrics::new(cache_key, metrics));
         }
     }
 
     fn diff_lines_render_target(&self, request: DiffRenderRequest<'_>) -> Option<usize> {
-        let Some(cache) = self.diff_lines_cache(request.file_index) else {
+        let Some(cache) = self.diff_lines_cache(request.cache_key.file_index) else {
             return Some(request.requested_rows);
         };
 
         cache.render_target_if_needed(request)
     }
 
-    fn cache_diff_lines(&mut self, request: DiffRenderRequest<'_>, lines: RenderedDiffLines) {
-        if let Some(cache_slot) = self.diff_lines_cache.get_mut(request.file_index) {
+    fn cache_diff_lines(&mut self, file_index: usize, lines: RenderedDiffLines) {
+        if let Some(cache_slot) = self.diff_lines_cache.get_mut(file_index) {
             *cache_slot = Some(lines);
         }
     }
 
     #[cfg(test)]
     pub(crate) fn cache_test_diff_lines(&mut self, file_index: usize, lines: RenderedDiffLines) {
-        if let Some(cache_slot) = self.diff_lines_cache.get_mut(file_index) {
-            *cache_slot = Some(lines);
-        }
+        self.cache_diff_lines(file_index, lines);
     }
 
     fn visible_lines(
@@ -490,8 +475,8 @@ impl DiffRenderState {
 }
 
 impl SelectedDiffRenderRequest {
-    fn layout_request<'a>(self, file_id: &'a str) -> DiffLayoutRequest<'a> {
-        DiffLayoutRequest {
+    fn cache_key<'a>(self, file_id: &'a str) -> DiffCacheKey<'a> {
+        DiffCacheKey {
             file_index: self.file_index,
             file_id,
             content_width: self.content_width,
@@ -501,11 +486,8 @@ impl SelectedDiffRenderRequest {
 
     fn render_request<'a>(self, file_id: &'a str) -> DiffRenderRequest<'a> {
         DiffRenderRequest {
-            file_index: self.file_index,
-            file_id,
-            content_width: self.content_width,
+            cache_key: self.cache_key(file_id),
             syntax_palette: self.theme.syntax,
-            can_stage: self.can_stage,
             requested_rows: self.requested_rows,
         }
     }
@@ -556,10 +538,10 @@ impl RenderedDiffLines {
     }
 
     fn matches_render_request(&self, request: DiffRenderRequest<'_>) -> bool {
-        self.matches_file(request.file_id)
-            && self.content_width == request.content_width
+        self.matches_file(request.cache_key.file_id)
+            && self.content_width == request.cache_key.content_width
             && self.syntax_palette == request.syntax_palette
-            && self.can_stage == request.can_stage
+            && self.can_stage == request.cache_key.can_stage
     }
 
     fn len(&self) -> usize {
@@ -591,19 +573,19 @@ impl DiffLayoutMetrics {
 }
 
 impl CachedDiffLayoutMetrics {
-    fn new(request: DiffLayoutRequest<'_>, metrics: DiffLayoutMetrics) -> Self {
+    fn new(cache_key: DiffCacheKey<'_>, metrics: DiffLayoutMetrics) -> Self {
         Self {
-            file_id: request.file_id.to_string(),
-            content_width: request.content_width,
-            can_stage: request.can_stage,
+            file_id: cache_key.file_id.to_string(),
+            content_width: cache_key.content_width,
+            can_stage: cache_key.can_stage,
             metrics,
         }
     }
 
-    fn matches(&self, request: DiffLayoutRequest<'_>) -> bool {
-        self.file_id == request.file_id
-            && self.content_width == request.content_width
-            && self.can_stage == request.can_stage
+    fn matches(&self, cache_key: DiffCacheKey<'_>) -> bool {
+        self.file_id == cache_key.file_id
+            && self.content_width == cache_key.content_width
+            && self.can_stage == cache_key.can_stage
     }
 
     fn matches_file(&self, file_id: &str) -> bool {
@@ -615,6 +597,20 @@ fn next_diff_cache_target(current_rows: usize, requested_rows: usize) -> usize {
     requested_rows
         .max(current_rows.saturating_mul(2))
         .max(current_rows.saturating_add(1))
+}
+
+fn reset_cache_if_len_changed<T>(cache: &mut Vec<Option<T>>, file_count: usize) {
+    if cache.len() != file_count {
+        cache.clear();
+        cache.resize_with(file_count, || None);
+    }
+}
+
+fn ensure_cache_slot<T>(cache: &mut Vec<Option<T>>, file_index: usize) {
+    let required_len = file_index.saturating_add(1);
+    if cache.len() < required_len {
+        cache.resize_with(required_len, || None);
+    }
 }
 
 #[cfg(test)]
@@ -636,28 +632,18 @@ mod tests {
                 false,
             ),
         );
+        let request = |requested_rows| DiffRenderRequest {
+            cache_key: DiffCacheKey {
+                file_index: 0,
+                file_id: "file",
+                content_width: 80,
+                can_stage: true,
+            },
+            syntax_palette: theme.syntax,
+            requested_rows,
+        };
 
-        assert_eq!(
-            render.diff_lines_render_target(DiffRenderRequest {
-                file_index: 0,
-                file_id: "file",
-                content_width: 80,
-                syntax_palette: theme.syntax,
-                can_stage: true,
-                requested_rows: 101,
-            }),
-            Some(200)
-        );
-        assert_eq!(
-            render.diff_lines_render_target(DiffRenderRequest {
-                file_index: 0,
-                file_id: "file",
-                content_width: 80,
-                syntax_palette: theme.syntax,
-                can_stage: true,
-                requested_rows: 250,
-            }),
-            Some(250)
-        );
+        assert_eq!(render.diff_lines_render_target(request(101)), Some(200));
+        assert_eq!(render.diff_lines_render_target(request(250)), Some(250));
     }
 }

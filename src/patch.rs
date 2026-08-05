@@ -63,18 +63,13 @@ impl FileBuilder {
             return;
         };
 
-        match parse_hunk_line(line) {
-            HunkLine::Added(content) => {
-                hunk.push_added(content);
-                self.additions += 1;
-            }
-            HunkLine::Removed(content) => {
-                hunk.push_removed(content);
-                self.deletions += 1;
-            }
-            HunkLine::Context(content) => hunk.push_context(content),
-            HunkLine::Meta(content) => hunk.push_meta(content),
+        let line = parse_hunk_line(line);
+        match line.kind {
+            DiffLineKind::Added => self.additions += 1,
+            DiffLineKind::Removed => self.deletions += 1,
+            DiffLineKind::Context | DiffLineKind::Meta => {}
         }
+        hunk.push_line(line);
     }
 
     fn finish(mut self, id: usize) -> DiffFile {
@@ -124,49 +119,21 @@ impl HunkBuilder {
         }
     }
 
-    fn push_added(&mut self, content: &str) {
-        self.push_line(DiffLineKind::Added, None, Some(self.next_new_line), content);
-        self.next_new_line += 1;
-    }
+    fn push_line(&mut self, line: ParsedHunkLine<'_>) {
+        let old_line = matches!(line.kind, DiffLineKind::Removed | DiffLineKind::Context)
+            .then_some(self.next_old_line);
+        let new_line = matches!(line.kind, DiffLineKind::Added | DiffLineKind::Context)
+            .then_some(self.next_new_line);
 
-    fn push_removed(&mut self, content: &str) {
-        self.push_line(
-            DiffLineKind::Removed,
-            Some(self.next_old_line),
-            None,
-            content,
-        );
-        self.next_old_line += 1;
-    }
-
-    fn push_context(&mut self, content: &str) {
-        self.push_line(
-            DiffLineKind::Context,
-            Some(self.next_old_line),
-            Some(self.next_new_line),
-            content,
-        );
-        self.next_old_line += 1;
-        self.next_new_line += 1;
-    }
-
-    fn push_meta(&mut self, content: &str) {
-        self.push_line(DiffLineKind::Meta, None, None, content);
-    }
-
-    fn push_line(
-        &mut self,
-        kind: DiffLineKind,
-        old_line: Option<u32>,
-        new_line: Option<u32>,
-        content: &str,
-    ) {
         self.lines.push(DiffLine {
-            kind,
+            kind: line.kind,
             old_line,
             new_line,
-            content: content.to_string(),
+            content: line.content.to_string(),
         });
+
+        self.next_old_line += u32::from(old_line.is_some());
+        self.next_new_line += u32::from(new_line.is_some());
     }
 
     fn finish(self) -> DiffHunk {
@@ -197,11 +164,9 @@ struct LineRange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HunkLine<'a> {
-    Added(&'a str),
-    Removed(&'a str),
-    Context(&'a str),
-    Meta(&'a str),
+struct ParsedHunkLine<'a> {
+    kind: DiffLineKind,
+    content: &'a str,
 }
 
 pub fn parse_unified_diff(input: &str) -> Changeset {
@@ -273,19 +238,17 @@ fn apply_path_change_metadata(
     to_prefix: &str,
     status: FileStatus,
 ) -> bool {
-    if let Some(path) = line.strip_prefix(from_prefix) {
-        file.status = status;
-        file.old_path = clean_git_path(path);
-        return true;
-    }
+    let (target, path) = if let Some(path) = line.strip_prefix(from_prefix) {
+        (&mut file.old_path, path)
+    } else if let Some(path) = line.strip_prefix(to_prefix) {
+        (&mut file.path, path)
+    } else {
+        return false;
+    };
 
-    if let Some(path) = line.strip_prefix(to_prefix) {
-        file.status = status;
-        file.path = clean_git_path(path);
-        return true;
-    }
-
-    false
+    file.status = status;
+    *target = clean_git_path(path);
+    true
 }
 
 fn update_prefixed_path(target: &mut String, line: &str, prefix: &str) -> bool {
@@ -328,11 +291,10 @@ fn parse_quoted_diff_git_paths(rest: &str) -> Option<(String, String)> {
 }
 
 fn parse_unquoted_diff_git_paths(rest: &str) -> Option<(String, String)> {
-    let (_, new_prefix) = diff_side_prefixes(rest);
-    let delimiter = format!(" {new_prefix}");
+    let delimiter = if rest.starts_with("1/") { " 2/" } else { " b/" };
     let mut first_candidate = None;
 
-    for (index, _) in rest.match_indices(&delimiter) {
+    for (index, _) in rest.match_indices(delimiter) {
         let old_path = rest[..index].to_string();
         let new_path = rest[index + 1..].to_string();
         let candidate = (old_path, new_path);
@@ -348,14 +310,6 @@ fn parse_unquoted_diff_git_paths(rest: &str) -> Option<(String, String)> {
         rest.split_once(' ')
             .map(|(old_path, new_path)| (old_path.to_string(), new_path.to_string()))
     })
-}
-
-fn diff_side_prefixes(rest: &str) -> (&'static str, &'static str) {
-    if rest.starts_with("1/") {
-        ("1/", "2/")
-    } else {
-        ("a/", "b/")
-    }
 }
 
 fn clean_git_path(path: &str) -> String {
@@ -390,10 +344,7 @@ fn parse_quoted_git_path(path: &str) -> Option<(String, &str)> {
                 return Some((String::from_utf8_lossy(&bytes).to_string(), rest));
             }
             '\\' => push_escaped_git_path_byte(&mut bytes, &mut chars),
-            value => {
-                let mut encoded = [0; 4];
-                bytes.extend(value.encode_utf8(&mut encoded).as_bytes());
-            }
+            value => push_git_path_char_bytes(&mut bytes, value),
         }
     }
 
@@ -417,11 +368,13 @@ fn push_escaped_git_path_byte(bytes: &mut Vec<u8>, chars: &mut std::str::CharInd
         '\\' => bytes.push(b'\\'),
         '"' => bytes.push(b'"'),
         '0'..='7' => push_octal_git_path_byte(bytes, value, chars),
-        value => {
-            let mut encoded = [0; 4];
-            bytes.extend(value.encode_utf8(&mut encoded).as_bytes());
-        }
+        value => push_git_path_char_bytes(bytes, value),
     }
+}
+
+fn push_git_path_char_bytes(bytes: &mut Vec<u8>, value: char) {
+    let mut encoded = [0; 4];
+    bytes.extend(value.encode_utf8(&mut encoded).as_bytes());
 }
 
 fn push_octal_git_path_byte(
@@ -479,13 +432,23 @@ fn parse_line_range(input: &str, sign: char) -> Option<LineRange> {
     Some(LineRange { start, lines })
 }
 
-fn parse_hunk_line(line: &str) -> HunkLine<'_> {
+fn parse_hunk_line(line: &str) -> ParsedHunkLine<'_> {
     let mut chars = line.chars();
-    match chars.next() {
-        Some('+') => HunkLine::Added(chars.as_str()),
-        Some('-') => HunkLine::Removed(chars.as_str()),
-        Some(' ') => HunkLine::Context(chars.as_str()),
-        _ => HunkLine::Meta(line),
+    let kind = match chars.next() {
+        Some('+') => DiffLineKind::Added,
+        Some('-') => DiffLineKind::Removed,
+        Some(' ') => DiffLineKind::Context,
+        _ => {
+            return ParsedHunkLine {
+                kind: DiffLineKind::Meta,
+                content: line,
+            };
+        }
+    };
+
+    ParsedHunkLine {
+        kind,
+        content: chars.as_str(),
     }
 }
 
@@ -503,20 +466,23 @@ fn parse_hunk_line(line: &str) -> HunkLine<'_> {
 /// hunk overlaps, letting callers raise a precise "nothing to apply" error. The
 /// text is a Git unified diff and round-trips through [`parse_unified_diff`].
 pub(crate) fn overlapping_hunk_patch(file: &DiffFile, selected_hunk: &DiffHunk) -> Option<String> {
-    let hunk_indices = overlapping_hunk_indices(file, selected_hunk);
-    if hunk_indices.is_empty() {
-        return None;
-    }
-    Some(build_hunk_patch(file, &hunk_indices))
+    let mut hunks = file
+        .hunks
+        .iter()
+        .filter(|hunk| hunks_overlap(selected_hunk, hunk))
+        .peekable();
+    hunks.peek()?;
+    Some(build_patch(file, hunks))
 }
 
 /// Build a patch containing exactly one hunk from `file`.
 pub(crate) fn selected_hunk_patch(file: &DiffFile, hunk_index: usize) -> Option<String> {
-    if file.binary || file.hunks.get(hunk_index).is_none() {
+    if file.binary {
         return None;
     }
 
-    Some(build_hunk_patch(file, &[hunk_index]))
+    let hunk = file.hunks.get(hunk_index)?;
+    Some(build_patch(file, std::iter::once(hunk)))
 }
 
 /// Build a patch containing every text hunk in `file`.
@@ -525,8 +491,7 @@ pub(crate) fn file_patch(file: &DiffFile) -> Option<String> {
         return None;
     }
 
-    let hunk_indices = (0..file.hunks.len()).collect::<Vec<_>>();
-    Some(build_hunk_patch(file, &hunk_indices))
+    Some(build_patch(file, &file.hunks))
 }
 
 /// Whether any hunk in `file` overlaps `hunk` by old- or new-side line span.
@@ -536,19 +501,11 @@ pub(crate) fn hunk_overlaps_file(hunk: &DiffHunk, file: &DiffFile) -> bool {
         .any(|candidate| hunks_overlap(hunk, candidate))
 }
 
-fn overlapping_hunk_indices(file: &DiffFile, selected_hunk: &DiffHunk) -> Vec<usize> {
-    file.hunks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, hunk)| hunks_overlap(selected_hunk, hunk).then_some(index))
-        .collect()
-}
-
 fn hunks_overlap(left: &DiffHunk, right: &DiffHunk) -> bool {
-    ranges_overlap(
+    spans_overlap(
         line_span(left.old_start, left.old_lines),
         line_span(right.old_start, right.old_lines),
-    ) || ranges_overlap(
+    ) || spans_overlap(
         line_span(left.new_start, left.new_lines),
         line_span(right.new_start, right.new_lines),
     )
@@ -567,15 +524,25 @@ fn line_span(start: u32, lines: u32) -> LineSpan {
     }
 }
 
-fn ranges_overlap(left: LineSpan, right: LineSpan) -> bool {
+fn spans_overlap(left: LineSpan, right: LineSpan) -> bool {
     left.start < left.end
         && right.start < right.end
         && left.start < right.end
         && right.start < left.end
 }
 
-fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
+fn build_patch<'a>(file: &DiffFile, hunks: impl IntoIterator<Item = &'a DiffHunk>) -> String {
     let mut patch = String::new();
+    push_file_header(&mut patch, file);
+
+    for hunk in hunks {
+        push_hunk_patch(&mut patch, hunk);
+    }
+
+    patch
+}
+
+fn push_file_header(patch: &mut String, file: &DiffFile) {
     let old_path = patch_side_path(file, &file.old_path);
     let new_path = patch_side_path(file, &file.path);
 
@@ -597,14 +564,6 @@ fn build_hunk_patch(file: &DiffFile, hunk_indices: &[usize]) -> String {
         "+++ {}\n",
         patch_header_path(file.status, FileStatus::Deleted, "b", new_path)
     ));
-
-    for index in hunk_indices {
-        if let Some(hunk) = file.hunks.get(*index) {
-            push_hunk_patch(&mut patch, hunk);
-        }
-    }
-
-    patch
 }
 
 fn patch_side_path<'a>(file: &'a DiffFile, path: &'a str) -> &'a str {
