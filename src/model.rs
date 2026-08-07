@@ -21,6 +21,16 @@ pub(crate) struct CommitSummary {
     pub(crate) subject: String,
 }
 
+/// Metadata and changes for one commit selected from the repository overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitDetails {
+    pub(crate) id: String,
+    pub(crate) author: String,
+    pub(crate) committed_at: String,
+    pub(crate) message: String,
+    pub(crate) changeset: Changeset,
+}
+
 /// A complete diff review session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Changeset {

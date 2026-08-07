@@ -14,6 +14,7 @@ use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::model::Changeset;
 use crate::theme::Theme;
 
+mod commit_details;
 mod diff;
 mod file_summary;
 mod intraline;
@@ -22,6 +23,7 @@ mod repository;
 mod sidebar;
 mod text;
 
+pub(crate) use commit_details::commit_details_lines;
 pub(crate) use diff::{diff_layout_counts, diff_lines_until, selected_hunk_header_rows};
 pub(crate) use repository::{branch_lines, commit_lines};
 pub(crate) use sidebar::{render_sidebar_empty, render_sidebar_file, render_sidebar_folder};

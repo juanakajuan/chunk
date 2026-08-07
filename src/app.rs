@@ -18,7 +18,7 @@ use crate::config::AppConfig;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
-use crate::model::{Changeset, DiffFile, FileStage, RepositoryOverview};
+use crate::model::{Changeset, CommitDetails, DiffFile, FileStage, RepositoryOverview};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource, WorktreeMutation};
 use crate::rows;
@@ -27,6 +27,7 @@ use crate::selection::TextSelection;
 use crate::theme::{Theme, ThemeName};
 use crate::viewport::{DiffScrollbar, RenderedViewport};
 
+mod commit_details_pane;
 mod diff_frame;
 mod diff_pane;
 mod files_panel;
@@ -39,6 +40,7 @@ mod selected_diff;
 pub(crate) use keys::accepts_text_input;
 pub(crate) use overlay::AiPickerField;
 
+use commit_details_pane::CommitDetailsPane;
 use files_panel::{FilesPanel, FilesPanelRender, FilesPanelTarget};
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
@@ -138,6 +140,10 @@ impl ClipboardRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppEffect {
+    LoadCommitDetails {
+        revision: String,
+    },
+    CancelCommitDetailsLoad,
     OpenEditor(EditorRequest),
     RunCustomCommand(CustomCommandBinding),
     CancelCustomCommand,
@@ -151,6 +157,12 @@ pub(crate) enum AppEffect {
     CancelAskAi,
     SaveAiSettings(Box<AiSettings>),
     CopyToClipboard(ClipboardRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommitDetailsOutcome {
+    Loaded(CommitDetails),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +195,10 @@ impl ClipboardWriteResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RuntimeEvent {
+    CommitDetailsFinished {
+        revision: String,
+        outcome: CommitDetailsOutcome,
+    },
     EditorFinished(EditorOutcome),
     CustomCommandFinished(CustomCommandResult),
     AskAiFinished(AskAiResult),
@@ -213,6 +229,8 @@ pub(crate) struct App {
     files_panel: FilesPanel,
     /// Selected review diff, including navigation, search, rendering, and geometry.
     selected_diff: SelectedDiffPane,
+    /// Read-only details for the commit selected in the repository panel.
+    commit_details: CommitDetailsPane,
     /// Pane receiving keyboard and mouse wheel actions.
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
@@ -272,6 +290,7 @@ impl App {
             live_notice: None,
             files_panel,
             selected_diff,
+            commit_details: CommitDetailsPane::new(),
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             overlay: None,
@@ -294,6 +313,7 @@ impl App {
         self.viewport.begin_frame();
         self.files_panel.invalidate_frame();
         self.selected_diff.invalidate_frame();
+        self.commit_details.invalidate_frame();
         self.text_selection.begin_frame();
     }
 
@@ -490,11 +510,11 @@ impl App {
     }
 
     fn can_stage(&self) -> bool {
-        self.source.worktree_mutations().is_some()
+        !self.commit_details.is_active() && self.source.worktree_mutations().is_some()
     }
 
     fn can_discard(&self) -> bool {
-        self.source.worktree_mutations().is_some()
+        !self.commit_details.is_active() && self.source.worktree_mutations().is_some()
     }
 
     fn stage_keybind_hint(&self) -> Option<&'static str> {
@@ -534,11 +554,16 @@ impl App {
     }
 
     fn focused_review_target(&self) -> FocusedReviewTarget<'_> {
+        let focus = if self.commit_details.is_active() {
+            FocusPane::Commits
+        } else {
+            self.focus
+        };
         FocusedReviewTarget::new(
             &self.changeset.files,
             self.selected_file_index(),
             self.selected_diff.selected_hunk_index(),
-            self.focus,
+            focus,
             self.files_panel_visible,
         )
     }
@@ -562,6 +587,14 @@ impl App {
 
     pub(crate) fn handle_runtime_event(&mut self, event: RuntimeEvent) {
         match event {
+            RuntimeEvent::CommitDetailsFinished { revision, outcome } => match outcome {
+                CommitDetailsOutcome::Loaded(details) => {
+                    self.commit_details.loaded(&revision, details)
+                }
+                CommitDetailsOutcome::Failed(message) => {
+                    self.commit_details.failed(&revision, message)
+                }
+            },
             RuntimeEvent::EditorFinished(EditorOutcome::Completed) => {
                 self.reload_review_source(true);
             }
@@ -624,6 +657,48 @@ impl App {
     fn queue_editor_effect(&mut self, request: EditorRequest) {
         self.clear_effects(|effect| matches!(effect, AppEffect::OpenEditor(_)));
         self.effects.push_back(AppEffect::OpenEditor(request));
+    }
+
+    fn show_selected_commit(&mut self) {
+        let Some(revision) = self
+            .repository_overview
+            .commits
+            .get(self.selected_commit_index)
+            .map(|commit| commit.short_id.clone())
+        else {
+            self.commit_details.activate_empty();
+            self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
+            return;
+        };
+
+        self.clear_effects(|effect| matches!(effect, AppEffect::CancelCommitDetailsLoad));
+        if !self.commit_details.activate(&revision) {
+            return;
+        }
+        self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
+        self.effects
+            .push_back(AppEffect::LoadCommitDetails { revision });
+    }
+
+    fn show_worktree_diff(&mut self) {
+        if !self.commit_details.is_active() {
+            return;
+        }
+        self.commit_details.deactivate();
+        self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
+        self.effects.push_back(AppEffect::CancelCommitDetailsLoad);
+    }
+
+    fn set_focus(&mut self, focus: FocusPane) {
+        let changed = self.focus != focus;
+        self.focus = focus;
+        match focus {
+            FocusPane::Sidebar if changed || self.commit_details.is_active() => {
+                self.show_worktree_diff()
+            }
+            FocusPane::Commits if changed => self.show_selected_commit(),
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits | FocusPane::Diff => {}
+        }
     }
 
     fn queue_custom_command_effect(&mut self, command: CustomCommandBinding) {
@@ -699,6 +774,7 @@ impl App {
     }
 
     fn apply_repository_overview(&mut self, repository_overview: RepositoryOverview) {
+        let commit_details_active = self.commit_details.is_active();
         let selected_branch = self
             .repository_overview
             .branches
@@ -732,6 +808,9 @@ impl App {
             })
             .unwrap_or(0);
         self.repository_overview = repository_overview;
+        if commit_details_active {
+            self.show_selected_commit();
+        }
     }
 
     fn apply_reloaded_changeset(&mut self, changeset: Changeset, preserve_scroll: bool) {
@@ -803,8 +882,8 @@ impl App {
         match key.code {
             KeyCode::Tab => self.cycle_focus(VerticalDirection::Down),
             KeyCode::BackTab => self.cycle_focus(VerticalDirection::Up),
-            KeyCode::Left if self.files_panel_visible => self.focus = FocusPane::Sidebar,
-            KeyCode::Right | KeyCode::Enter => self.focus = FocusPane::Diff,
+            KeyCode::Left if self.files_panel_visible => self.set_focus(FocusPane::Sidebar),
+            KeyCode::Right | KeyCode::Enter => self.set_focus(FocusPane::Diff),
             KeyCode::Esc => self.clear_search_query(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
@@ -822,8 +901,10 @@ impl App {
                 Some(BuiltinAction::Help) => self.toggle_help_overlay(),
                 Some(BuiltinAction::ToggleFiles) => self.toggle_files_panel(),
                 Some(BuiltinAction::Search) => self.open_search_prompt(),
-                Some(BuiltinAction::MoveDown) => self.move_by(VerticalDirection::Down),
-                Some(BuiltinAction::MoveUp) => self.move_by(VerticalDirection::Up),
+                Some(BuiltinAction::MoveDown) => {
+                    self.move_focused_pane_by(VerticalDirection::Down, 1)
+                }
+                Some(BuiltinAction::MoveUp) => self.move_focused_pane_by(VerticalDirection::Up, 1),
                 Some(BuiltinAction::NextMatch) => self.jump_by(VerticalDirection::Down),
                 Some(BuiltinAction::PrevMatch) => self.jump_by(VerticalDirection::Up),
                 Some(BuiltinAction::Top) => self.scroll_diff_to_top(),
@@ -922,7 +1003,7 @@ impl App {
         self.pending_left_click = None;
 
         if let Some(scroll) = self.selected_diff.start_scrollbar_drag(column, row) {
-            self.focus = FocusPane::Diff;
+            self.set_focus(FocusPane::Diff);
             self.text_selection.clear();
             self.scroll_diff_to(scroll);
             return;
@@ -954,7 +1035,7 @@ impl App {
     fn apply_pending_left_click(&mut self, target: PendingLeftClick) {
         match target {
             PendingLeftClick::Sidebar { target } => {
-                self.focus = FocusPane::Sidebar;
+                self.set_focus(FocusPane::Sidebar);
                 if self
                     .files_panel
                     .activate(target, self.changeset.files.len())
@@ -963,16 +1044,18 @@ impl App {
                 }
             }
             PendingLeftClick::Branch { index } => {
-                self.focus = FocusPane::Branches;
+                self.set_focus(FocusPane::Branches);
                 self.select_branch(index);
             }
             PendingLeftClick::Commit { index } => {
-                self.focus = FocusPane::Commits;
+                self.set_focus(FocusPane::Commits);
                 self.select_commit(index);
             }
             PendingLeftClick::Diff { hunk_index } => {
-                self.focus = FocusPane::Diff;
-                if let Some(index) = hunk_index {
+                self.set_focus(FocusPane::Diff);
+                if !self.commit_details.is_active()
+                    && let Some(index) = hunk_index
+                {
                     let selected_file_index = self.selected_file_index();
                     self.selected_diff.select_hunk(
                         index,
@@ -1020,27 +1103,21 @@ impl App {
             return false;
         };
 
-        self.focus = FocusPane::Diff;
+        self.set_focus(FocusPane::Diff);
         self.scroll_diff_to(scroll);
         true
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) {
         if let Some(focus) = self.pane_at(column, row) {
-            self.focus = focus;
+            self.set_focus(focus);
         }
     }
 
     fn handle_wheel(&mut self, column: u16, row: u16, direction: VerticalDirection) {
         let focus = self.pane_at(column, row).unwrap_or(FocusPane::Diff);
-        self.focus = focus;
-
-        match focus {
-            FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, MOUSE_WHEEL_STEP),
-            FocusPane::Branches => self.move_branch_cursor_by(direction, MOUSE_WHEEL_STEP),
-            FocusPane::Commits => self.move_commit_cursor_by(direction, MOUSE_WHEEL_STEP),
-            FocusPane::Diff => self.scroll_diff_by(direction, MOUSE_WHEEL_STEP),
-        }
+        self.set_focus(focus);
+        self.move_focused_pane_by(direction, MOUSE_WHEEL_STEP);
     }
 
     fn pane_at(&self, column: u16, row: u16) -> Option<FocusPane> {
@@ -1060,10 +1137,17 @@ impl App {
     }
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
-        self.selected_diff.contains(column, row)
+        if self.commit_details.is_active() {
+            self.commit_details.contains(column, row)
+        } else {
+            self.selected_diff.contains(column, row)
+        }
     }
 
     fn diff_hunk_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        if self.commit_details.is_active() {
+            return None;
+        }
         let selected_file_index = self.selected_file_index();
         self.selected_diff.hunk_index_at(
             column,
@@ -1075,11 +1159,11 @@ impl App {
 
     fn cycle_focus(&mut self, direction: VerticalDirection) {
         if !self.files_panel_visible {
-            self.focus = FocusPane::Diff;
+            self.set_focus(FocusPane::Diff);
             return;
         }
 
-        self.focus = match (self.focus, direction) {
+        let focus = match (self.focus, direction) {
             (FocusPane::Sidebar, VerticalDirection::Down)
             | (FocusPane::Commits, VerticalDirection::Up) => FocusPane::Branches,
             (FocusPane::Branches, VerticalDirection::Down)
@@ -1089,6 +1173,7 @@ impl App {
             (FocusPane::Diff, VerticalDirection::Down)
             | (FocusPane::Branches, VerticalDirection::Up) => FocusPane::Sidebar,
         };
+        self.set_focus(focus);
     }
 
     fn toggle_files_panel(&mut self) {
@@ -1096,11 +1181,12 @@ impl App {
         if !self.files_panel_visible {
             self.files_panel.clear_cursor();
         }
-        self.focus = if self.files_panel_visible {
+        let focus = if self.files_panel_visible {
             FocusPane::Sidebar
         } else {
             FocusPane::Diff
         };
+        self.set_focus(focus);
     }
 
     fn handle_global_ai_key(&mut self, key: KeyEvent) -> bool {
@@ -1166,7 +1252,7 @@ impl App {
             }
         };
 
-        self.focus = FocusPane::Diff;
+        self.set_focus(FocusPane::Diff);
         self.live_error = None;
         self.overlay = Some(Overlay::AskAiPrompt(AskAiPromptState {
             context,
@@ -1197,13 +1283,13 @@ impl App {
             }
         };
 
-        self.focus = FocusPane::Diff;
+        self.set_focus(FocusPane::Diff);
         self.live_error = None;
         self.queue_ask_ai_request_effect(AskAiRequest::explain_code(context));
     }
 
     fn queue_unpublished_summary_request(&mut self) {
-        self.focus = FocusPane::Diff;
+        self.set_focus(FocusPane::Diff);
         self.live_error = None;
         self.queue_unpublished_summary_effect();
     }
@@ -1263,6 +1349,10 @@ impl App {
     }
 
     fn queue_selected_file_diff_copy(&mut self) {
+        if self.commit_details.is_active() {
+            self.set_copy_error("no worktree file diff is active");
+            return;
+        }
         let copy = match self.focused_review_target().file_diff_copy() {
             Ok(target) => patch::file_patch(target.file)
                 .map(|text| (text, "copied selected file diff"))
@@ -1320,12 +1410,12 @@ impl App {
         true
     }
 
-    fn move_by(&mut self, direction: VerticalDirection) {
+    fn move_focused_pane_by(&mut self, direction: VerticalDirection, amount: usize) {
         match self.focus {
-            FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, 1),
-            FocusPane::Branches => self.move_branch_cursor_by(direction, 1),
-            FocusPane::Commits => self.move_commit_cursor_by(direction, 1),
-            FocusPane::Diff => self.scroll_diff_by(direction, 1),
+            FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, amount),
+            FocusPane::Branches => self.move_branch_cursor_by(direction, amount),
+            FocusPane::Commits => self.move_commit_cursor_by(direction, amount),
+            FocusPane::Diff => self.scroll_diff_by(direction, amount),
         }
     }
 
@@ -1353,6 +1443,7 @@ impl App {
             amount,
             commit_count - 1,
         );
+        self.show_selected_commit();
     }
 
     fn select_branch(&mut self, index: usize) {
@@ -1367,6 +1458,7 @@ impl App {
         if commit_count > 0 {
             self.selected_commit_index = index.min(commit_count - 1);
         }
+        self.show_selected_commit();
     }
 
     fn move_sidebar_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
@@ -1385,6 +1477,10 @@ impl App {
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
+        if self.commit_details.is_active() {
+            self.commit_details.scroll_page(direction);
+            return;
+        }
         let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_page(
             direction,
@@ -1394,6 +1490,10 @@ impl App {
     }
 
     fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
+        if self.commit_details.is_active() {
+            self.commit_details.scroll_by(direction, amount);
+            return;
+        }
         let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_by(
             direction,
@@ -1404,6 +1504,9 @@ impl App {
     }
 
     fn scroll_diff_to(&mut self, scroll: usize) {
+        if self.commit_details.is_active() {
+            return;
+        }
         let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_to(
             scroll,
@@ -1413,6 +1516,10 @@ impl App {
     }
 
     fn scroll_diff_to_top(&mut self) {
+        if self.commit_details.is_active() {
+            self.commit_details.scroll_to_top();
+            return;
+        }
         let selected_file_index = self.selected_file_index();
         self.selected_diff.scroll_to_top(
             selected_file_index,
@@ -1421,6 +1528,10 @@ impl App {
     }
 
     fn scroll_diff_to_bottom(&mut self) {
+        if self.commit_details.is_active() {
+            self.commit_details.scroll_to_bottom();
+            return;
+        }
         let selected_file_index = self.selected_file_index();
         self.selected_diff
             .scroll_to_bottom(self.changeset.files.get(selected_file_index));
@@ -1454,6 +1565,9 @@ impl App {
     }
 
     fn toggle_selected_file_reviewed(&mut self) {
+        if self.commit_details.is_active() {
+            return;
+        }
         self.files_panel
             .toggle_selected_reviewed(&self.changeset.files);
     }
@@ -1657,6 +1771,10 @@ impl App {
     }
 
     fn queue_selected_file_editor_request(&mut self) {
+        if self.commit_details.is_active() {
+            self.live_error = Some("no worktree file is active".to_string());
+            return;
+        }
         let request = match self.focused_review_target().editor() {
             Ok(target) => self
                 .source

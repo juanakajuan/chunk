@@ -21,7 +21,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::{
-    App, AppEffect, ClipboardRequest, ClipboardWriteResult, EditorOutcome, RuntimeEvent,
+    App, AppEffect, ClipboardRequest, ClipboardWriteResult, CommitDetailsOutcome, EditorOutcome,
+    RuntimeEvent,
 };
 use crate::ask_ai::{self, AiHarness, AiSettings, AskAiRequest, AskAiResult};
 use crate::clipboard;
@@ -84,8 +85,30 @@ struct BackgroundTask<T> {
 
 #[derive(Default)]
 struct BackgroundTasks {
+    commit_details: CommitDetailsTasks,
     custom_command: Option<BackgroundTask<CustomCommandResult>>,
     ask_ai: Option<BackgroundTask<AskAiResult>>,
+}
+
+#[derive(Default)]
+struct CommitDetailsTasks {
+    active: Option<ActiveCommitDetailsTask>,
+    pending_revision: Option<String>,
+}
+
+struct ActiveCommitDetailsTask {
+    revision: String,
+    task: BackgroundTask<CommitDetailsOutcome>,
+}
+
+struct CommitDetailsResult {
+    revision: String,
+    outcome: CommitDetailsOutcome,
+}
+
+enum FinishedTask<T> {
+    Reported(T),
+    Disconnected,
 }
 
 impl<T: Send + 'static> BackgroundTask<T> {
@@ -116,6 +139,13 @@ impl<T: Send + 'static> BackgroundTask<T> {
 
 impl BackgroundTasks {
     fn finish_ready(&mut self, app: &mut App) {
+        if let Some(result) = self.commit_details.finish_ready() {
+            app.handle_runtime_event(RuntimeEvent::CommitDetailsFinished {
+                revision: result.revision,
+                outcome: result.outcome,
+            });
+        }
+        self.commit_details.start_pending_if_idle();
         if let Some(result) = finish_task(&mut self.custom_command) {
             app.handle_runtime_event(RuntimeEvent::CustomCommandFinished(result));
         }
@@ -141,6 +171,67 @@ impl BackgroundTasks {
     }
 }
 
+impl CommitDetailsTasks {
+    fn finish_ready(&mut self) -> Option<CommitDetailsResult> {
+        let outcome = poll_task(&self.active.as_ref()?.task)?;
+        let active = self
+            .active
+            .take()
+            .expect("ready commit details task should still be stored");
+
+        Some(CommitDetailsResult {
+            revision: active.revision,
+            outcome: complete_task(active.task, outcome),
+        })
+    }
+
+    fn request(&mut self, revision: String) {
+        if self.active.is_none() {
+            self.start(revision);
+        } else if self.active_revision() == Some(revision.as_str()) {
+            self.pending_revision = None;
+        } else {
+            self.pending_revision = Some(revision);
+        }
+    }
+
+    fn start_pending_if_idle(&mut self) {
+        if self.active.is_none()
+            && let Some(revision) = self.pending_revision.take()
+        {
+            self.start(revision);
+        }
+    }
+
+    fn start(&mut self, revision: String) {
+        self.active = Some(ActiveCommitDetailsTask::start(revision));
+    }
+
+    fn active_revision(&self) -> Option<&str> {
+        self.active.as_ref().map(|task| task.revision.as_str())
+    }
+
+    fn cancel_pending(&mut self) {
+        self.pending_revision = None;
+    }
+}
+
+impl ActiveCommitDetailsTask {
+    fn start(revision: String) -> Self {
+        let task_revision = revision.clone();
+        let task = BackgroundTask::spawn(
+            move |_| load_commit_details(&task_revision),
+            || {
+                CommitDetailsOutcome::Failed(
+                    "commit loader stopped before reporting a result".to_string(),
+                )
+            },
+        );
+
+        Self { revision, task }
+    }
+}
+
 fn start_task_if_idle<T>(
     slot: &mut Option<BackgroundTask<T>>,
     start: impl FnOnce() -> BackgroundTask<T>,
@@ -153,15 +244,25 @@ fn start_task_if_idle<T>(
 /// Take a finished task's result and join its worker, or `None` while it runs.
 /// A worker that vanished without sending yields the task's fallback result.
 fn finish_task<T>(slot: &mut Option<BackgroundTask<T>>) -> Option<T> {
-    let outcome = match slot.as_ref()?.result.try_recv() {
-        Ok(result) => Some(result),
-        Err(TryRecvError::Empty) => return None,
-        Err(TryRecvError::Disconnected) => None,
-    };
-
+    let outcome = poll_task(slot.as_ref()?)?;
     let task = slot.take().expect("ready task should still be stored");
+    Some(complete_task(task, outcome))
+}
+
+fn poll_task<T>(task: &BackgroundTask<T>) -> Option<FinishedTask<T>> {
+    match task.result.try_recv() {
+        Ok(result) => Some(FinishedTask::Reported(result)),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => Some(FinishedTask::Disconnected),
+    }
+}
+
+fn complete_task<T>(task: BackgroundTask<T>, outcome: FinishedTask<T>) -> T {
     let _ = task.worker.join();
-    Some(outcome.unwrap_or_else(task.on_disconnect))
+    match outcome {
+        FinishedTask::Reported(result) => result,
+        FinishedTask::Disconnected => (task.on_disconnect)(),
+    }
 }
 
 fn cancel_and_join<T>(slot: &mut Option<BackgroundTask<T>>) {
@@ -337,6 +438,7 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
 
     loop {
         background_tasks.finish_ready(app);
+        handle_app_effects(terminal, app, &mut background_tasks)?;
         app.advance_custom_command_spinner();
         app.advance_ask_ai_spinner();
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -392,6 +494,12 @@ fn handle_app_effects(
 ) -> Result<()> {
     for effect in app.take_effects() {
         match effect {
+            AppEffect::LoadCommitDetails { revision } => {
+                background_tasks.commit_details.request(revision);
+            }
+            AppEffect::CancelCommitDetailsLoad => {
+                background_tasks.commit_details.cancel_pending();
+            }
             AppEffect::OpenEditor(request) => {
                 let outcome = open_editor(terminal, &request)?;
                 app.handle_runtime_event(RuntimeEvent::EditorFinished(outcome));
@@ -417,6 +525,13 @@ fn handle_app_effects(
     }
 
     Ok(())
+}
+
+fn load_commit_details(revision: &str) -> CommitDetailsOutcome {
+    match git::load_commit_details(revision) {
+        Ok(details) => CommitDetailsOutcome::Loaded(details),
+        Err(error) => CommitDetailsOutcome::Failed(error.to_string()),
+    }
 }
 
 fn write_clipboard_request(request: ClipboardRequest) -> RuntimeEvent {

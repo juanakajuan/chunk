@@ -38,7 +38,7 @@ const GRUVBOX_AQUA: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
 const GRUVBOX_ORANGE: Color = Color::Rgb(0xfe, 0x80, 0x19);
 const GRUVBOX_SELECTION: Color = Color::Rgb(0x50, 0x49, 0x45);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub background: Color,
     pub background_alt: Color,

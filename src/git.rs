@@ -11,8 +11,8 @@ use std::process::{Child, Command, Output, Stdio};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::model::{
-    Changeset, CommitSummary, DiffFile, DiffHunk, FileStage, LocalBranch, RepositoryOverview,
-    SourceSnapshot,
+    Changeset, CommitDetails, CommitSummary, DiffFile, DiffHunk, FileStage, LocalBranch,
+    RepositoryOverview, SourceSnapshot,
 };
 use crate::patch::{hunk_overlaps_file, overlapping_hunk_patch, parse_unified_diff};
 
@@ -121,6 +121,75 @@ fn parse_commit_summaries(output: &str) -> Vec<CommitSummary> {
             })
         })
         .collect()
+}
+
+pub(crate) fn load_commit_details(revision: &str) -> Result<CommitDetails> {
+    let root = worktree_root()?;
+    load_commit_details_in(&root, revision)
+}
+
+fn load_commit_details_in(root: &Path, revision: &str) -> Result<CommitDetails> {
+    if revision.is_empty() || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(eyre!("invalid commit id: {revision}"));
+    }
+
+    let metadata = checked_output(
+        git_command(root).args([
+            "show",
+            "--no-patch",
+            "--date=iso-strict",
+            "--format=%H%x00%an%x00%cI%x00%B",
+            revision,
+            "--",
+        ]),
+        "git commit metadata failed",
+    )?;
+    let (id, author, committed_at, message) = parse_commit_metadata(&stdout_text(&metadata))?;
+    let patch = checked_output(
+        git_command(root).args([
+            "show",
+            "--format=",
+            "--no-color",
+            "--patch",
+            "--find-renames",
+            "--default-prefix",
+            revision,
+            "--",
+        ]),
+        "git commit diff failed",
+    )?;
+    let mut changeset = parse_unified_diff(&stdout_text(&patch));
+    changeset.title = format!("Commit {}", &id[..id.len().min(12)]);
+    changeset.source_label = format!("git show {id}");
+
+    Ok(CommitDetails {
+        id,
+        author,
+        committed_at,
+        message,
+        changeset,
+    })
+}
+
+fn parse_commit_metadata(output: &str) -> Result<(String, String, String, String)> {
+    let mut fields = output.splitn(4, '\0');
+    let id = required_commit_metadata_field(fields.next(), "SHA")?;
+    let author = required_commit_metadata_field(fields.next(), "author")?;
+    let committed_at = required_commit_metadata_field(fields.next(), "commit date")?;
+    let message = fields
+        .next()
+        .ok_or_else(|| eyre!("git commit metadata omitted the commit message"))?
+        .trim_end_matches('\n')
+        .to_string();
+
+    Ok((id, author, committed_at, message))
+}
+
+fn required_commit_metadata_field(value: Option<&str>, name: &str) -> Result<String> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| eyre!("git commit metadata omitted the {name}"))
 }
 
 pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
@@ -1041,6 +1110,39 @@ mod tests {
                     subject: "fix: keep layout stable".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn loads_commit_metadata_files_and_diff() {
+        let repo = TestRepo::new();
+        fs::write("sample.txt", "first\nsecond\n").unwrap();
+        run_git(["add", "sample.txt"]);
+        run_git(["commit", "-m", "Subject", "-m", "Body line"]);
+
+        let details = load_commit_details_in(&repo.root, "HEAD").unwrap_err();
+
+        assert!(details.to_string().contains("invalid commit id"));
+
+        let revision = git_output(["rev-parse", "--short", "HEAD"])
+            .trim()
+            .to_string();
+        let details = load_commit_details_in(&repo.root, &revision).unwrap();
+
+        assert_eq!(details.id.len(), 40);
+        assert_eq!(details.author, "Chunk Test");
+        assert!(!details.committed_at.is_empty());
+        assert_eq!(details.message, "Subject\n\nBody line");
+        assert_eq!(details.changeset.files.len(), 1);
+        assert_eq!(details.changeset.files[0].display_path(), "sample.txt");
+        assert_eq!(details.changeset.files[0].additions, 2);
+        assert_eq!(details.changeset.files[0].deletions, 0);
+        assert!(
+            details.changeset.files[0]
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.content == "second")
         );
     }
 

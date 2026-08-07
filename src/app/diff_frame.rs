@@ -56,6 +56,7 @@ impl<'a> DiffFrameRenderer<'a> {
         // Callers outside the full UI render loop (notably tests) still get
         // frame-safe hit geometry.
         self.app.selected_diff.invalidate_frame();
+        self.app.commit_details.invalidate_frame();
         if self.app.ask_ai_output().is_some() {
             return self.ask_ai_output_pane_rows();
         }
@@ -63,7 +64,26 @@ impl<'a> DiffFrameRenderer<'a> {
             return self.command_output_pane_rows();
         }
 
-        self.review_pane_rows()
+        if self.app.commit_details.is_active() {
+            self.commit_details_pane_rows()
+        } else {
+            self.review_pane_rows()
+        }
+    }
+
+    fn commit_details_pane_rows(&mut self) -> DiffPaneRows {
+        let rendered = self.app.commit_details.render(
+            self.request.area,
+            self.request.content_width,
+            self.request.visible_height,
+            self.request.theme,
+        );
+        let lines = self.decorate_visible_lines(rendered.lines, rendered.line_scroll);
+        DiffPaneRows {
+            title: rendered.title,
+            lines,
+            scrollbar: None,
+        }
     }
 
     fn review_pane_rows(&mut self) -> DiffPaneRows {
@@ -84,7 +104,7 @@ impl<'a> DiffFrameRenderer<'a> {
             no_diff_message,
             leading_rows,
         });
-        let lines = self.decorate_visible_lines(rendered.lines);
+        let lines = self.decorate_visible_lines(rendered.lines, 0);
 
         DiffPaneRows {
             title,
@@ -93,7 +113,11 @@ impl<'a> DiffFrameRenderer<'a> {
         }
     }
 
-    fn decorate_visible_lines(&mut self, lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    fn decorate_visible_lines(
+        &mut self,
+        lines: Vec<Line<'static>>,
+        line_scroll: usize,
+    ) -> Vec<Line<'static>> {
         self.app.text_selection.decorate_visible_lines(
             pane_text_area(
                 self.request.area,
@@ -101,7 +125,7 @@ impl<'a> DiffFrameRenderer<'a> {
                 self.request.visible_height,
             ),
             lines,
-            0,
+            line_scroll,
             self.request.visible_height,
             self.request.theme,
         )
@@ -184,7 +208,7 @@ impl<'a> DiffFrameRenderer<'a> {
         let (title, visible_output_lines) = pane_lines(self.app, output_height);
         lines.extend(visible_output_lines);
         lines.truncate(self.request.visible_height);
-        let lines = self.decorate_visible_lines(lines);
+        let lines = self.decorate_visible_lines(lines, 0);
 
         DiffPaneRows {
             title,

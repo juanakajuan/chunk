@@ -55,7 +55,6 @@ enum TreeEntry {
 struct FileTree {
     root: TreeNode,
     folder_members: HashMap<String, Vec<usize>>,
-    has_root_folder: bool,
 }
 
 #[derive(Debug, Default)]
@@ -144,13 +143,8 @@ impl FilesPanel {
             .iter()
             .map(|entry| self.render_entry(entry, &request, active_target.as_ref()))
             .collect::<Vec<_>>();
-        let row_counts = rendered
-            .iter()
-            .map(|entry| entry.lines.len())
-            .collect::<Vec<_>>();
         self.scroll = visible_scroll(
-            &self.entries,
-            &row_counts,
+            &rendered,
             self.scroll,
             active_target.as_ref(),
             request.visible_height,
@@ -304,8 +298,8 @@ impl FilesPanel {
         active_target: Option<&TreeTarget>,
     ) -> RenderedTreeEntry {
         let target = FilesPanelTarget(entry.target());
-        let is_active = active_target.is_some_and(|active| entry.matches_target(active));
-        let selected = request.focused && is_active;
+        let selected =
+            request.focused && active_target.is_some_and(|active| entry.is_highlighted_by(active));
         let lines = match entry {
             TreeEntry::File { index, depth } => {
                 request.files.get(*index).map_or_else(Vec::new, |file| {
@@ -325,21 +319,15 @@ impl FilesPanel {
                 expanded,
                 file_indices,
                 ..
-            } => {
-                let hidden_selected_file = !expanded
-                    && active_target.is_some_and(|active| {
-                        matches!(active, TreeTarget::File(index) if file_indices.contains(index))
-                    });
-                rows::render_sidebar_folder(
-                    name,
-                    *depth,
-                    *expanded,
-                    request.focused && (is_active || hidden_selected_file),
-                    folder_stage(request.files, file_indices),
-                    request.content_width,
-                    request.theme,
-                )
-            }
+            } => rows::render_sidebar_folder(
+                name,
+                *depth,
+                *expanded,
+                selected,
+                folder_stage(request.files, file_indices),
+                request.content_width,
+                request.theme,
+            ),
         };
         RenderedTreeEntry { target, lines }
     }
@@ -436,20 +424,19 @@ impl FileTree {
         Self {
             root,
             folder_members,
-            has_root_folder: has_root_file,
         }
     }
 
     fn entries(&self, collapsed: &HashSet<String>) -> Vec<TreeEntry> {
         let mut entries = Vec::new();
-        if self.has_root_folder {
+        if let Some(root_members) = self.folder_members("") {
             let expanded = !collapsed.contains("");
             entries.push(TreeEntry::Folder {
                 path: String::new(),
                 name: "/".to_string(),
                 depth: 0,
                 expanded,
-                file_indices: self.folder_members("").unwrap_or_default().to_vec(),
+                file_indices: root_members.to_vec(),
             });
             if expanded {
                 self.root.flatten_files(1, &mut entries);
@@ -552,6 +539,21 @@ impl TreeEntry {
             _ => false,
         }
     }
+
+    fn is_highlighted_by(&self, target: &TreeTarget) -> bool {
+        self.matches_target(target)
+            || matches!(
+                (self, target),
+                (
+                    Self::Folder {
+                        expanded: false,
+                        file_indices,
+                        ..
+                    },
+                    TreeTarget::File(index)
+                ) if file_indices.contains(index)
+            )
+    }
 }
 
 impl FilesPanelViewport {
@@ -608,8 +610,7 @@ fn folder_stage(files: &[DiffFile], file_indices: &[usize]) -> FileStage {
 }
 
 fn visible_scroll(
-    entries: &[TreeEntry],
-    row_counts: &[usize],
+    entries: &[RenderedTreeEntry],
     scroll: usize,
     active_target: Option<&TreeTarget>,
     visible_height: usize,
@@ -618,7 +619,8 @@ fn visible_scroll(
         return 0;
     }
     let clamped = scroll.min(entries.len() - 1);
-    let Some(active_index) = active_target.and_then(|target| target_position(entries, target))
+    let Some(active_index) =
+        active_target.and_then(|target| entries.iter().position(|entry| entry.target.0.eq(target)))
     else {
         return clamped;
     };
@@ -626,14 +628,17 @@ fn visible_scroll(
         return active_index;
     }
     let visible_height = visible_height.max(1);
-    let rows_to_active: usize = row_counts[clamped..=active_index].iter().sum();
+    let rows_to_active = entries[clamped..=active_index]
+        .iter()
+        .map(|entry| entry.lines.len())
+        .sum::<usize>();
     if rows_to_active <= visible_height {
         return clamped;
     }
     let mut new_scroll = active_index;
-    let mut used_rows = row_counts.get(active_index).copied().unwrap_or(1);
+    let mut used_rows = entries[active_index].lines.len();
     while new_scroll > 0 {
-        let previous_rows = row_counts.get(new_scroll - 1).copied().unwrap_or(1);
+        let previous_rows = entries[new_scroll - 1].lines.len();
         if used_rows.saturating_add(previous_rows) > visible_height {
             break;
         }

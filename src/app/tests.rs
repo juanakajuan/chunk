@@ -4,8 +4,8 @@ use crate::custom_command::CustomCommandResult;
 use crate::diff_render::RenderedDiffLines;
 use crate::keybind::{BuiltinAction, BuiltinKey, KeybindMap};
 use crate::model::{
-    CommitSummary, DiffHunk, DiffLine, DiffLineKind, FileStatus, LocalBranch, RepositoryOverview,
-    SourceSnapshot,
+    CommitDetails, CommitSummary, DiffHunk, DiffLine, DiffLineKind, FileStatus, LocalBranch,
+    RepositoryOverview, SourceSnapshot,
 };
 use crate::theme::Theme;
 use ratatui::layout::Rect;
@@ -175,6 +175,92 @@ fn repository_focus_adds_contextual_copy_hint_to_footer() {
 }
 
 #[test]
+fn keyboard_commit_selection_loads_and_renders_commit_details() {
+    let mut app = app_with_repository_overview();
+    app.focus = FocusPane::Branches;
+
+    press_key(&mut app, KeyCode::Tab);
+
+    assert_eq!(app.focus, FocusPane::Commits);
+    assert_eq!(take_commit_load(&mut app).as_deref(), Some("abc1234"));
+    let loading = render_tall_diff_pane(&mut app, Theme::github_dark());
+    assert!(pane_text(&loading).contains("Loading commit details"));
+
+    app.handle_runtime_event(RuntimeEvent::CommitDetailsFinished {
+        revision: "abc1234".to_string(),
+        outcome: CommitDetailsOutcome::Loaded(commit_details(
+            "abc1234000000000000000000000000000000000",
+            "First full message\n\nBody",
+            "old line",
+        )),
+    });
+    let pane = render_tall_diff_pane(&mut app, Theme::github_dark());
+    let text = pane_text(&pane);
+    assert!(text.contains("Commit: abc1234000000000000000000000000000000000"));
+    assert!(text.contains("Author: Chunk Test"));
+    assert!(text.contains("Date: 2026-08-04T12:00:00-04:00"));
+    assert!(text.contains("First full message"));
+    assert!(text.contains("Files: 1 file changed, +1 -1"));
+    assert!(text.contains("sample.txt"));
+    assert!(text.contains("old line"));
+}
+
+#[test]
+fn moving_commit_selection_ignores_stale_loaded_content() {
+    let mut app = app_with_repository_overview();
+    app.focus = FocusPane::Commits;
+
+    press_key(&mut app, KeyCode::Char('j'));
+
+    assert_eq!(take_commit_load(&mut app).as_deref(), Some("def5678"));
+    app.handle_runtime_event(RuntimeEvent::CommitDetailsFinished {
+        revision: "abc1234".to_string(),
+        outcome: CommitDetailsOutcome::Loaded(commit_details(
+            "abc1234000000000000000000000000000000000",
+            "stale message",
+            "stale diff",
+        )),
+    });
+    let pane = render_tall_diff_pane(&mut app, Theme::github_dark());
+    assert!(pane_text(&pane).contains("Loading commit details"));
+    assert!(!pane_text(&pane).contains("stale message"));
+
+    app.handle_runtime_event(RuntimeEvent::CommitDetailsFinished {
+        revision: "def5678".to_string(),
+        outcome: CommitDetailsOutcome::Loaded(commit_details(
+            "def5678000000000000000000000000000000000",
+            "current message",
+            "current diff",
+        )),
+    });
+    let pane = render_tall_diff_pane(&mut app, Theme::github_dark());
+    assert!(pane_text(&pane).contains("current message"));
+}
+
+#[test]
+fn commit_git_error_is_shown_and_files_focus_restores_worktree_diff() {
+    let mut app = app_with_repository_overview();
+    app.focus = FocusPane::Branches;
+    press_key(&mut app, KeyCode::Tab);
+    take_commit_load(&mut app);
+    app.handle_runtime_event(RuntimeEvent::CommitDetailsFinished {
+        revision: "abc1234".to_string(),
+        outcome: CommitDetailsOutcome::Failed("unknown revision".to_string()),
+    });
+
+    let failed = render_tall_diff_pane(&mut app, Theme::github_dark());
+    assert!(pane_text(&failed).contains("Git error: unknown revision"));
+
+    press_key(&mut app, KeyCode::Left);
+
+    assert_eq!(app.focus, FocusPane::Sidebar);
+    assert!(take_commit_cancel(&mut app));
+    let worktree = render_tall_diff_pane(&mut app, Theme::github_dark());
+    assert!(!pane_text(&worktree).contains("Git error"));
+    assert!(worktree.title.contains("changeset"));
+}
+
+#[test]
 fn only_the_focused_list_pane_highlights_its_selection() {
     let mut app = app_with_repository_overview();
     let theme = Theme::github_dark();
@@ -223,6 +309,7 @@ fn repository_panel_mouse_selects_and_scrolls_the_pointed_list() {
     app.handle_left_up(1, 11);
     assert_eq!(app.focus, FocusPane::Commits);
     assert_eq!(app.selected_commit_index, 1);
+    assert_eq!(take_commit_load(&mut app).as_deref(), Some("def5678"));
 
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::ScrollDown,
@@ -1620,6 +1707,20 @@ fn take_clipboard_request(app: &mut App) -> Option<ClipboardRequest> {
     })
 }
 
+fn take_commit_load(app: &mut App) -> Option<String> {
+    take_effect(app, |effect| match effect {
+        AppEffect::LoadCommitDetails { revision } => Some(revision),
+        _ => None,
+    })
+}
+
+fn take_commit_cancel(app: &mut App) -> bool {
+    take_effect(app, |effect| {
+        matches!(effect, AppEffect::CancelCommitDetailsLoad).then_some(())
+    })
+    .is_some()
+}
+
 fn take_editor_request(app: &mut App) -> Option<crate::editor::EditorRequest> {
     take_effect(app, |effect| match effect {
         AppEffect::OpenEditor(request) => Some(request),
@@ -1766,6 +1867,10 @@ fn render_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {
     app.diff_pane_rows(Rect::new(0, 0, 80, 8), 80, 6, theme)
 }
 
+fn render_tall_diff_pane(app: &mut App, theme: Theme) -> DiffPaneRows {
+    app.diff_pane_rows(Rect::new(0, 0, 100, 50), 98, 48, theme)
+}
+
 fn render_sidebar(app: &mut App) -> Vec<Line<'static>> {
     app.sidebar_rows(Rect::new(0, 0, 40, 8), 38, 6, Theme::github_dark())
 }
@@ -1798,6 +1903,33 @@ fn changeset_with_file(file: DiffFile) -> Changeset {
         title: String::new(),
         source_label: String::new(),
         files: vec![file],
+    }
+}
+
+fn commit_details(id: &str, message: &str, removed_line: &str) -> CommitDetails {
+    let mut file = diff_file("sample.txt", 1);
+    file.additions = 1;
+    file.deletions = 1;
+    file.hunks[0].lines = vec![
+        DiffLine {
+            kind: DiffLineKind::Removed,
+            old_line: Some(1),
+            new_line: None,
+            content: removed_line.to_string(),
+        },
+        DiffLine {
+            kind: DiffLineKind::Added,
+            old_line: None,
+            new_line: Some(1),
+            content: "new line".to_string(),
+        },
+    ];
+    CommitDetails {
+        id: id.to_string(),
+        author: "Chunk Test".to_string(),
+        committed_at: "2026-08-04T12:00:00-04:00".to_string(),
+        message: message.to_string(),
+        changeset: changeset_with_file(file),
     }
 }
 
