@@ -56,7 +56,7 @@ impl<'a> DiffFrameRenderer<'a> {
         // Callers outside the full UI render loop (notably tests) still get
         // frame-safe hit geometry.
         self.app.selected_diff.invalidate_frame();
-        self.app.commit_details.invalidate_frame();
+        self.app.repository_review.invalidate_details_frame();
         if self.app.ask_ai_output().is_some() {
             return self.ask_ai_output_pane_rows();
         }
@@ -64,7 +64,7 @@ impl<'a> DiffFrameRenderer<'a> {
             return self.command_output_pane_rows();
         }
 
-        if self.app.commit_details.is_active() {
+        if self.app.repository_review.details_active() {
             self.commit_details_pane_rows()
         } else {
             self.review_pane_rows()
@@ -72,7 +72,7 @@ impl<'a> DiffFrameRenderer<'a> {
     }
 
     fn commit_details_pane_rows(&mut self) -> DiffPaneRows {
-        let rendered = self.app.commit_details.render(
+        let rendered = self.app.repository_review.render_details(
             self.request.area,
             self.request.content_width,
             self.request.visible_height,

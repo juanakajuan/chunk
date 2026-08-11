@@ -1,16 +1,20 @@
-//! Stateful local-branch and recent-commit panels.
+//! Stateful repository review.
 //!
 //! This module owns repository overview data, selection, scrolling, row
-//! rendering, identity-preserving reloads, copy context, and pointer geometry.
-//! `App` owns focus and translates commit selection into runtime effects.
+//! rendering, identity-preserving reloads, copy context, pointer geometry, and
+//! the selected commit-details lifecycle. `App` translates load intent for the
+//! runtime adapter.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::model::{CommitSummary, LocalBranch, RepositoryOverview};
-use crate::scroll_text::VerticalDirection;
+use crate::model::{CommitDetails, CommitSummary, LocalBranch, RepositoryOverview};
+use crate::rows;
+use crate::scroll_text::{ScrollText, VerticalDirection};
 use crate::theme::Theme;
+
+use super::FocusPane;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepositoryPane {
@@ -35,10 +39,25 @@ impl RepositoryPane {
 }
 
 #[derive(Debug)]
-pub(super) struct RepositoryPanels {
+pub(super) struct RepositoryReview {
     overview: RepositoryOverview,
     branches: RepositoryList,
     commits: RepositoryList,
+    details: CommitDetailsPane,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommitDetailsOutcome {
+    Loaded(CommitDetails),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RepositoryReviewIntent {
+    LoadCommitDetails { revision: String },
+    KeepCommitDetailsLoad,
+    ClearCommitDetailsLoad,
+    CancelCommitDetailsLoad,
 }
 
 #[derive(Debug, Default)]
@@ -87,18 +106,20 @@ impl RepositoryCopy {
     }
 }
 
-impl RepositoryPanels {
+impl RepositoryReview {
     pub(super) fn new(overview: RepositoryOverview) -> Self {
         Self {
             overview,
             branches: RepositoryList::default(),
             commits: RepositoryList::default(),
+            details: CommitDetailsPane::new(),
         }
     }
 
     pub(super) fn invalidate_frame(&mut self) {
         self.branches.viewport.invalidate();
         self.commits.viewport.invalidate();
+        self.details.invalidate_frame();
     }
 
     pub(super) fn render(&mut self, request: RepositoryPanelRender) -> Vec<Line<'static>> {
@@ -146,7 +167,10 @@ impl RepositoryPanels {
             })
     }
 
-    pub(super) fn select(&mut self, target: RepositoryPanelTarget) {
+    pub(super) fn activate_target(
+        &mut self,
+        target: RepositoryPanelTarget,
+    ) -> Option<RepositoryReviewIntent> {
         match target.pane {
             RepositoryPane::Branches => self
                 .branches
@@ -155,6 +179,9 @@ impl RepositoryPanels {
                 .commits
                 .select(target.index, self.overview.commits.len()),
         }
+        (target.pane == RepositoryPane::Commits)
+            .then(|| self.show_selected_commit())
+            .flatten()
     }
 
     pub(super) fn move_selection(
@@ -162,8 +189,8 @@ impl RepositoryPanels {
         pane: RepositoryPane,
         direction: VerticalDirection,
         amount: usize,
-    ) -> bool {
-        match pane {
+    ) -> Option<RepositoryReviewIntent> {
+        let moved = match pane {
             RepositoryPane::Branches => {
                 self.branches
                     .move_by(direction, amount, self.overview.branches.len())
@@ -172,10 +199,25 @@ impl RepositoryPanels {
                 self.commits
                     .move_by(direction, amount, self.overview.commits.len())
             }
+        };
+        (moved && pane == RepositoryPane::Commits)
+            .then(|| self.show_selected_commit())
+            .flatten()
+    }
+
+    pub(super) fn focus_changed(
+        &mut self,
+        focus: FocusPane,
+        changed: bool,
+    ) -> Option<RepositoryReviewIntent> {
+        match focus {
+            FocusPane::Sidebar if changed || self.details.is_active() => self.show_worktree_diff(),
+            FocusPane::Commits if changed => self.show_selected_commit(),
+            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits | FocusPane::Diff => None,
         }
     }
 
-    pub(super) fn selected_commit_revision(&self) -> Option<&str> {
+    fn selected_commit_revision(&self) -> Option<&str> {
         self.overview
             .commits
             .get(self.commits.selected_index)
@@ -204,7 +246,10 @@ impl RepositoryPanels {
         }
     }
 
-    pub(super) fn replace(&mut self, overview: RepositoryOverview) {
+    pub(super) fn replace(
+        &mut self,
+        overview: RepositoryOverview,
+    ) -> Option<RepositoryReviewIntent> {
         let selected_branch = self
             .overview
             .branches
@@ -240,6 +285,76 @@ impl RepositoryPanels {
             .unwrap_or(0);
         self.overview = overview;
         self.invalidate_frame();
+        self.details
+            .is_active()
+            .then(|| self.show_selected_commit())
+            .flatten()
+    }
+
+    fn show_selected_commit(&mut self) -> Option<RepositoryReviewIntent> {
+        let Some(revision) = self.selected_commit_revision().map(str::to_owned) else {
+            self.details.activate_empty();
+            return Some(RepositoryReviewIntent::ClearCommitDetailsLoad);
+        };
+        Some(if self.details.activate(&revision) {
+            RepositoryReviewIntent::LoadCommitDetails { revision }
+        } else {
+            RepositoryReviewIntent::KeepCommitDetailsLoad
+        })
+    }
+
+    fn show_worktree_diff(&mut self) -> Option<RepositoryReviewIntent> {
+        if !self.details.is_active() {
+            return None;
+        }
+        self.details.deactivate();
+        Some(RepositoryReviewIntent::CancelCommitDetailsLoad)
+    }
+
+    pub(super) fn apply_commit_details(&mut self, revision: &str, outcome: CommitDetailsOutcome) {
+        match outcome {
+            CommitDetailsOutcome::Loaded(details) => self.details.loaded(revision, details),
+            CommitDetailsOutcome::Failed(message) => self.details.failed(revision, message),
+        }
+    }
+
+    pub(super) fn details_active(&self) -> bool {
+        self.details.is_active()
+    }
+
+    pub(super) fn invalidate_details_frame(&mut self) {
+        self.details.invalidate_frame();
+    }
+
+    pub(super) fn render_details(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> RenderedCommitDetails {
+        self.details
+            .render(area, content_width, visible_height, theme)
+    }
+
+    pub(super) fn details_contains(&self, column: u16, row: u16) -> bool {
+        self.details.contains(column, row)
+    }
+
+    pub(super) fn scroll_details_page(&mut self, direction: VerticalDirection) {
+        self.details.scroll_page(direction);
+    }
+
+    pub(super) fn scroll_details_by(&mut self, direction: VerticalDirection, amount: usize) {
+        self.details.scroll_by(direction, amount);
+    }
+
+    pub(super) fn scroll_details_to_top(&mut self) {
+        self.details.scroll_to_top();
+    }
+
+    pub(super) fn scroll_details_to_bottom(&mut self) {
+        self.details.scroll_to_bottom();
     }
 }
 
@@ -436,6 +551,251 @@ fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
         && column < area.x.saturating_add(area.width).saturating_sub(1)
         && row > area.y
         && row < area.y.saturating_add(area.height).saturating_sub(1)
+}
+
+#[derive(Debug)]
+struct CommitDetailsPane {
+    active: bool,
+    state: CommitDetailsState,
+    scroll: ScrollText,
+    area: Option<Rect>,
+    render_cache: Option<CommitDetailsRenderCache>,
+}
+
+#[derive(Debug)]
+enum CommitDetailsState {
+    Empty,
+    Loading {
+        revision: String,
+    },
+    Loaded {
+        revision: String,
+        details: CommitDetails,
+    },
+    Failed {
+        revision: String,
+        message: String,
+    },
+}
+
+impl CommitDetailsState {
+    fn revision(&self) -> Option<&str> {
+        match self {
+            Self::Loading { revision }
+            | Self::Loaded { revision, .. }
+            | Self::Failed { revision, .. } => Some(revision),
+            Self::Empty => None,
+        }
+    }
+
+    fn is_loading_or_loaded(&self, revision: &str) -> bool {
+        matches!(self, Self::Loading { .. } | Self::Loaded { .. })
+            && self.revision() == Some(revision)
+    }
+}
+
+#[derive(Debug)]
+struct CommitDetailsRenderCache {
+    revision: String,
+    content_width: usize,
+    theme: Theme,
+    lines: Vec<Line<'static>>,
+}
+
+pub(super) struct RenderedCommitDetails {
+    pub(super) title: String,
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) line_scroll: usize,
+}
+
+impl CommitDetailsPane {
+    fn new() -> Self {
+        Self {
+            active: false,
+            state: CommitDetailsState::Empty,
+            scroll: ScrollText::default(),
+            area: None,
+            render_cache: None,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Activates `revision` and reports whether a background load is needed.
+    fn activate(&mut self, revision: &str) -> bool {
+        self.active = true;
+        if self.state.is_loading_or_loaded(revision) {
+            return false;
+        }
+
+        self.state = CommitDetailsState::Loading {
+            revision: revision.to_string(),
+        };
+        self.reset_content();
+        true
+    }
+
+    fn deactivate(&mut self) {
+        self.active = false;
+        self.area = None;
+        if matches!(self.state, CommitDetailsState::Loading { .. }) {
+            self.state = CommitDetailsState::Empty;
+        }
+    }
+
+    fn activate_empty(&mut self) {
+        self.active = true;
+        self.state = CommitDetailsState::Empty;
+        self.reset_content();
+    }
+
+    fn revision(&self) -> Option<&str> {
+        self.state.revision()
+    }
+
+    fn loaded(&mut self, revision: &str, details: CommitDetails) {
+        if !self.matches_active_revision(revision) {
+            return;
+        }
+        self.state = CommitDetailsState::Loaded {
+            revision: revision.to_string(),
+            details,
+        };
+        self.reset_content();
+    }
+
+    fn failed(&mut self, revision: &str, message: String) {
+        if !self.matches_active_revision(revision) {
+            return;
+        }
+        self.state = CommitDetailsState::Failed {
+            revision: revision.to_string(),
+            message,
+        };
+        self.reset_content();
+    }
+
+    fn matches_active_revision(&self, revision: &str) -> bool {
+        self.active && self.revision().is_some_and(|current| current == revision)
+    }
+
+    fn reset_content(&mut self) {
+        self.scroll = ScrollText::default();
+        self.render_cache = None;
+        self.area = None;
+    }
+
+    fn invalidate_frame(&mut self) {
+        self.area = None;
+    }
+
+    fn render(
+        &mut self,
+        area: Rect,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> RenderedCommitDetails {
+        self.area = Some(area);
+        let title = self.title();
+        let (lines, line_scroll) = self.visible_lines(content_width, visible_height, theme);
+        RenderedCommitDetails {
+            title,
+            lines,
+            line_scroll,
+        }
+    }
+
+    fn title(&self) -> String {
+        let revision = self.revision().unwrap_or("commit");
+        format!(" Commit {} ", &revision[..revision.len().min(12)])
+    }
+
+    fn visible_lines(
+        &mut self,
+        content_width: usize,
+        visible_height: usize,
+        theme: Theme,
+    ) -> (Vec<Line<'static>>, usize) {
+        match &self.state {
+            CommitDetailsState::Empty => {
+                let lines = rows::no_diff_lines("No commit selected.", content_width, theme);
+                Self::visible_lines_from(&mut self.scroll, &lines, visible_height)
+            }
+            CommitDetailsState::Loading { .. } => {
+                let lines = rows::no_diff_lines("Loading commit details...", content_width, theme);
+                Self::visible_lines_from(&mut self.scroll, &lines, visible_height)
+            }
+            CommitDetailsState::Failed { message, .. } => {
+                let message = format!("Git error: {message}");
+                let lines = rows::live_status_lines(Some(&message), None, content_width, theme);
+                Self::visible_lines_from(&mut self.scroll, &lines, visible_height)
+            }
+            CommitDetailsState::Loaded { details, .. } => {
+                if !self.render_cache.as_ref().is_some_and(|cache| {
+                    cache.revision == details.id
+                        && cache.content_width == content_width
+                        && cache.theme == theme
+                }) {
+                    self.render_cache = Some(CommitDetailsRenderCache {
+                        revision: details.id.clone(),
+                        content_width,
+                        theme,
+                        lines: rows::commit_details_lines(details, content_width, theme),
+                    });
+                }
+                let lines = &self
+                    .render_cache
+                    .as_ref()
+                    .expect("loaded commit details must have a render cache")
+                    .lines;
+                Self::visible_lines_from(&mut self.scroll, lines, visible_height)
+            }
+        }
+    }
+
+    fn visible_lines_from(
+        scroll: &mut ScrollText,
+        lines: &[Line<'static>],
+        visible_height: usize,
+    ) -> (Vec<Line<'static>>, usize) {
+        scroll.sync(lines.len(), visible_height);
+        let line_scroll = scroll.offset();
+        let visible_lines = lines
+            .iter()
+            .skip(line_scroll)
+            .take(visible_height)
+            .cloned()
+            .collect();
+        (visible_lines, line_scroll)
+    }
+
+    fn contains(&self, column: u16, row: u16) -> bool {
+        self.area.is_some_and(|area| {
+            column >= area.x
+                && column < area.x.saturating_add(area.width)
+                && row >= area.y
+                && row < area.y.saturating_add(area.height)
+        })
+    }
+
+    fn scroll_page(&mut self, direction: VerticalDirection) {
+        self.scroll.scroll_by(direction, self.scroll.page());
+    }
+
+    fn scroll_by(&mut self, direction: VerticalDirection, amount: usize) {
+        self.scroll.scroll_by(direction, amount);
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll.scroll_to_top();
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.scroll.scroll_to_bottom();
+    }
 }
 
 #[cfg(test)]

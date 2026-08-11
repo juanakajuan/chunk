@@ -19,7 +19,7 @@ use crate::config::AppConfig;
 use crate::custom_command::{CustomCommandBinding, CustomCommandResult};
 use crate::editor::EditorRequest;
 use crate::keybind::{BuiltinAction, KeybindMap};
-use crate::model::{Changeset, CommitDetails, DiffFile, FileStage, RepositoryOverview};
+use crate::model::{Changeset, DiffFile, FileStage, RepositoryOverview};
 use crate::patch;
 use crate::review_source::{LoadedReview, ReviewSource, WorktreeMutation};
 use crate::rows;
@@ -28,25 +28,25 @@ use crate::selection::TextSelection;
 use crate::theme::{Theme, ThemeName};
 use crate::viewport::DiffScrollbar;
 
-mod commit_details_pane;
 mod diff_frame;
 mod files_panel;
 mod focused_review_target;
 mod keys;
 mod overlay;
-mod repository_panels;
+mod repository_review;
 mod selected_diff;
 
 pub(crate) use keys::accepts_text_input;
 pub(crate) use overlay::AiPickerField;
-pub(crate) use repository_panels::RepositoryPane;
+pub(crate) use repository_review::{CommitDetailsOutcome, RepositoryPane};
 
-use commit_details_pane::CommitDetailsPane;
 use files_panel::{FilesPanel, FilesPanelRender, FilesPanelTarget};
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
-use repository_panels::{RepositoryPanelRender, RepositoryPanelTarget, RepositoryPanels};
+use repository_review::{
+    RepositoryPanelRender, RepositoryPanelTarget, RepositoryReview, RepositoryReviewIntent,
+};
 use selected_diff::SelectedDiffPane;
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -181,12 +181,6 @@ pub(crate) enum AppEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CommitDetailsOutcome {
-    Loaded(CommitDetails),
-    Failed(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EditorOutcome {
     Completed,
     Failed(String),
@@ -240,8 +234,8 @@ pub(crate) struct App {
     source: ReviewSource,
     /// Current diff data being reviewed.
     changeset: Changeset,
-    /// Read-only local branches and recent commits shown below Files.
-    repository_panels: RepositoryPanels,
+    /// Read-only repository selection and selected commit-details lifecycle.
+    repository_review: RepositoryReview,
     /// Last live reload/watch error, rendered above the diff when present.
     live_error: Option<String>,
     /// Transient successful background/status event rendered above the diff.
@@ -251,8 +245,6 @@ pub(crate) struct App {
     files_panel: FilesPanel,
     /// Selected review diff, including navigation, search, rendering, and geometry.
     selected_diff: SelectedDiffPane,
-    /// Read-only details for the commit selected in the repository panel.
-    commit_details: CommitDetailsPane,
     /// Pane receiving keyboard and mouse wheel actions.
     focus: FocusPane,
     /// Whether the files sidebar is visible in the current session.
@@ -296,17 +288,16 @@ impl App {
         } = review;
         let selected_diff = SelectedDiffPane::new(&changeset);
         let files_panel = FilesPanel::new(&changeset.files);
-        let repository_panels = RepositoryPanels::new(repository_overview);
+        let repository_review = RepositoryReview::new(repository_overview);
         Self {
             source,
             changeset,
-            repository_panels,
+            repository_review,
             live_error: None,
             live_notice: None,
             live_notice_expires_at: None,
             files_panel,
             selected_diff,
-            commit_details: CommitDetailsPane::new(),
             focus: FocusPane::Sidebar,
             files_panel_visible: true,
             overlay: None,
@@ -321,10 +312,9 @@ impl App {
     }
 
     pub(crate) fn begin_render_frame(&mut self) {
-        self.repository_panels.invalidate_frame();
+        self.repository_review.invalidate_frame();
         self.files_panel.invalidate_frame();
         self.selected_diff.invalidate_frame();
-        self.commit_details.invalidate_frame();
         self.text_selection.begin_frame();
     }
 
@@ -378,7 +368,7 @@ impl App {
         visible_height: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let lines = self.repository_panels.render(RepositoryPanelRender {
+        let lines = self.repository_review.render(RepositoryPanelRender {
             pane,
             area,
             content_width,
@@ -474,11 +464,11 @@ impl App {
     }
 
     fn can_stage(&self) -> bool {
-        !self.commit_details.is_active() && self.source.worktree_mutations().is_some()
+        !self.repository_review.details_active() && self.source.worktree_mutations().is_some()
     }
 
     fn can_discard(&self) -> bool {
-        !self.commit_details.is_active() && self.source.worktree_mutations().is_some()
+        !self.repository_review.details_active() && self.source.worktree_mutations().is_some()
     }
 
     fn stage_keybind_hint(&self) -> Option<&'static str> {
@@ -516,7 +506,7 @@ impl App {
     }
 
     fn focused_review_target(&self) -> FocusedReviewTarget<'_> {
-        let focus = if self.commit_details.is_active() {
+        let focus = if self.repository_review.details_active() {
             FocusPane::Commits
         } else {
             self.focus
@@ -568,14 +558,9 @@ impl App {
 
     pub(crate) fn handle_runtime_event(&mut self, event: RuntimeEvent) {
         match event {
-            RuntimeEvent::CommitDetailsFinished { revision, outcome } => match outcome {
-                CommitDetailsOutcome::Loaded(details) => {
-                    self.commit_details.loaded(&revision, details)
-                }
-                CommitDetailsOutcome::Failed(message) => {
-                    self.commit_details.failed(&revision, message)
-                }
-            },
+            RuntimeEvent::CommitDetailsFinished { revision, outcome } => self
+                .repository_review
+                .apply_commit_details(&revision, outcome),
             RuntimeEvent::EditorFinished(EditorOutcome::Completed) => {
                 self.reload_review_source(true);
             }
@@ -640,45 +625,44 @@ impl App {
         self.effects.push_back(AppEffect::OpenEditor(request));
     }
 
-    fn show_selected_commit(&mut self) {
-        let Some(revision) = self
-            .repository_panels
-            .selected_commit_revision()
-            .map(str::to_owned)
-        else {
-            self.commit_details.activate_empty();
-            self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
+    fn apply_repository_review_intent(&mut self, intent: Option<RepositoryReviewIntent>) {
+        let Some(intent) = intent else {
             return;
         };
-
-        self.clear_effects(|effect| matches!(effect, AppEffect::CancelCommitDetailsLoad));
-        if !self.commit_details.activate(&revision) {
-            return;
+        match intent {
+            RepositoryReviewIntent::LoadCommitDetails { revision } => {
+                self.clear_effects(|effect| {
+                    matches!(
+                        effect,
+                        AppEffect::LoadCommitDetails { .. } | AppEffect::CancelCommitDetailsLoad
+                    )
+                });
+                self.effects
+                    .push_back(AppEffect::LoadCommitDetails { revision });
+            }
+            RepositoryReviewIntent::KeepCommitDetailsLoad => {
+                self.clear_effects(|effect| matches!(effect, AppEffect::CancelCommitDetailsLoad));
+            }
+            RepositoryReviewIntent::ClearCommitDetailsLoad => {
+                self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
+            }
+            RepositoryReviewIntent::CancelCommitDetailsLoad => {
+                self.clear_effects(|effect| {
+                    matches!(
+                        effect,
+                        AppEffect::LoadCommitDetails { .. } | AppEffect::CancelCommitDetailsLoad
+                    )
+                });
+                self.effects.push_back(AppEffect::CancelCommitDetailsLoad);
+            }
         }
-        self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
-        self.effects
-            .push_back(AppEffect::LoadCommitDetails { revision });
-    }
-
-    fn show_worktree_diff(&mut self) {
-        if !self.commit_details.is_active() {
-            return;
-        }
-        self.commit_details.deactivate();
-        self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
-        self.effects.push_back(AppEffect::CancelCommitDetailsLoad);
     }
 
     fn set_focus(&mut self, focus: FocusPane) {
         let changed = self.focus != focus;
         self.focus = focus;
-        match focus {
-            FocusPane::Sidebar if changed || self.commit_details.is_active() => {
-                self.show_worktree_diff()
-            }
-            FocusPane::Commits if changed => self.show_selected_commit(),
-            FocusPane::Sidebar | FocusPane::Branches | FocusPane::Commits | FocusPane::Diff => {}
-        }
+        let intent = self.repository_review.focus_changed(focus, changed);
+        self.apply_repository_review_intent(intent);
     }
 
     fn queue_custom_command_effect(&mut self, command: CustomCommandBinding) {
@@ -754,11 +738,8 @@ impl App {
     }
 
     fn apply_repository_overview(&mut self, repository_overview: RepositoryOverview) {
-        let commit_details_active = self.commit_details.is_active();
-        self.repository_panels.replace(repository_overview);
-        if commit_details_active {
-            self.show_selected_commit();
-        }
+        let intent = self.repository_review.replace(repository_overview);
+        self.apply_repository_review_intent(intent);
     }
 
     fn apply_reloaded_changeset(&mut self, changeset: Changeset, preserve_scroll: bool) {
@@ -1016,12 +997,12 @@ impl App {
             PendingLeftClick::Repository { target } => {
                 let pane = target.pane();
                 self.set_focus(pane.focus());
-                self.repository_panels.select(target);
-                self.refresh_repository_selection(pane);
+                let intent = self.repository_review.activate_target(target);
+                self.apply_repository_review_intent(intent);
             }
             PendingLeftClick::Diff { hunk_index } => {
                 self.set_focus(FocusPane::Diff);
-                if !self.commit_details.is_active()
+                if !self.repository_review.details_active()
                     && let Some(index) = hunk_index
                 {
                     let selected_file_index = self.selected_file_index();
@@ -1049,7 +1030,7 @@ impl App {
             return Some(PendingLeftClick::Sidebar { target });
         }
 
-        if let Some(target) = self.repository_panels.target_at(column, row) {
+        if let Some(target) = self.repository_review.target_at(column, row) {
             return Some(PendingLeftClick::Repository { target });
         }
 
@@ -1089,7 +1070,7 @@ impl App {
             return Some(FocusPane::Sidebar);
         }
 
-        if let Some(pane) = self.repository_panels.pane_at(column, row) {
+        if let Some(pane) = self.repository_review.pane_at(column, row) {
             return Some(pane.focus());
         }
 
@@ -1097,15 +1078,15 @@ impl App {
     }
 
     fn is_diff_at(&self, column: u16, row: u16) -> bool {
-        if self.commit_details.is_active() {
-            self.commit_details.contains(column, row)
+        if self.repository_review.details_active() {
+            self.repository_review.details_contains(column, row)
         } else {
             self.selected_diff.contains(column, row)
         }
     }
 
     fn diff_hunk_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        if self.commit_details.is_active() {
+        if self.repository_review.details_active() {
             return None;
         }
         let selected_file_index = self.selected_file_index();
@@ -1295,12 +1276,12 @@ impl App {
     fn focused_repository_copy(&self) -> Option<(String, &'static str)> {
         self.focus
             .repository_pane()
-            .and_then(|pane| self.repository_panels.copy(pane))
+            .and_then(|pane| self.repository_review.copy(pane))
             .map(|copy| copy.into_parts())
     }
 
     fn queue_selected_file_diff_copy(&mut self) {
-        if self.commit_details.is_active() {
+        if self.repository_review.details_active() {
             self.set_copy_error("no worktree file diff is active");
             return;
         }
@@ -1380,18 +1361,10 @@ impl App {
         direction: VerticalDirection,
         amount: usize,
     ) {
-        if self
-            .repository_panels
-            .move_selection(pane, direction, amount)
-        {
-            self.refresh_repository_selection(pane);
-        }
-    }
-
-    fn refresh_repository_selection(&mut self, pane: RepositoryPane) {
-        if pane == RepositoryPane::Commits {
-            self.show_selected_commit();
-        }
+        let intent = self
+            .repository_review
+            .move_selection(pane, direction, amount);
+        self.apply_repository_review_intent(intent);
     }
 
     fn move_sidebar_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
@@ -1410,8 +1383,8 @@ impl App {
     }
 
     fn scroll_diff_page(&mut self, direction: VerticalDirection) {
-        if self.commit_details.is_active() {
-            self.commit_details.scroll_page(direction);
+        if self.repository_review.details_active() {
+            self.repository_review.scroll_details_page(direction);
             return;
         }
         let selected_file_index = self.selected_file_index();
@@ -1423,8 +1396,8 @@ impl App {
     }
 
     fn scroll_diff_by(&mut self, direction: VerticalDirection, amount: usize) {
-        if self.commit_details.is_active() {
-            self.commit_details.scroll_by(direction, amount);
+        if self.repository_review.details_active() {
+            self.repository_review.scroll_details_by(direction, amount);
             return;
         }
         let selected_file_index = self.selected_file_index();
@@ -1437,7 +1410,7 @@ impl App {
     }
 
     fn scroll_diff_to(&mut self, scroll: usize) {
-        if self.commit_details.is_active() {
+        if self.repository_review.details_active() {
             return;
         }
         let selected_file_index = self.selected_file_index();
@@ -1449,8 +1422,8 @@ impl App {
     }
 
     fn scroll_diff_to_top(&mut self) {
-        if self.commit_details.is_active() {
-            self.commit_details.scroll_to_top();
+        if self.repository_review.details_active() {
+            self.repository_review.scroll_details_to_top();
             return;
         }
         let selected_file_index = self.selected_file_index();
@@ -1461,8 +1434,8 @@ impl App {
     }
 
     fn scroll_diff_to_bottom(&mut self) {
-        if self.commit_details.is_active() {
-            self.commit_details.scroll_to_bottom();
+        if self.repository_review.details_active() {
+            self.repository_review.scroll_details_to_bottom();
             return;
         }
         let selected_file_index = self.selected_file_index();
@@ -1498,7 +1471,7 @@ impl App {
     }
 
     fn toggle_selected_file_reviewed(&mut self) {
-        if self.commit_details.is_active() {
+        if self.repository_review.details_active() {
             return;
         }
         self.files_panel
@@ -1704,7 +1677,7 @@ impl App {
     }
 
     fn queue_selected_file_editor_request(&mut self) {
-        if self.commit_details.is_active() {
+        if self.repository_review.details_active() {
             self.live_error = Some("no worktree file is active".to_string());
             return;
         }

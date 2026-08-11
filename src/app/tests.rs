@@ -381,16 +381,8 @@ fn repository_panel_scroll_keeps_keyboard_selection_visible() {
 #[test]
 fn repository_reload_preserves_selected_identities_after_reordering() {
     let mut app = app_with_repository_overview();
-    assert!(app.repository_panels.move_selection(
-        RepositoryPane::Branches,
-        VerticalDirection::Down,
-        1,
-    ));
-    assert!(app.repository_panels.move_selection(
-        RepositoryPane::Commits,
-        VerticalDirection::Down,
-        1,
-    ));
+    app.move_repository_selection_by(RepositoryPane::Branches, VerticalDirection::Down, 1);
+    app.move_repository_selection_by(RepositoryPane::Commits, VerticalDirection::Down, 1);
 
     app.apply_repository_overview(RepositoryOverview {
         branches: vec![
@@ -1965,7 +1957,7 @@ fn render_repository_panels(app: &mut App, visible_height: usize) {
 
 fn assert_repository_copy(app: &App, pane: RepositoryPane, expected: &str) {
     let copy = app
-        .repository_panels
+        .repository_review
         .copy(pane)
         .expect("repository selection should be copyable");
     assert_eq!(copy.into_parts().0, expected);
