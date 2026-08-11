@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -52,6 +53,7 @@ use selected_diff::SelectedDiffPane;
 
 const MOUSE_WHEEL_STEP: usize = 3;
 const HELP_OVERLAY_SCROLL_PAGE: usize = 8;
+const LIVE_NOTICE_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FocusPane {
@@ -244,8 +246,9 @@ pub(crate) struct App {
     repository_panels: RepositoryPanels,
     /// Last live reload/watch error, rendered above the diff when present.
     live_error: Option<String>,
-    /// Last successful background/status event, rendered above the diff.
+    /// Transient successful background/status event rendered above the diff.
     live_notice: Option<String>,
+    live_notice_expires_at: Option<Instant>,
     /// Changed-files tree, including selected file, cursor, and panel geometry.
     files_panel: FilesPanel,
     /// Selected review diff, including navigation, search, rendering, and geometry.
@@ -302,6 +305,7 @@ impl App {
             repository_panels,
             live_error: None,
             live_notice: None,
+            live_notice_expires_at: None,
             files_panel,
             selected_diff,
             commit_details: CommitDetailsPane::new(),
@@ -536,13 +540,32 @@ impl App {
     }
 
     pub(crate) fn set_live_error(&mut self, error: String) {
-        self.live_notice = None;
+        self.clear_live_notice();
         self.live_error = Some(error);
     }
 
     pub(crate) fn set_live_notice(&mut self, notice: String) {
         self.live_error = None;
         self.live_notice = Some(notice);
+        self.live_notice_expires_at = Some(Instant::now() + LIVE_NOTICE_DURATION);
+    }
+
+    pub(crate) fn expire_live_notice(&mut self) {
+        self.expire_live_notice_at(Instant::now());
+    }
+
+    fn expire_live_notice_at(&mut self, now: Instant) {
+        if self
+            .live_notice_expires_at
+            .is_some_and(|expires_at| now >= expires_at)
+        {
+            self.clear_live_notice();
+        }
+    }
+
+    fn clear_live_notice(&mut self) {
+        self.live_notice = None;
+        self.live_notice_expires_at = None;
     }
 
     pub(crate) fn handle_runtime_event(&mut self, event: RuntimeEvent) {
@@ -861,6 +884,10 @@ impl App {
         // A running command blocks mouse input until it finishes or is cancelled.
         if matches!(self.overlay, Some(Overlay::CommandRunning { .. })) {
             return;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.clear_live_notice();
         }
 
         if self.overlay.is_some() {
@@ -1293,13 +1320,13 @@ impl App {
 
     fn queue_clipboard_text(&mut self, text: String, success_message: &'static str) {
         self.live_error = None;
-        self.live_notice = None;
+        self.clear_live_notice();
         self.queue_clipboard_effect(ClipboardRequest::new(text, success_message));
     }
 
     fn set_copy_error(&mut self, message: &'static str) {
         self.clear_clipboard_effect();
-        self.live_notice = None;
+        self.clear_live_notice();
         self.live_error = Some(message.to_string());
     }
 

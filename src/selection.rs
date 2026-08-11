@@ -397,9 +397,10 @@ impl SelectionRange {
 
 fn highlight_line_selection(line: &mut Line<'static>, columns: SelectedColumns, theme: Theme) {
     let mut spans = Vec::new();
+    let mut display_col = 0;
 
     for span in std::mem::take(&mut line.spans) {
-        for character in display_chars(span.content.as_ref()) {
+        for character in display_chars(span.content.as_ref(), &mut display_col) {
             let style = if columns.overlaps_display_char(character) {
                 span.style
                     .bg(theme.accent)
@@ -417,8 +418,9 @@ fn highlight_line_selection(line: &mut Line<'static>, columns: SelectedColumns, 
 
 fn text_by_display_columns(text: &str, columns: SelectedColumns) -> String {
     let mut output = String::new();
+    let mut display_col = 0;
 
-    for character in display_chars(text) {
+    for character in display_chars(text, &mut display_col) {
         if character.start_col >= usize::from(columns.end_col) {
             break;
         }
@@ -438,13 +440,14 @@ struct DisplayChar {
     end_col: usize,
 }
 
-fn display_chars(text: &str) -> impl Iterator<Item = DisplayChar> + '_ {
-    let mut display_col = 0;
-
+fn display_chars<'a>(
+    text: &'a str,
+    display_col: &'a mut usize,
+) -> impl Iterator<Item = DisplayChar> + 'a {
     text.chars().map(move |value| {
-        let char_start = display_col;
+        let char_start = *display_col;
         let char_end = char_start + char_display_width(value).max(1);
-        display_col = char_end;
+        *display_col = char_end;
         DisplayChar {
             value,
             start_col: char_start,
@@ -542,6 +545,35 @@ mod tests {
                 .iter()
                 .any(|span| span.content.as_ref() == "a" && span.style.bg != Some(theme.accent))
         );
+    }
+
+    #[test]
+    fn selection_highlight_tracks_columns_across_styled_spans() {
+        let mut selection = TextSelection::default();
+        let theme = Theme::github_dark();
+        let line = Line::from(vec![
+            Span::raw("ab"),
+            Span::styled("cd", Style::default().fg(theme.accent)),
+            Span::raw("ef"),
+        ]);
+
+        selection.begin_frame();
+        let _ = selection.decorate_visible_lines(
+            Rect::new(0, 0, 6, 1),
+            vec![line.clone()],
+            0,
+            1,
+            theme,
+        );
+        assert!(selection.begin_drag(1, 0));
+        assert!(selection.update_drag(2, 0));
+
+        let lines =
+            selection.decorate_visible_lines(Rect::new(0, 0, 6, 1), vec![line], 0, 1, theme);
+
+        assert_eq!(highlighted_text(&lines), "bc");
+        assert!(selection.finish_drag(2, 0));
+        assert_eq!(selection.take_clipboard_request().as_deref(), Some("bc"));
     }
 
     #[test]

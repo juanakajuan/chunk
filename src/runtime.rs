@@ -441,6 +441,7 @@ fn run_loop(terminal: &mut TuiTerminal, app: &mut App) -> Result<()> {
         handle_app_effects(terminal, app, &mut background_tasks)?;
         app.advance_custom_command_spinner();
         app.advance_ask_ai_spinner();
+        app.expire_live_notice();
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if let Some(event) = drain_live_worktree_events(watcher.as_ref(), &mut pending_reload_at) {

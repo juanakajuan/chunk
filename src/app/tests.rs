@@ -713,6 +713,40 @@ fn text_drag_requests_clipboard_copy() {
 }
 
 #[test]
+fn copied_text_notice_expires() {
+    let mut app = app_with(changeset_with_one_file());
+    let request = ClipboardRequest::new("new text".to_string(), "copied selected text");
+
+    app.handle_runtime_event(RuntimeEvent::ClipboardWriteFinished(
+        ClipboardWriteResult::completed(request),
+    ));
+
+    let expires_at = app
+        .live_notice_expires_at
+        .expect("copy notice should have an expiration");
+    assert_eq!(app.live_notice.as_deref(), Some("copied selected text"));
+
+    app.expire_live_notice_at(expires_at);
+
+    assert!(app.live_notice.is_none());
+}
+
+#[test]
+fn new_mouse_selection_dismisses_previous_copy_notice() {
+    let mut app = app_with(changeset_with_one_file());
+    app.set_live_notice("copied selected text".to_string());
+
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(app.live_notice.is_none());
+}
+
+#[test]
 fn sidebar_y_copies_selected_file_path() {
     let mut app = app_with(changeset_with_paths(["a.txt", "b.txt"]));
     app.files_panel
