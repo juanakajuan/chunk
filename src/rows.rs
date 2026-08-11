@@ -19,13 +19,11 @@ mod diff;
 mod file_summary;
 mod intraline;
 mod markdown;
-mod repository;
 mod sidebar;
 mod text;
 
 pub(crate) use commit_details::commit_details_lines;
 pub(crate) use diff::{diff_layout_counts, diff_lines_until, selected_hunk_header_rows};
-pub(crate) use repository::{branch_lines, commit_lines};
 pub(crate) use sidebar::{render_sidebar_empty, render_sidebar_file, render_sidebar_folder};
 
 use text::{color_style, display_width, muted_line, wrap_line, wrap_styled_spans};

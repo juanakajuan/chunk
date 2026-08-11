@@ -1,20 +1,9 @@
-//! Rendered viewport geometry for terminal panes.
+//! Rendered viewport geometry for the selected diff.
 //!
-//! This module owns terminal geometry and row hit-testing. The application
-//! viewport tracks the navigation panels, while `DiffViewport` is owned by the
-//! selected-diff module together with its scrollbar interaction state.
+//! `DiffViewport` is owned by the selected-diff module together with its
+//! scrollbar interaction state.
 
 use ratatui::layout::Rect;
-
-#[derive(Debug)]
-pub struct RenderedViewport {
-    /// Last branches rectangle and its visible item range.
-    branches_area: Option<Rect>,
-    branches_row_indices: Vec<usize>,
-    /// Last commits rectangle and its visible item range.
-    commits_area: Option<Rect>,
-    commits_row_indices: Vec<usize>,
-}
 
 #[derive(Debug)]
 pub struct DiffViewport {
@@ -44,52 +33,6 @@ pub struct DiffScrollbarThumb {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffScrollbarDrag {
     thumb_offset: usize,
-}
-
-impl RenderedViewport {
-    pub fn new() -> Self {
-        Self {
-            branches_area: None,
-            branches_row_indices: Vec::new(),
-            commits_area: None,
-            commits_row_indices: Vec::new(),
-        }
-    }
-
-    pub fn begin_frame(&mut self) {
-        self.branches_area = None;
-        self.branches_row_indices.clear();
-        self.commits_area = None;
-        self.commits_row_indices.clear();
-    }
-
-    pub fn begin_branches(&mut self, area: Rect, first_index: usize, row_count: usize) {
-        self.branches_area = Some(area);
-        self.branches_row_indices = (first_index..first_index.saturating_add(row_count)).collect();
-    }
-
-    pub fn begin_commits(&mut self, area: Rect, first_index: usize, row_count: usize) {
-        self.commits_area = Some(area);
-        self.commits_row_indices = (first_index..first_index.saturating_add(row_count)).collect();
-    }
-
-    pub fn branch_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        panel_index_at(self.branches_area?, &self.branches_row_indices, column, row)
-    }
-
-    pub fn commit_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        panel_index_at(self.commits_area?, &self.commits_row_indices, column, row)
-    }
-
-    pub fn is_branches_at(&self, column: u16, row: u16) -> bool {
-        self.branches_area
-            .is_some_and(|area| rect_contains(area, column, row))
-    }
-
-    pub fn is_commits_at(&self, column: u16, row: u16) -> bool {
-        self.commits_area
-            .is_some_and(|area| rect_contains(area, column, row))
-    }
 }
 
 impl DiffViewport {
@@ -274,15 +217,6 @@ fn rect_inner_contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height).saturating_sub(1)
 }
 
-fn panel_index_at(area: Rect, row_indices: &[usize], column: u16, row: u16) -> Option<usize> {
-    if !rect_inner_contains(area, column, row) {
-        return None;
-    }
-
-    let row_offset = row.saturating_sub(area.y + 1) as usize;
-    row_indices.get(row_offset).copied()
-}
-
 fn ratio_ceil(value: usize, numerator: usize, denominator: usize) -> usize {
     if denominator == 0 {
         return 0;
@@ -307,18 +241,6 @@ fn ratio_round(value: usize, numerator: usize, denominator: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repository_panel_mapping_includes_scroll_offset() {
-        let mut viewport = RenderedViewport::new();
-        viewport.begin_branches(Rect::new(0, 4, 20, 5), 3, 3);
-        viewport.begin_commits(Rect::new(0, 9, 20, 4), 8, 2);
-
-        assert_eq!(viewport.branch_index_at(1, 5), Some(3));
-        assert_eq!(viewport.branch_index_at(1, 7), Some(5));
-        assert_eq!(viewport.commit_index_at(1, 10), Some(8));
-        assert_eq!(viewport.commit_index_at(1, 12), None);
-    }
 
     #[test]
     fn diff_scrollbar_thumb_reflects_scroll_and_visible_rows() {

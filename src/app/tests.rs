@@ -147,7 +147,7 @@ fn repository_panes_have_independent_keyboard_selection_and_copy() {
     app.focus = FocusPane::Branches;
 
     press_key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.selected_branch_index, 1);
+    assert_repository_copy(&app, RepositoryPane::Branches, "topic");
     press_key(&mut app, KeyCode::Char('y'));
     let branch_copy = take_clipboard_request(&mut app).unwrap();
     assert_eq!(branch_copy.text(), "topic");
@@ -155,7 +155,7 @@ fn repository_panes_have_independent_keyboard_selection_and_copy() {
 
     app.focus = FocusPane::Commits;
     press_key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.selected_commit_index, 1);
+    assert_repository_copy(&app, RepositoryPane::Commits, "def5678");
     press_key(&mut app, KeyCode::Char('y'));
     let commit_copy = take_clipboard_request(&mut app).unwrap();
     assert_eq!(commit_copy.text(), "def5678");
@@ -266,7 +266,13 @@ fn only_the_focused_list_pane_highlights_its_selection() {
     let theme = Theme::github_dark();
 
     let files = render_sidebar(&mut app);
-    let branches = app.branch_panel_rows(Rect::new(0, 4, 40, 4), 38, 2, theme);
+    let branches = app.repository_panel_rows(
+        RepositoryPane::Branches,
+        Rect::new(0, 4, 40, 4),
+        38,
+        2,
+        theme,
+    );
     assert!(files.iter().any(|line| {
         line.spans
             .iter()
@@ -280,8 +286,20 @@ fn only_the_focused_list_pane_highlights_its_selection() {
 
     app.focus = FocusPane::Branches;
     let files = render_sidebar(&mut app);
-    let branches = app.branch_panel_rows(Rect::new(0, 4, 40, 4), 38, 2, theme);
-    let commits = app.commit_panel_rows(Rect::new(0, 9, 40, 4), 38, 2, theme);
+    let branches = app.repository_panel_rows(
+        RepositoryPane::Branches,
+        Rect::new(0, 4, 40, 4),
+        38,
+        2,
+        theme,
+    );
+    let commits = app.repository_panel_rows(
+        RepositoryPane::Commits,
+        Rect::new(0, 9, 40, 4),
+        38,
+        2,
+        theme,
+    );
     assert!(files.iter().all(|line| {
         line.spans
             .iter()
@@ -308,7 +326,7 @@ fn repository_panel_mouse_selects_and_scrolls_the_pointed_list() {
     app.handle_left_down(1, 11);
     app.handle_left_up(1, 11);
     assert_eq!(app.focus, FocusPane::Commits);
-    assert_eq!(app.selected_commit_index, 1);
+    assert_repository_copy(&app, RepositoryPane::Commits, "def5678");
     assert_eq!(take_commit_load(&mut app).as_deref(), Some("def5678"));
 
     app.handle_mouse(MouseEvent {
@@ -318,14 +336,15 @@ fn repository_panel_mouse_selects_and_scrolls_the_pointed_list() {
         modifiers: KeyModifiers::NONE,
     });
     assert_eq!(app.focus, FocusPane::Branches);
-    assert_eq!(app.selected_branch_index, 1);
-    assert_eq!(app.selected_commit_index, 1);
+    assert_repository_copy(&app, RepositoryPane::Branches, "topic");
+    assert_repository_copy(&app, RepositoryPane::Commits, "def5678");
 }
 
 #[test]
 fn repository_panel_scroll_keeps_keyboard_selection_visible() {
     let mut app = app_with_repository_overview();
-    app.repository_overview.branches.extend([
+    let mut overview = repository_overview();
+    overview.branches.extend([
         LocalBranch {
             name: "release".to_string(),
             current: false,
@@ -335,15 +354,21 @@ fn repository_panel_scroll_keeps_keyboard_selection_visible() {
             current: false,
         },
     ]);
+    app.apply_repository_overview(overview);
     app.focus = FocusPane::Branches;
     for _ in 0..3 {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
     }
 
-    let lines = app.branch_panel_rows(Rect::new(0, 4, 40, 4), 38, 2, Theme::github_dark());
+    let lines = app.repository_panel_rows(
+        RepositoryPane::Branches,
+        Rect::new(0, 4, 40, 4),
+        38,
+        2,
+        Theme::github_dark(),
+    );
 
-    assert_eq!(app.branch_scroll, 2);
     assert_eq!(line_text(&lines[1]).trim_end(), "  next");
     assert!(
         lines[1]
@@ -356,8 +381,16 @@ fn repository_panel_scroll_keeps_keyboard_selection_visible() {
 #[test]
 fn repository_reload_preserves_selected_identities_after_reordering() {
     let mut app = app_with_repository_overview();
-    app.selected_branch_index = 1;
-    app.selected_commit_index = 1;
+    assert!(app.repository_panels.move_selection(
+        RepositoryPane::Branches,
+        VerticalDirection::Down,
+        1,
+    ));
+    assert!(app.repository_panels.move_selection(
+        RepositoryPane::Commits,
+        VerticalDirection::Down,
+        1,
+    ));
 
     app.apply_repository_overview(RepositoryOverview {
         branches: vec![
@@ -382,8 +415,8 @@ fn repository_reload_preserves_selected_identities_after_reordering() {
         ],
     });
 
-    assert_eq!(app.selected_branch_index, 0);
-    assert_eq!(app.selected_commit_index, 0);
+    assert_repository_copy(&app, RepositoryPane::Branches, "topic");
+    assert_repository_copy(&app, RepositoryPane::Commits, "def5678");
 }
 
 #[test]
@@ -1648,29 +1681,33 @@ fn app_with_ask_ai_review() -> App {
 fn app_with_repository_overview() -> App {
     App::new(LoadedReview::worktree_with_repository_overview(
         changeset_with_one_file(),
-        RepositoryOverview {
-            branches: vec![
-                LocalBranch {
-                    name: "main".to_string(),
-                    current: true,
-                },
-                LocalBranch {
-                    name: "topic".to_string(),
-                    current: false,
-                },
-            ],
-            commits: vec![
-                CommitSummary {
-                    short_id: "abc1234".to_string(),
-                    subject: "First".to_string(),
-                },
-                CommitSummary {
-                    short_id: "def5678".to_string(),
-                    subject: "Second".to_string(),
-                },
-            ],
-        },
+        repository_overview(),
     ))
+}
+
+fn repository_overview() -> RepositoryOverview {
+    RepositoryOverview {
+        branches: vec![
+            LocalBranch {
+                name: "main".to_string(),
+                current: true,
+            },
+            LocalBranch {
+                name: "topic".to_string(),
+                current: false,
+            },
+        ],
+        commits: vec![
+            CommitSummary {
+                short_id: "abc1234".to_string(),
+                subject: "First".to_string(),
+            },
+            CommitSummary {
+                short_id: "def5678".to_string(),
+                subject: "Second".to_string(),
+            },
+        ],
+    }
 }
 
 fn drive_harness_picker(app: &mut App, keys: &[KeyCode]) {
@@ -1876,18 +1913,28 @@ fn render_sidebar(app: &mut App) -> Vec<Line<'static>> {
 }
 
 fn render_repository_panels(app: &mut App, visible_height: usize) {
-    app.branch_panel_rows(
+    app.repository_panel_rows(
+        RepositoryPane::Branches,
         Rect::new(0, 4, 40, 4),
         38,
         visible_height,
         Theme::github_dark(),
     );
-    app.commit_panel_rows(
+    app.repository_panel_rows(
+        RepositoryPane::Commits,
         Rect::new(0, 9, 40, 4),
         38,
         visible_height,
         Theme::github_dark(),
     );
+}
+
+fn assert_repository_copy(app: &App, pane: RepositoryPane, expected: &str) {
+    let copy = app
+        .repository_panels
+        .copy(pane)
+        .expect("repository selection should be copyable");
+    assert_eq!(copy.into_parts().0, expected);
 }
 
 fn pane_text(pane: &DiffPaneRows) -> String {

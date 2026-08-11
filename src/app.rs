@@ -25,7 +25,7 @@ use crate::rows;
 use crate::scroll_text::VerticalDirection;
 use crate::selection::TextSelection;
 use crate::theme::{Theme, ThemeName};
-use crate::viewport::{DiffScrollbar, RenderedViewport};
+use crate::viewport::DiffScrollbar;
 
 mod commit_details_pane;
 mod diff_frame;
@@ -34,17 +34,20 @@ mod files_panel;
 mod focused_review_target;
 mod keys;
 mod overlay;
+mod repository_panels;
 mod search;
 mod selected_diff;
 
 pub(crate) use keys::accepts_text_input;
 pub(crate) use overlay::AiPickerField;
+pub(crate) use repository_panels::RepositoryPane;
 
 use commit_details_pane::CommitDetailsPane;
 use files_panel::{FilesPanel, FilesPanelRender, FilesPanelTarget};
 use focused_review_target::{FocusedCopyTarget, FocusedMutationTarget, FocusedReviewTarget};
 use keys::is_ctrl_c;
 use overlay::{AskAiPromptState, DiscardConfirmation, DiscardTarget, Overlay};
+use repository_panels::{RepositoryPanelRender, RepositoryPanelTarget, RepositoryPanels};
 use selected_diff::SelectedDiffPane;
 
 const MOUSE_WHEEL_STEP: usize = 3;
@@ -58,11 +61,29 @@ pub(crate) enum FocusPane {
     Diff,
 }
 
+impl FocusPane {
+    fn repository_pane(self) -> Option<RepositoryPane> {
+        match self {
+            Self::Branches => Some(RepositoryPane::Branches),
+            Self::Commits => Some(RepositoryPane::Commits),
+            Self::Sidebar | Self::Diff => None,
+        }
+    }
+}
+
+impl RepositoryPane {
+    pub(crate) fn focus(self) -> FocusPane {
+        match self {
+            Self::Branches => FocusPane::Branches,
+            Self::Commits => FocusPane::Commits,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingLeftClick {
     Sidebar { target: FilesPanelTarget },
-    Branch { index: usize },
-    Commit { index: usize },
+    Repository { target: RepositoryPanelTarget },
     Diff { hunk_index: Option<usize> },
 }
 
@@ -220,7 +241,7 @@ pub(crate) struct App {
     /// Current diff data being reviewed.
     changeset: Changeset,
     /// Read-only local branches and recent commits shown below Files.
-    repository_overview: RepositoryOverview,
+    repository_panels: RepositoryPanels,
     /// Last live reload/watch error, rendered above the diff when present.
     live_error: Option<String>,
     /// Last successful background/status event, rendered above the diff.
@@ -248,14 +269,6 @@ pub(crate) struct App {
     ai_settings: AiSettings,
     /// Deferred runtime effects requested by application behavior.
     effects: VecDeque<AppEffect>,
-    /// Active local branch and scroll offset in the Branches panel.
-    selected_branch_index: usize,
-    branch_scroll: usize,
-    /// Active recent commit and scroll offset in the Commits panel.
-    selected_commit_index: usize,
-    commit_scroll: usize,
-    /// Rendered viewport geometry and row mapping.
-    viewport: RenderedViewport,
     /// Visible text rows and active drag-to-copy selection.
     text_selection: TextSelection,
     /// Deferred plain click target, cancelled if the press becomes a drag.
@@ -282,10 +295,11 @@ impl App {
         } = review;
         let selected_diff = SelectedDiffPane::new(&changeset);
         let files_panel = FilesPanel::new(&changeset.files);
+        let repository_panels = RepositoryPanels::new(repository_overview);
         Self {
             source,
             changeset,
-            repository_overview,
+            repository_panels,
             live_error: None,
             live_notice: None,
             files_panel,
@@ -299,18 +313,13 @@ impl App {
             theme: config.theme,
             ai_settings: config.ai,
             effects: VecDeque::new(),
-            selected_branch_index: 0,
-            branch_scroll: 0,
-            selected_commit_index: 0,
-            commit_scroll: 0,
-            viewport: RenderedViewport::new(),
             text_selection: TextSelection::default(),
             pending_left_click: None,
         }
     }
 
     pub(crate) fn begin_render_frame(&mut self) {
-        self.viewport.begin_frame();
+        self.repository_panels.invalidate_frame();
         self.files_panel.invalidate_frame();
         self.selected_diff.invalidate_frame();
         self.commit_details.invalidate_frame();
@@ -359,72 +368,25 @@ impl App {
         )
     }
 
-    pub(crate) fn branch_panel_rows(
+    pub(crate) fn repository_panel_rows(
         &mut self,
+        pane: RepositoryPane,
         area: Rect,
         content_width: usize,
         visible_height: usize,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let branch_count = self.repository_overview.branches.len();
-        let visible_rows = visible_list_rows(
-            branch_count,
-            self.selected_branch_index,
-            self.branch_scroll,
-            visible_height,
-            self.focus == FocusPane::Branches,
-            |selected_index| {
-                rows::branch_lines(
-                    &self.repository_overview.branches,
-                    selected_index,
-                    content_width,
-                    theme,
-                )
-            },
-        );
-        self.selected_branch_index = visible_rows.selected_index;
-        self.branch_scroll = visible_rows.scroll;
-        self.viewport
-            .begin_branches(area, self.branch_scroll, visible_rows.mapped_row_count);
-        self.text_selection.decorate_visible_lines(
-            pane_text_area(area, content_width, visible_height),
-            visible_rows.lines,
-            0,
+        let lines = self.repository_panels.render(RepositoryPanelRender {
+            pane,
+            area,
+            content_width,
             visible_height,
             theme,
-        )
-    }
-
-    pub(crate) fn commit_panel_rows(
-        &mut self,
-        area: Rect,
-        content_width: usize,
-        visible_height: usize,
-        theme: Theme,
-    ) -> Vec<Line<'static>> {
-        let commit_count = self.repository_overview.commits.len();
-        let visible_rows = visible_list_rows(
-            commit_count,
-            self.selected_commit_index,
-            self.commit_scroll,
-            visible_height,
-            self.focus == FocusPane::Commits,
-            |selected_index| {
-                rows::commit_lines(
-                    &self.repository_overview.commits,
-                    selected_index,
-                    content_width,
-                    theme,
-                )
-            },
-        );
-        self.selected_commit_index = visible_rows.selected_index;
-        self.commit_scroll = visible_rows.scroll;
-        self.viewport
-            .begin_commits(area, self.commit_scroll, visible_rows.mapped_row_count);
+            focused: self.focus == pane.focus(),
+        });
         self.text_selection.decorate_visible_lines(
             pane_text_area(area, content_width, visible_height),
-            visible_rows.lines,
+            lines,
             0,
             visible_height,
             theme,
@@ -526,11 +488,9 @@ impl App {
     }
 
     fn repository_copy_keybind_hint(&self) -> Option<&'static str> {
-        match self.focus {
-            FocusPane::Branches => Some("copy branch"),
-            FocusPane::Commits => Some("copy commit"),
-            FocusPane::Sidebar | FocusPane::Diff => None,
-        }
+        self.focus
+            .repository_pane()
+            .map(RepositoryPane::copy_keybind_hint)
     }
 
     pub(crate) fn live_watch_root(&self) -> Result<Option<PathBuf>> {
@@ -661,10 +621,9 @@ impl App {
 
     fn show_selected_commit(&mut self) {
         let Some(revision) = self
-            .repository_overview
-            .commits
-            .get(self.selected_commit_index)
-            .map(|commit| commit.short_id.clone())
+            .repository_panels
+            .selected_commit_revision()
+            .map(str::to_owned)
         else {
             self.commit_details.activate_empty();
             self.clear_effects(|effect| matches!(effect, AppEffect::LoadCommitDetails { .. }));
@@ -775,39 +734,7 @@ impl App {
 
     fn apply_repository_overview(&mut self, repository_overview: RepositoryOverview) {
         let commit_details_active = self.commit_details.is_active();
-        let selected_branch = self
-            .repository_overview
-            .branches
-            .get(self.selected_branch_index)
-            .map(|branch| branch.name.as_str());
-        let selected_commit = self
-            .repository_overview
-            .commits
-            .get(self.selected_commit_index)
-            .map(|commit| commit.short_id.as_str());
-        self.selected_branch_index = selected_branch
-            .and_then(|name| {
-                repository_overview
-                    .branches
-                    .iter()
-                    .position(|branch| branch.name == name)
-            })
-            .unwrap_or_else(|| {
-                repository_overview
-                    .branches
-                    .iter()
-                    .position(|branch| branch.current)
-                    .unwrap_or(0)
-            });
-        self.selected_commit_index = selected_commit
-            .and_then(|short_id| {
-                repository_overview
-                    .commits
-                    .iter()
-                    .position(|commit| commit.short_id == short_id)
-            })
-            .unwrap_or(0);
-        self.repository_overview = repository_overview;
+        self.repository_panels.replace(repository_overview);
         if commit_details_active {
             self.show_selected_commit();
         }
@@ -1043,13 +970,11 @@ impl App {
                     self.sync_selected_file();
                 }
             }
-            PendingLeftClick::Branch { index } => {
-                self.set_focus(FocusPane::Branches);
-                self.select_branch(index);
-            }
-            PendingLeftClick::Commit { index } => {
-                self.set_focus(FocusPane::Commits);
-                self.select_commit(index);
+            PendingLeftClick::Repository { target } => {
+                let pane = target.pane();
+                self.set_focus(pane.focus());
+                self.repository_panels.select(target);
+                self.refresh_repository_selection(pane);
             }
             PendingLeftClick::Diff { hunk_index } => {
                 self.set_focus(FocusPane::Diff);
@@ -1081,12 +1006,8 @@ impl App {
             return Some(PendingLeftClick::Sidebar { target });
         }
 
-        if let Some(index) = self.viewport.branch_index_at(column, row) {
-            return Some(PendingLeftClick::Branch { index });
-        }
-
-        if let Some(index) = self.viewport.commit_index_at(column, row) {
-            return Some(PendingLeftClick::Commit { index });
+        if let Some(target) = self.repository_panels.target_at(column, row) {
+            return Some(PendingLeftClick::Repository { target });
         }
 
         if self.is_diff_at(column, row) {
@@ -1125,12 +1046,8 @@ impl App {
             return Some(FocusPane::Sidebar);
         }
 
-        if self.viewport.is_branches_at(column, row) {
-            return Some(FocusPane::Branches);
-        }
-
-        if self.viewport.is_commits_at(column, row) {
-            return Some(FocusPane::Commits);
+        if let Some(pane) = self.repository_panels.pane_at(column, row) {
+            return Some(pane.focus());
         }
 
         self.is_diff_at(column, row).then_some(FocusPane::Diff)
@@ -1333,19 +1250,10 @@ impl App {
     }
 
     fn focused_repository_copy(&self) -> Option<(String, &'static str)> {
-        match self.focus {
-            FocusPane::Branches => self
-                .repository_overview
-                .branches
-                .get(self.selected_branch_index)
-                .map(|branch| (branch.name.clone(), "copied selected branch name")),
-            FocusPane::Commits => self
-                .repository_overview
-                .commits
-                .get(self.selected_commit_index)
-                .map(|commit| (commit.short_id.clone(), "copied selected commit id")),
-            FocusPane::Sidebar | FocusPane::Diff => None,
-        }
+        self.focus
+            .repository_pane()
+            .and_then(|pane| self.repository_panels.copy(pane))
+            .map(|copy| copy.into_parts())
     }
 
     fn queue_selected_file_diff_copy(&mut self) {
@@ -1413,52 +1321,34 @@ impl App {
     fn move_focused_pane_by(&mut self, direction: VerticalDirection, amount: usize) {
         match self.focus {
             FocusPane::Sidebar => self.move_sidebar_cursor_by(direction, amount),
-            FocusPane::Branches => self.move_branch_cursor_by(direction, amount),
-            FocusPane::Commits => self.move_commit_cursor_by(direction, amount),
+            FocusPane::Branches => {
+                self.move_repository_selection_by(RepositoryPane::Branches, direction, amount)
+            }
+            FocusPane::Commits => {
+                self.move_repository_selection_by(RepositoryPane::Commits, direction, amount)
+            }
             FocusPane::Diff => self.scroll_diff_by(direction, amount),
         }
     }
 
-    fn move_branch_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let branch_count = self.repository_overview.branches.len();
-        if branch_count == 0 {
-            return;
-        }
-
-        self.selected_branch_index = direction.shift_clamped(
-            self.selected_branch_index.min(branch_count - 1),
-            amount,
-            branch_count - 1,
-        );
-    }
-
-    fn move_commit_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
-        let commit_count = self.repository_overview.commits.len();
-        if commit_count == 0 {
-            return;
-        }
-
-        self.selected_commit_index = direction.shift_clamped(
-            self.selected_commit_index.min(commit_count - 1),
-            amount,
-            commit_count - 1,
-        );
-        self.show_selected_commit();
-    }
-
-    fn select_branch(&mut self, index: usize) {
-        let branch_count = self.repository_overview.branches.len();
-        if branch_count > 0 {
-            self.selected_branch_index = index.min(branch_count - 1);
+    fn move_repository_selection_by(
+        &mut self,
+        pane: RepositoryPane,
+        direction: VerticalDirection,
+        amount: usize,
+    ) {
+        if self
+            .repository_panels
+            .move_selection(pane, direction, amount)
+        {
+            self.refresh_repository_selection(pane);
         }
     }
 
-    fn select_commit(&mut self, index: usize) {
-        let commit_count = self.repository_overview.commits.len();
-        if commit_count > 0 {
-            self.selected_commit_index = index.min(commit_count - 1);
+    fn refresh_repository_selection(&mut self, pane: RepositoryPane) {
+        if pane == RepositoryPane::Commits {
+            self.show_selected_commit();
         }
-        self.show_selected_commit();
     }
 
     fn move_sidebar_cursor_by(&mut self, direction: VerticalDirection, amount: usize) {
@@ -1809,69 +1699,6 @@ impl App {
 
 fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
-}
-
-fn clamped_list_index(index: usize, item_count: usize) -> usize {
-    index.min(item_count.saturating_sub(1))
-}
-
-struct VisibleListRows {
-    selected_index: usize,
-    scroll: usize,
-    lines: Vec<Line<'static>>,
-    mapped_row_count: usize,
-}
-
-fn visible_list_rows(
-    item_count: usize,
-    selected_index: usize,
-    scroll: usize,
-    visible_height: usize,
-    focused: bool,
-    build_rows: impl FnOnce(Option<usize>) -> Vec<Line<'static>>,
-) -> VisibleListRows {
-    let selected_index = clamped_list_index(selected_index, item_count);
-    let scroll = visible_list_scroll(item_count, selected_index, scroll, visible_height);
-    let selected_for_render = (focused && item_count > 0).then_some(selected_index);
-    let lines = build_rows(selected_for_render)
-        .into_iter()
-        .skip(scroll)
-        .take(visible_height)
-        .collect::<Vec<_>>();
-    let mapped_row_count = lines.len().min(item_count.saturating_sub(scroll));
-
-    VisibleListRows {
-        selected_index,
-        scroll,
-        lines,
-        mapped_row_count,
-    }
-}
-
-fn visible_list_scroll(
-    item_count: usize,
-    selected_index: usize,
-    scroll: usize,
-    visible_height: usize,
-) -> usize {
-    if item_count == 0 {
-        return 0;
-    }
-
-    let visible_height = visible_height.max(1);
-    let selected_index = selected_index.min(item_count - 1);
-    let max_scroll = item_count.saturating_sub(visible_height);
-    if selected_index < scroll {
-        return selected_index.min(max_scroll);
-    }
-    if selected_index >= scroll.saturating_add(visible_height) {
-        return selected_index
-            .saturating_add(1)
-            .saturating_sub(visible_height)
-            .min(max_scroll);
-    }
-
-    scroll.min(max_scroll)
 }
 
 fn pane_text_area(area: Rect, content_width: usize, visible_height: usize) -> Rect {

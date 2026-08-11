@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::app::{App, FocusPane};
+use crate::app::{App, FocusPane, RepositoryPane};
 use crate::keybind::{BuiltinAction, KeybindMap};
 use crate::theme::Theme;
 use crate::viewport::DiffScrollbar;
@@ -28,8 +28,6 @@ struct PaneContentSize {
     width: usize,
     height: usize,
 }
-
-type SidebarRows = fn(&mut App, Rect, usize, usize, Theme) -> Vec<Line<'static>>;
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme();
@@ -81,15 +79,21 @@ fn render_sidebar_stack(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         ])
         .split(area);
 
-    let panes: [(&str, FocusPane, SidebarRows); 3] = [
-        (" Files ", FocusPane::Sidebar, App::sidebar_rows),
-        (" Branches ", FocusPane::Branches, App::branch_panel_rows),
-        (" Commits ", FocusPane::Commits, App::commit_panel_rows),
-    ];
-    for (pane_area, (title, focus, rows)) in chunks.iter().copied().zip(panes) {
+    let files_area = chunks[0];
+    let content = pane_content_size(files_area);
+    let lines = app.sidebar_rows(files_area, content.width, content.height, theme);
+    let block = pane_block(" Files ", app.focus(), FocusPane::Sidebar, theme);
+    frame.render_widget(Paragraph::new(lines).block(block), files_area);
+
+    for (pane_area, pane) in chunks[1..]
+        .iter()
+        .copied()
+        .zip([RepositoryPane::Branches, RepositoryPane::Commits])
+    {
         let content = pane_content_size(pane_area);
-        let lines = rows(app, pane_area, content.width, content.height, theme);
-        let block = pane_block(title, app.focus(), focus, theme);
+        let lines =
+            app.repository_panel_rows(pane, pane_area, content.width, content.height, theme);
+        let block = pane_block(pane.title(), app.focus(), pane.focus(), theme);
         frame.render_widget(Paragraph::new(lines).block(block), pane_area);
     }
 }
