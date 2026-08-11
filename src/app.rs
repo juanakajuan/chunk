@@ -30,13 +30,11 @@ use crate::viewport::DiffScrollbar;
 
 mod commit_details_pane;
 mod diff_frame;
-mod diff_pane;
 mod files_panel;
 mod focused_review_target;
 mod keys;
 mod overlay;
 mod repository_panels;
-mod search;
 mod selected_diff;
 
 pub(crate) use keys::accepts_text_input;
@@ -816,8 +814,9 @@ impl App {
             return Ok(true);
         }
 
-        if self.search_prompt_open() {
-            self.handle_search_prompt_key(key);
+        if self.selected_diff.search_prompt_open() {
+            self.selected_diff.handle_search_prompt_key(key);
+            self.ensure_scroll_bounds();
             return Ok(true);
         }
 
@@ -834,7 +833,7 @@ impl App {
             KeyCode::BackTab => self.cycle_focus(VerticalDirection::Up),
             KeyCode::Left if self.files_panel_visible => self.set_focus(FocusPane::Sidebar),
             KeyCode::Right | KeyCode::Enter => self.set_focus(FocusPane::Diff),
-            KeyCode::Esc => self.clear_search_query(),
+            KeyCode::Esc => self.selected_diff.clear_search_query(),
 
             KeyCode::PageDown => self.scroll_diff_page(VerticalDirection::Down),
             KeyCode::PageUp => self.scroll_diff_page(VerticalDirection::Up),
@@ -850,13 +849,30 @@ impl App {
                 Some(BuiltinAction::Quit) => return Ok(false),
                 Some(BuiltinAction::Help) => self.toggle_help_overlay(),
                 Some(BuiltinAction::ToggleFiles) => self.toggle_files_panel(),
-                Some(BuiltinAction::Search) => self.open_search_prompt(),
+                Some(BuiltinAction::Search) => {
+                    self.focus = FocusPane::Diff;
+                    self.selected_diff.open_search_prompt();
+                }
                 Some(BuiltinAction::MoveDown) => {
                     self.move_focused_pane_by(VerticalDirection::Down, 1)
                 }
                 Some(BuiltinAction::MoveUp) => self.move_focused_pane_by(VerticalDirection::Up, 1),
-                Some(BuiltinAction::NextMatch) => self.jump_by(VerticalDirection::Down),
-                Some(BuiltinAction::PrevMatch) => self.jump_by(VerticalDirection::Up),
+                Some(BuiltinAction::NextMatch) => {
+                    let selected_file_index = self.selected_file_index();
+                    self.selected_diff.jump_by(
+                        VerticalDirection::Down,
+                        selected_file_index,
+                        self.changeset.files.get(selected_file_index),
+                    );
+                }
+                Some(BuiltinAction::PrevMatch) => {
+                    let selected_file_index = self.selected_file_index();
+                    self.selected_diff.jump_by(
+                        VerticalDirection::Up,
+                        selected_file_index,
+                        self.changeset.files.get(selected_file_index),
+                    );
+                }
                 Some(BuiltinAction::Top) => self.scroll_diff_to_top(),
                 Some(BuiltinAction::Bottom) => self.scroll_diff_to_bottom(),
                 Some(BuiltinAction::ToggleStaging) => self.toggle_selected_staging(),
@@ -1152,7 +1168,7 @@ impl App {
     }
 
     fn global_ai_action_for_key(&self, key: KeyEvent) -> Option<GlobalAiAction> {
-        if self.overlay.is_some() || self.search_prompt_open() {
+        if self.overlay.is_some() || self.selected_diff.search_prompt_open() {
             return None;
         }
 
