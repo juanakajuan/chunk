@@ -41,7 +41,7 @@ pub(crate) fn load_worktree_diff() -> Result<Changeset> {
     let root = worktree_root()?;
     let untracked_paths = untracked_paths(&root)?;
     let patch = load_worktree_patch(&root, &untracked_paths)?;
-    let mut changeset = parse_unified_diff(&patch);
+    let mut changeset = parse_unified_diff(&patch, FileStage::Unstaged);
     annotate_stage_states(&root, &mut changeset, &untracked_paths)?;
     annotate_hunk_stage_states(&root, &mut changeset, &untracked_paths)?;
     changeset.title = worktree_title();
@@ -158,7 +158,7 @@ fn load_commit_details_in(root: &Path, revision: &str) -> Result<CommitDetails> 
         ]),
         "git commit diff failed",
     )?;
-    let mut changeset = parse_unified_diff(&stdout_text(&patch));
+    let mut changeset = parse_unified_diff(&stdout_text(&patch), FileStage::Unstaged);
     changeset.title = format!("Commit {}", &id[..id.len().min(12)]);
     changeset.source_label = format!("git show {id}");
 
@@ -209,7 +209,7 @@ pub(crate) fn load_pr_diff(base: Option<&str>) -> Result<LoadedPrDiff> {
 
 pub(crate) fn load_ref_diff(old_ref: &str, new_ref: &str) -> Result<Changeset> {
     let patch = git_diff_patch(&[], &[old_ref, new_ref], "git diff failed")?;
-    Ok(parse_unified_diff(&patch))
+    Ok(parse_unified_diff(&patch, FileStage::Committed))
 }
 
 pub(crate) fn load_worktree_source_snapshots(file: &mut DiffFile) {
@@ -272,6 +272,10 @@ pub(crate) fn toggle_staging_for_hunk(file: &DiffFile, hunk_index: usize) -> Res
     })?;
 
     match hunk.stage {
+        FileStage::Committed => Err(eyre!(
+            "cannot stage a committed hunk in {}",
+            file.display_path()
+        )),
         FileStage::Unstaged => apply_matching_hunks_to_index(file, hunk, HunkPatchSource::Unstaged),
         FileStage::Staged | FileStage::Mixed => {
             apply_matching_hunks_to_index(file, hunk, HunkPatchSource::Staged)
@@ -414,14 +418,14 @@ fn load_untracked_patches(root: &Path, untracked_paths: &[String]) -> Result<Str
 
 fn load_staged_diff(root: &Path) -> Result<Changeset> {
     let patch = git_diff_patch_in(root, &["--cached"], &["HEAD"], "git diff --cached failed")?;
-    Ok(parse_unified_diff(&patch))
+    Ok(parse_unified_diff(&patch, FileStage::Unstaged))
 }
 
 fn load_unstaged_diff(root: &Path, untracked_paths: &[String]) -> Result<Changeset> {
-    Ok(parse_unified_diff(&load_unstaged_patch(
-        root,
-        untracked_paths,
-    )?))
+    Ok(parse_unified_diff(
+        &load_unstaged_patch(root, untracked_paths)?,
+        FileStage::Unstaged,
+    ))
 }
 
 fn load_unstaged_patch(root: &Path, untracked_paths: &[String]) -> Result<String> {
@@ -1069,7 +1073,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::model::{DiffHunk, FileStatus};
+    use crate::model::{DiffHunk, FileStatus, SourceSnapshot};
 
     static GIT_CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1197,6 +1201,40 @@ mod tests {
         let mut reader = Cursor::new(source);
 
         assert!(read_source_prefix(&mut reader, 1).is_err());
+    }
+
+    #[test]
+    fn toggle_staging_for_hunk_rejects_committed_hunk() {
+        let _lock = GIT_CWD_LOCK.lock().expect("git cwd lock");
+        let root = temp_root();
+        let error = {
+            let _cwd = CurrentDirGuard::enter(&root);
+            let file = DiffFile {
+                id: "0".to_string(),
+                old_path: "sample.txt".to_string(),
+                path: "sample.txt".to_string(),
+                old_source: SourceSnapshot::Unloaded,
+                new_source: SourceSnapshot::Unloaded,
+                status: FileStatus::Added,
+                stage: FileStage::Committed,
+                additions: 1,
+                deletions: 0,
+                binary: false,
+                hunks: vec![DiffHunk {
+                    header: "@@ -0,0 +1 @@".to_string(),
+                    old_start: 0,
+                    old_lines: 0,
+                    new_start: 1,
+                    new_lines: 1,
+                    stage: FileStage::Committed,
+                    lines: Vec::new(),
+                }],
+            };
+            toggle_staging_for_hunk(&file, 0).unwrap_err()
+        };
+        fs::remove_dir_all(&root).unwrap();
+
+        assert!(error.to_string().contains("committed"), "{error}");
     }
 
     #[test]

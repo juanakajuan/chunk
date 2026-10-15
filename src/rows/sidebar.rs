@@ -108,15 +108,15 @@ fn file_label_layout(
 }
 
 fn sidebar_file_name_style(file: &DiffFile, row_background: Color, theme: Theme) -> Style {
-    let (color, is_bold) = match (file.stage, file.status) {
-        (FileStage::Staged, _) => (theme.added, true),
-        (FileStage::Mixed, _) => (theme.accent, true),
-        (FileStage::Unstaged, FileStatus::Added) => (theme.added, false),
-        (FileStage::Unstaged, FileStatus::Deleted) => (theme.removed, false),
-        (FileStage::Unstaged, FileStatus::Renamed | FileStatus::Copied) => {
-            (theme.file_renamed, false)
-        }
-        (FileStage::Unstaged, FileStatus::Modified) => (theme.text, false),
+    let (color, is_bold) = match file.stage {
+        FileStage::Staged => (theme.added, true),
+        FileStage::Mixed => (theme.accent, true),
+        FileStage::Unstaged | FileStage::Committed => match file.status {
+            FileStatus::Added => (theme.added, false),
+            FileStatus::Deleted => (theme.removed, false),
+            FileStatus::Renamed | FileStatus::Copied => (theme.file_renamed, false),
+            FileStatus::Modified => (theme.text, false),
+        },
     };
 
     let style = color_style(color, row_background);
@@ -142,7 +142,7 @@ pub(crate) fn render_sidebar_folder(
     let folder_name_style = match stage {
         FileStage::Staged => color_style(theme.added, row_background).add_modifier(Modifier::BOLD),
         FileStage::Mixed => color_style(theme.accent, row_background).add_modifier(Modifier::BOLD),
-        FileStage::Unstaged => label_style,
+        FileStage::Unstaged | FileStage::Committed => label_style,
     };
     let muted_style = color_style(theme.muted, row_background);
     let folder_icon = if expanded { "\u{e5fe}" } else { "\u{e5ff}" };

@@ -13,6 +13,7 @@ struct FileBuilder {
     old_path: String,
     path: String,
     status: FileStatus,
+    stage: FileStage,
     additions: usize,
     deletions: usize,
     hunks: Vec<DiffHunk>,
@@ -21,11 +22,12 @@ struct FileBuilder {
 }
 
 impl FileBuilder {
-    fn new(old_path: String, path: String) -> Self {
+    fn new(old_path: String, path: String, stage: FileStage) -> Self {
         Self {
             old_path,
             path,
             status: FileStatus::Modified,
+            stage,
             additions: 0,
             deletions: 0,
             hunks: Vec::new(),
@@ -36,7 +38,7 @@ impl FileBuilder {
 
     fn finish_hunk(&mut self) {
         if let Some(hunk) = self.current_hunk.take() {
-            self.hunks.push(hunk.finish());
+            self.hunks.push(hunk.finish(self.stage));
         }
     }
 
@@ -82,7 +84,7 @@ impl FileBuilder {
             old_source: SourceSnapshot::Unloaded,
             new_source: SourceSnapshot::Unloaded,
             status: self.status,
-            stage: FileStage::Unstaged,
+            stage: self.stage,
             additions: self.additions,
             deletions: self.deletions,
             hunks: self.hunks,
@@ -136,14 +138,14 @@ impl HunkBuilder {
         self.next_new_line += u32::from(new_line.is_some());
     }
 
-    fn finish(self) -> DiffHunk {
+    fn finish(self, stage: FileStage) -> DiffHunk {
         DiffHunk {
             header: self.header,
             old_start: self.old_start,
             old_lines: self.old_lines,
             new_start: self.new_start,
             new_lines: self.new_lines,
-            stage: FileStage::Unstaged,
+            stage,
             lines: self.lines,
         }
     }
@@ -169,7 +171,7 @@ struct ParsedHunkLine<'a> {
     content: &'a str,
 }
 
-pub fn parse_unified_diff(input: &str) -> Changeset {
+pub fn parse_unified_diff(input: &str, stage: FileStage) -> Changeset {
     let mut files = Vec::new();
     let mut current_file: Option<FileBuilder> = None;
 
@@ -177,7 +179,7 @@ pub fn parse_unified_diff(input: &str) -> Changeset {
         match parse_diff_git_line(line) {
             Some((old_path, path)) => {
                 finish_current_file(&mut files, &mut current_file);
-                current_file = Some(FileBuilder::new(old_path, path));
+                current_file = Some(FileBuilder::new(old_path, path, stage));
             }
             None => {
                 if let Some(file) = current_file.as_mut() {
@@ -663,6 +665,7 @@ mod tests {
              -    println!(\"old\");\n\
              +    println!(\"new\");\n\
               }\n",
+            FileStage::Unstaged,
         );
 
         assert_eq!(changeset.files.len(), 1);
@@ -688,6 +691,7 @@ mod tests {
              @@ -1 +1 @@\n\
              -old\n\
              +new\n",
+            FileStage::Unstaged,
         );
 
         let file = &changeset.files[0];
@@ -702,6 +706,7 @@ mod tests {
             "diff --git a/image data.bin b/image data.bin\n\
              index 8352675..eaf36c1 100644\n\
              Binary files a/image data.bin and b/image data.bin differ\n",
+            FileStage::Unstaged,
         );
 
         let file = &changeset.files[0];
@@ -717,6 +722,7 @@ mod tests {
              new file mode 100644\n\
              index 0000000..bdc955b\n\
              Binary files /dev/null and b/foo b/bar.bin differ\n",
+            FileStage::Unstaged,
         );
 
         let file = &changeset.files[0];
@@ -735,6 +741,7 @@ mod tests {
              @@ -1 +1 @@\n\
              -old\n\
              +new\n",
+            FileStage::Unstaged,
         );
 
         let file = &changeset.files[0];
@@ -751,6 +758,7 @@ mod tests {
              similarity index 100%\n\
              rename from \"tab\\told.txt\"\n\
              rename to \"tab\\tnew.txt\"\n",
+            FileStage::Unstaged,
         );
 
         let file = &changeset.files[0];
@@ -845,7 +853,7 @@ mod tests {
         let selected = hunk("@@ -1,3 +1,3 @@", 1, 3, 1, 3, Vec::new());
 
         let patch = overlapping_hunk_patch(&source, &selected).expect("overlap");
-        let parsed = parse_unified_diff(&patch);
+        let parsed = parse_unified_diff(&patch, FileStage::Unstaged);
 
         assert_eq!(parsed.files.len(), 1);
         let parsed_file = &parsed.files[0];
@@ -886,7 +894,7 @@ mod tests {
         assert!(patch.contains("--- \"a/tab\\tfile.txt\""));
         assert!(patch.contains("+++ \"b/tab\\tfile.txt\""));
 
-        let parsed = parse_unified_diff(&patch);
+        let parsed = parse_unified_diff(&patch, FileStage::Unstaged);
         assert_eq!(parsed.files[0].path, "tab\tfile.txt");
     }
 
@@ -933,7 +941,7 @@ mod tests {
         assert!(patch.contains("new file mode 100644"));
         assert!(patch.contains("--- /dev/null"));
 
-        let parsed = parse_unified_diff(&patch);
+        let parsed = parse_unified_diff(&patch, FileStage::Unstaged);
         assert_eq!(parsed.files[0].status, FileStatus::Added);
         assert_eq!(parsed.files[0].path, "new.rs");
     }
