@@ -20,6 +20,7 @@ Run inside a Git worktree:
 cargo run -- diff       # live worktree review; also the default command
 cargo run -- pr [base]  # branch review from merge-base(base, HEAD) to HEAD
 cargo run -- diff --json
+cargo run -- pr [base] --json
 ```
 
 `diff` reviews staged, unstaged, mixed, and untracked changes against `HEAD` and
@@ -28,10 +29,13 @@ live-refreshes as the worktree changes.
 `pr` is read-only: no live refresh, staging, or discard. Without a base ref it
 tries `origin/HEAD`, then `main`, then `master`.
 
-`diff --json` prints one worktree snapshot for external frontends instead of
-starting the terminal UI. The output includes `title`, `source_label`, and
-`files`; each file includes paths, status, stage, line counts, binary state, and
-hunks with stable old/new ranges and diff lines.
+`diff --json` and `pr [base] --json` both print one snapshot and do not start
+the terminal UI. They use the same fields: `title`, `source_label`, and
+`files`. Each file includes paths, status, stage, line counts, binary state, and
+hunks with stable old/new ranges and diff lines. `pr [base] --json` covers
+committed changes from merge-base(base, HEAD) to HEAD. Every file and hunk
+uses `"stage": "committed"`. An omitted base uses `origin/HEAD`, then `main`,
+then `master`.
 
 ## Controls
 
