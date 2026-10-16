@@ -158,7 +158,7 @@ fn load_commit_details_in(root: &Path, revision: &str) -> Result<CommitDetails> 
         ]),
         "git commit diff failed",
     )?;
-    let mut changeset = parse_unified_diff(&stdout_text(&patch), FileStage::Unstaged);
+    let mut changeset = parse_unified_diff(&stdout_text(&patch), FileStage::Committed);
     changeset.title = format!("Commit {}", &id[..id.len().min(12)]);
     changeset.source_label = format!("git show {id}");
 
@@ -1139,8 +1139,15 @@ mod tests {
         assert_eq!(details.message, "Subject\n\nBody line");
         assert_eq!(details.changeset.files.len(), 1);
         assert_eq!(details.changeset.files[0].display_path(), "sample.txt");
+        assert_eq!(details.changeset.files[0].stage, FileStage::Committed);
         assert_eq!(details.changeset.files[0].additions, 2);
         assert_eq!(details.changeset.files[0].deletions, 0);
+        assert!(
+            details.changeset.files[0]
+                .hunks
+                .iter()
+                .all(|hunk| hunk.stage == FileStage::Committed)
+        );
         assert!(
             details.changeset.files[0]
                 .hunks
