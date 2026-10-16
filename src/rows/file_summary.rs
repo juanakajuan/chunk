@@ -232,6 +232,10 @@ pub(super) fn stage_display(stage: FileStage, background: Color, theme: Theme) -
             suffix: "  \u{f056} mixed",
             style: color_style(theme.accent, background).add_modifier(Modifier::BOLD),
         },
+        FileStage::Committed => StageDisplay {
+            suffix: "  \u{f10c} committed",
+            style: color_style(theme.muted, background),
+        },
     }
 }
 

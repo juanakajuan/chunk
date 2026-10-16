@@ -1,4 +1,4 @@
-//! JSON contract for external worktree diff frontends.
+//! JSON contract for external review frontends.
 
 use std::io::{self, Write};
 
@@ -126,6 +126,7 @@ fn file_stage(stage: FileStage) -> &'static str {
         FileStage::Unstaged => "unstaged",
         FileStage::Staged => "staged",
         FileStage::Mixed => "mixed",
+        FileStage::Committed => "committed",
     }
 }
 

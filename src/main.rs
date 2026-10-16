@@ -1,7 +1,4 @@
 //! Command-line entry point for `chunk`.
-//!
-//! This module keeps startup small: parse CLI arguments, load the requested
-//! diff source, then hand the resulting changeset to the terminal app.
 
 mod app;
 mod ask_ai;
@@ -50,6 +47,9 @@ enum Command {
     Pr {
         /// Base branch/ref. Defaults to origin/HEAD, then main, then master.
         base: Option<String>,
+        /// Print a JSON snapshot instead of opening the terminal UI.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -60,7 +60,12 @@ fn main() -> Result<()> {
     let review = match cli.command.unwrap_or(Command::Diff { json: false }) {
         Command::Diff { json: true } => return diff_json::print(&git::load_worktree_diff()?),
         Command::Diff { json: false } => review_source::ReviewSource::load_worktree()?,
-        Command::Pr { base } => review_source::ReviewSource::load_pull_request(base.as_deref())?,
+        Command::Pr { base, json: true } => {
+            return diff_json::print(&git::load_pr_diff(base.as_deref())?.changeset);
+        }
+        Command::Pr { base, json: false } => {
+            review_source::ReviewSource::load_pull_request(base.as_deref())?
+        }
     };
 
     runtime::run(app::App::with_config(review, config::load()?))

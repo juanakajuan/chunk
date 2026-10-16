@@ -183,6 +183,7 @@ pub enum FileStage {
     Unstaged,
     Staged,
     Mixed,
+    Committed,
 }
 
 /// A unified diff hunk.
